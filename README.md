@@ -126,7 +126,7 @@ Full reference in the [Usage & Configuration Guide](Docs/USAGE.MD).
 
 | Document | Description |
 |---|---|
-| [Building](BUILDING.md) | Local prerequisites, build, test, and install workflow |
+| [Building](Docs/BUILDING.md) | Contributor build, test, fixture, and local hook workflow |
 | [Installation](Docs/INSTALLATION.MD) | Homebrew, pre-built binary, build from source |
 | [Usage & Configuration](Docs/USAGE.MD) | CLI options, YAML config, output formats, CI integration |
 | [Mutation Results](Docs/MUTATION-RESULTS.md) | What each result means and when it occurs; schematizable vs incompatible mutants |
