@@ -43,7 +43,7 @@ Use `swift run` so the executable comes from the checkout under test:
 ```bash
 swift run swift-mutation-testing --help
 swift run swift-mutation-testing --version
-swift run swift-mutation-testing Fixtures/CalcLibrary init
+swift run swift-mutation-testing init Fixtures/CalcLibrary
 ```
 
 The `init` command should generate a `.swift-mutation-testing.yml` file for the
