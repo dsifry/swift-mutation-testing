@@ -1,3 +1,4 @@
+import Foundation
 import SwiftParser
 import Testing
 
@@ -98,6 +99,7 @@ struct SchemataGeneratorTests {
 
         #expect(result.contains("case \"swift-mutation-testing_0\""))
         #expect(!Parser.parse(source: result).hasError)
+        #expect(typeCheck(result) == 0)
     }
 
     @Test("Given a file-scope closure mutation, when generated, then the closure contains a parseable schema")
@@ -107,5 +109,28 @@ struct SchemataGeneratorTests {
 
         #expect(result.contains("case \"swift-mutation-testing_0\""))
         #expect(!Parser.parse(source: result).hasError)
+        #expect(typeCheck(result) == 0)
+    }
+
+    private func typeCheck(_ source: String) -> Int32 {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            let input = directory.appendingPathComponent("Generated.swift")
+            try ("let __swiftMutationTestingID = \"\"\n" + source).write(
+                to: input, atomically: true, encoding: .utf8
+            )
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            process.arguments = ["swiftc", "-typecheck", input.path]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus
+        } catch {
+            return -1
+        }
     }
 }

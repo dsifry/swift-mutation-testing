@@ -9,7 +9,10 @@ struct SwiftMutationTestingExecutionPathTests {
     func successfulCacheCommandDispatch() async throws {
         let project = try FileHelpers.makeTemporaryDirectory()
         let root = try FileHelpers.makeTemporaryDirectory()
-        defer { FileHelpers.cleanup(project); FileHelpers.cleanup(root) }
+        defer {
+            FileHelpers.cleanup(project)
+            FileHelpers.cleanup(root)
+        }
         chmod(project.path, 0o700)
         chmod(root.path, 0o700)
         try "scheme: App\ndestination: platform=macOS\nquiet: false\n".write(
@@ -17,8 +20,10 @@ struct SwiftMutationTestingExecutionPathTests {
         )
         let projectFile = project.appendingPathComponent("App.xcodeproj/project.pbxproj")
         let sourceFile = project.appendingPathComponent("Sources/App.swift")
-        try FileManager.default.createDirectory(at: projectFile.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: sourceFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: projectFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: sourceFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         let projectBytes = Data("// project".utf8)
         let sourceBytes = Data("let enabled = true\n".utf8)
         try projectBytes.write(to: projectFile)
@@ -27,26 +32,33 @@ struct SwiftMutationTestingExecutionPathTests {
         chmod(sourceFile.path, 0o644)
         func entry(_ path: String, _ bytes: Data) -> ProjectInputManifest.Entry {
             let digest = ProjectInputManifest.sha256(bytes)
-            return .init(path: path, mode: 0o644, byteSize: bytes.count, sha256: digest,
-                         deterministicMTime: ProjectInputManifest.deterministicMTime(forSHA256: digest))
+            return .init(
+                path: path, mode: 0o644, byteSize: bytes.count, sha256: digest,
+                deterministicMTime: ProjectInputManifest.deterministicMTime(forSHA256: digest))
         }
-        let manifest = ProjectInputManifest(schemaVersion: 1, entries: [
-            entry("App.xcodeproj/project.pbxproj", projectBytes),
-            entry("Sources/App.swift", sourceBytes),
-        ])
+        let manifest = ProjectInputManifest(
+            schemaVersion: 1,
+            entries: [
+                entry("App.xcodeproj/project.pbxproj", projectBytes),
+                entry("Sources/App.swift", sourceBytes),
+            ])
         let manifestURL = project.appendingPathComponent("manifest.json")
         try JSONEncoder().encode(manifest).write(to: manifestURL)
         let identity = String(repeating: "a", count: 64)
         let inventoryURL = project.appendingPathComponent("inventory.json")
         let launcher = DispatchPreparedLauncher()
-        let common = [project.path, "--build-cache-root", root.path, "--cache-compatibility-id", identity,
-                      "--project-input-manifest", manifestURL.path, "--custody-fd", "0",
-                      "--invocation-nonce", "abcdefghijklmnopqrstuv"]
-        #expect(await SwiftMutationTesting.run(args: common + [
-            "--prepare-only", "--test-enumeration-output", project.appendingPathComponent("tests.json").path,
-            "--mutant-inventory-output", inventoryURL.path,
-            "--cache-evidence-output", project.appendingPathComponent("prepare-evidence.json").path,
-        ], launcher: launcher) == .success)
+        let common = [
+            project.path, "--build-cache-root", root.path, "--cache-compatibility-id", identity,
+            "--project-input-manifest", manifestURL.path, "--custody-fd", "0",
+            "--invocation-nonce", "abcdefghijklmnopqrstuv",
+        ]
+        #expect(
+            await SwiftMutationTesting.run(
+                args: common + [
+                    "--prepare-only", "--test-enumeration-output", project.appendingPathComponent("tests.json").path,
+                    "--mutant-inventory-output", inventoryURL.path,
+                    "--cache-evidence-output", project.appendingPathComponent("prepare-evidence.json").path,
+                ], launcher: launcher) == .success)
 
         let state = try PreparedBuildStore(root: root.path, compatibilityID: identity).load()
         let selection = MutantSelectionManifest(
@@ -60,11 +72,13 @@ struct SwiftMutationTestingExecutionPathTests {
         )
         let selectionURL = project.appendingPathComponent("selection.json")
         try JSONEncoder().encode(selection).write(to: selectionURL)
-        #expect(await SwiftMutationTesting.run(args: common + [
-            "--target", "AppTests/Empty", "--mutant-selection-manifest", selectionURL.path,
-            "--output", project.appendingPathComponent("report.json").path,
-            "--cache-evidence-output", project.appendingPathComponent("target-evidence.json").path,
-        ], launcher: launcher) == .success)
+        #expect(
+            await SwiftMutationTesting.run(
+                args: common + [
+                    "--target", "AppTests/Empty", "--no-cache", "--mutant-selection-manifest", selectionURL.path,
+                    "--output", project.appendingPathComponent("report.json").path,
+                    "--cache-evidence-output", project.appendingPathComponent("target-evidence.json").path,
+                ], launcher: launcher) == .success)
     }
 
     @Test("Validated cache commands dispatch through prepare and target coordinators")
@@ -72,7 +86,10 @@ struct SwiftMutationTestingExecutionPathTests {
         for operation in ["prepare", "target"] {
             let project = try FileHelpers.makeTemporaryDirectory()
             let root = try FileHelpers.makeTemporaryDirectory()
-            defer { FileHelpers.cleanup(project); FileHelpers.cleanup(root) }
+            defer {
+                FileHelpers.cleanup(project)
+                FileHelpers.cleanup(root)
+            }
             chmod(project.path, 0o700)
             chmod(root.path, 0o700)
             try "scheme: App\ndestination: platform=macOS\nquiet: true\n".write(
@@ -93,14 +110,19 @@ struct SwiftMutationTestingExecutionPathTests {
                 "--invocation-nonce", "abcdefghijklmnopqrstuv",
             ]
             if operation == "prepare" {
-                arguments += ["--prepare-only", "--test-enumeration-output", project.appendingPathComponent("tests.json").path,
-                              "--mutant-inventory-output", project.appendingPathComponent("inventory.json").path]
+                arguments += [
+                    "--prepare-only", "--test-enumeration-output", project.appendingPathComponent("tests.json").path,
+                    "--mutant-inventory-output", project.appendingPathComponent("inventory.json").path,
+                ]
             } else {
-                arguments += ["--target", "AppTests", "--mutant-selection-manifest",
-                              project.appendingPathComponent("selection.json").path,
-                              "--output", project.appendingPathComponent("report.json").path]
+                arguments += [
+                    "--target", "AppTests", "--no-cache", "--mutant-selection-manifest",
+                    project.appendingPathComponent("selection.json").path,
+                    "--output", project.appendingPathComponent("report.json").path,
+                ]
             }
-            #expect(await SwiftMutationTesting.run(args: arguments, launcher: MockProcessLauncher(exitCode: 1)) == .error)
+            #expect(
+                await SwiftMutationTesting.run(args: arguments, launcher: MockProcessLauncher(exitCode: 1)) == .error)
             let receipt = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: evidence)) as? [String: Any])
             #expect(receipt["operation"] as? String == operation)
         }
@@ -111,7 +133,10 @@ struct SwiftMutationTestingExecutionPathTests {
         for operation in ["prepare", "target"] {
             let project = try FileHelpers.makeTemporaryDirectory()
             let root = try FileHelpers.makeTemporaryDirectory()
-            defer { FileHelpers.cleanup(project); FileHelpers.cleanup(root) }
+            defer {
+                FileHelpers.cleanup(project)
+                FileHelpers.cleanup(root)
+            }
             chmod(project.path, 0o700)
             chmod(root.path, 0o700)
             let manifest = project.appendingPathComponent("manifest.json")
@@ -136,12 +161,14 @@ struct SwiftMutationTestingExecutionPathTests {
             } else {
                 arguments += [
                     "--target", "TheGuideTests/ExampleTests",
+                    "--no-cache",
                     "--mutant-selection-manifest", project.appendingPathComponent("selection.json").path,
                     "--output", project.appendingPathComponent("report.json").path,
                 ]
             }
 
-            #expect(await SwiftMutationTesting.run(args: arguments, launcher: MockProcessLauncher(exitCode: 1)) == .error)
+            #expect(
+                await SwiftMutationTesting.run(args: arguments, launcher: MockProcessLauncher(exitCode: 1)) == .error)
             let object = try #require(
                 JSONSerialization.jsonObject(with: Data(contentsOf: evidence)) as? [String: Any]
             )
@@ -149,8 +176,9 @@ struct SwiftMutationTestingExecutionPathTests {
             #expect(object["outcome"] as? String == "failed")
             #expect(object["sourceBearingBytesScrubbed"] as? Bool == true)
             #expect(object["childGroupsQuiescent"] as? Bool == true)
-            #expect(try FileManager.default.contentsOfDirectory(atPath: project.path)
-                .filter { $0.hasPrefix("evidence") }.count == 1)
+            #expect(
+                try FileManager.default.contentsOfDirectory(atPath: project.path)
+                    .filter { $0.hasPrefix("evidence") }.count == 1)
         }
     }
 
@@ -158,7 +186,10 @@ struct SwiftMutationTestingExecutionPathTests {
     func recoverModeScrubsDirtyProject() async throws {
         let project = try FileHelpers.makeTemporaryDirectory()
         let root = try FileHelpers.makeTemporaryDirectory()
-        defer { FileHelpers.cleanup(project); FileHelpers.cleanup(root) }
+        defer {
+            FileHelpers.cleanup(project)
+            FileHelpers.cleanup(root)
+        }
         chmod(project.path, 0o700)
         chmod(root.path, 0o700)
         let identity = String(repeating: "7", count: 64)
@@ -172,16 +203,17 @@ struct SwiftMutationTestingExecutionPathTests {
         try Data("{}".utf8).write(to: manifest)
         let evidence = project.appendingPathComponent("evidence.json")
 
-        let result = await SwiftMutationTesting.run(args: [
-            project.path,
-            "--build-cache-root", root.path,
-            "--cache-compatibility-id", identity,
-            "--project-input-manifest", manifest.path,
-            "--cache-evidence-output", evidence.path,
-            "--recover-only",
-            "--custody-fd", "0",
-            "--invocation-nonce", "abcdefghijklmnopqrstuv",
-        ], launcher: MockProcessLauncher(exitCode: 0))
+        let result = await SwiftMutationTesting.run(
+            args: [
+                project.path,
+                "--build-cache-root", root.path,
+                "--cache-compatibility-id", identity,
+                "--project-input-manifest", manifest.path,
+                "--cache-evidence-output", evidence.path,
+                "--recover-only",
+                "--custody-fd", "0",
+                "--invocation-nonce", "abcdefghijklmnopqrstuv",
+            ], launcher: MockProcessLauncher(exitCode: 0))
 
         #expect(result == .success)
         #expect(!FileManager.default.fileExists(atPath: store.sandboxURL.path))
@@ -298,7 +330,9 @@ struct SwiftMutationTestingExecutionPathTests {
 }
 
 private final class DispatchPreparedLauncher: @unchecked Sendable, ProcessLaunching {
-    func launch(executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double) async throws -> Int32 { 0 }
+    func launch(
+        executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
+    ) async throws -> Int32 { 0 }
 
     func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
         if request.arguments.contains("build-for-testing"),

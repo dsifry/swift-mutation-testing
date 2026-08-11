@@ -70,15 +70,16 @@ final class ProcessEscalationController: @unchecked Sendable {
     }
 
     func begin(pid: Int32) {
-        guard pid > 0, let group = identity(pid), group.pid == group.processGroupID else { return }
+        guard pid > 0, let group = identity(pid) else { return }
+        let signalTarget = group.pid == group.processGroupID ? -group.processGroupID : group.pid
         lock.withLock {
             guard tasks[pid] == nil else { return }
             tasks[pid] = Task { [weak self] in
                 guard let self, status(group) == .matching else { return }
-                _ = signal(-group.processGroupID, SIGTERM)
+                _ = signal(signalTarget, SIGTERM)
                 do { try await delay() } catch { return }
                 guard !Task.isCancelled, status(group) == .matching else { return }
-                _ = signal(-group.processGroupID, SIGKILL)
+                _ = signal(signalTarget, SIGKILL)
             }
         }
     }
@@ -103,7 +104,9 @@ final class ObservedBuildCountingLauncher: @unchecked Sendable, ProcessLaunching
     var buildForTestingAttempts: Int { lock.withLock { buildAttempts } }
     var fallbackBuildAttempts: Int { lock.withLock { fallbackAttempts } }
 
-    func launch(executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double) async throws -> Int32 {
+    func launch(
+        executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
+    ) async throws -> Int32 {
         record(executableURL: executableURL, arguments: arguments)
         return try await base.launch(
             executableURL: executableURL, arguments: arguments,

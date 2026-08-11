@@ -50,11 +50,15 @@ struct PreparedBuildStore: Sendable {
     }
 
     func reset() throws {
-        if FileManager.default.fileExists(atPath: directory.path) {
+        let root = directory.deletingLastPathComponent()
+        try CachePathGuard.validateDirectory(root, containedIn: root)
+        if CachePathGuard.metadata(at: directory) != nil {
+            try CachePathGuard.validateDirectory(directory, containedIn: root)
             try FileManager.default.removeItem(at: directory)
         }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        try CachePathGuard.validateDirectory(directory, containedIn: root)
     }
 
     func save(_ state: PreparedBuildState) throws {
@@ -67,7 +71,8 @@ struct PreparedBuildStore: Sendable {
 
     func load() throws -> PreparedBuildState {
         do {
-            try CachePathGuard.validateDirectory(directory.deletingLastPathComponent(), containedIn: directory.deletingLastPathComponent())
+            try CachePathGuard.validateDirectory(
+                directory.deletingLastPathComponent(), containedIn: directory.deletingLastPathComponent())
             try CachePathGuard.validateDirectory(directory, containedIn: directory.deletingLastPathComponent())
             try CachePathGuard.validateRegularFile(stateURL, containedIn: directory)
         } catch {
@@ -75,21 +80,26 @@ struct PreparedBuildStore: Sendable {
         }
         guard let data = try? Data(contentsOf: stateURL),
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            Set(object.keys) == ["schemaVersion", "sandboxPath", "derivedDataPath", "xctestrunPath", "productManifestSHA256", "inventory"],
+            Set(object.keys) == [
+                "schemaVersion", "sandboxPath", "derivedDataPath", "xctestrunPath", "productManifestSHA256",
+                "inventory",
+            ],
             let inventoryObject = object["inventory"] as? [String: Any],
             Set(inventoryObject.keys) == ["schemaVersion", "projectInputManifestSHA256", "mutants"],
             let rows = inventoryObject["mutants"] as? [[String: Any]],
-            rows.allSatisfy({ Set($0.keys) == ["id", "sourcePath", "sourceUTF8Offset", "operatorIdentifier", "replacementBytesSHA256"] }),
+            rows.allSatisfy({
+                Set($0.keys) == [
+                    "id", "sourcePath", "sourceUTF8Offset", "operatorIdentifier", "replacementBytesSHA256",
+                ]
+            }),
             let state = try? JSONDecoder().decode(PreparedBuildState.self, from: data),
             state.schemaVersion == 1,
             state.sandboxPath == sandboxURL.path,
             state.derivedDataPath == derivedDataURL.path,
             CachePathGuard.isContained(URL(fileURLWithPath: state.xctestrunPath), in: derivedDataURL),
-            state.productManifestSHA256.count == 64,
-            state.productManifestSHA256.allSatisfy({ $0.isHexDigit && !$0.isUppercase })
+            CachePathGuard.isLowercaseHexDigest(state.productManifestSHA256)
         else { throw PreparedBuildError.preparedBuildMissing }
-        do { try state.inventory.validatePersisted() }
-        catch { throw PreparedBuildError.preparedBuildMissing }
+        do { try state.inventory.validatePersisted() } catch { throw PreparedBuildError.preparedBuildMissing }
         do {
             try CachePathGuard.validateNoSymlinkComponents(derivedDataURL, containedIn: directory)
             guard let derivedMetadata = CachePathGuard.metadata(at: derivedDataURL),

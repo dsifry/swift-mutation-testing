@@ -26,13 +26,15 @@ struct PreparedBuildStoreTests {
             childGroupsQuiescent: true
         )
         let object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(evidence)) as? [String: Any])
-        #expect(Set(object.keys) == [
-            "schemaVersion", "invocationNonce", "operation", "outcome", "compatibilitySHA256",
-            "projectInputManifestSHA256", "preparedInventorySHA256", "runOrdinal", "attemptOrdinal",
-            "productManifestSHA256", "fullBuilds", "incrementalBuilds", "fallbackBuilds",
-            "sourceBearingBytesScrubbed", "childGroupsQuiescent",
-        ])
-        let directory = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(UUID().uuidString)
+        #expect(
+            Set(object.keys) == [
+                "schemaVersion", "invocationNonce", "operation", "outcome", "compatibilitySHA256",
+                "projectInputManifestSHA256", "preparedInventorySHA256", "runOrdinal", "attemptOrdinal",
+                "productManifestSHA256", "fullBuilds", "incrementalBuilds", "fallbackBuilds",
+                "sourceBearingBytesScrubbed", "childGroupsQuiescent",
+            ])
+        let directory = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(
+            UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         chmod(directory.path, 0o700)
@@ -43,32 +45,39 @@ struct PreparedBuildStoreTests {
             try CacheEvidenceWriter.write(evidence, to: output)
         }
         #expect(throws: PreparedCacheError.invalidCacheState) {
-            try CacheEvidenceWriter.write(evidence, to: directory.appendingPathComponent("open-fail"),
-                                          openFile: { _ in -1 })
+            try CacheEvidenceWriter.write(
+                evidence, to: directory.appendingPathComponent("open-fail"),
+                openFile: { _ in -1 })
         }
         #expect(throws: PreparedCacheError.invalidCacheState) {
-            try CacheEvidenceWriter.write(evidence, to: directory.appendingPathComponent("write-fail"),
-                                          writeBytes: { _, _, _ in 0 })
+            try CacheEvidenceWriter.write(
+                evidence, to: directory.appendingPathComponent("write-fail"),
+                writeBytes: { _, _, _ in 0 })
         }
         #expect(throws: PreparedCacheError.invalidCacheState) {
-            try CacheEvidenceWriter.write(evidence, to: directory.appendingPathComponent("sync-fail"),
-                                          syncFile: { _ in -1 })
+            try CacheEvidenceWriter.write(
+                evidence, to: directory.appendingPathComponent("sync-fail"),
+                syncFile: { _ in -1 })
         }
         #expect(throws: PreparedCacheError.invalidCacheState) {
-            try CacheEvidenceWriter.write(evidence, to: directory.appendingPathComponent("close-fail"),
-                                          closeFile: { _ in -1 })
+            try CacheEvidenceWriter.write(
+                evidence, to: directory.appendingPathComponent("close-fail"),
+                closeFile: { _ in -1 })
         }
         #expect(throws: PreparedCacheError.invalidCacheState) {
-            try CacheEvidenceWriter.write(evidence, to: directory.appendingPathComponent("rename-fail"),
-                                          renameExclusive: { _, _ in -1 })
+            try CacheEvidenceWriter.write(
+                evidence, to: directory.appendingPathComponent("rename-fail"),
+                renameExclusive: { _, _ in -1 })
         }
         #expect(throws: PreparedCacheError.invalidCacheState) {
-            try CacheEvidenceWriter.write(evidence, to: directory.appendingPathComponent("directory-open-fail"),
-                                          openDirectory: { _ in -1 })
+            try CacheEvidenceWriter.write(
+                evidence, to: directory.appendingPathComponent("directory-open-fail"),
+                openDirectory: { _ in -1 })
         }
         #expect(throws: PreparedCacheError.invalidCacheState) {
-            try CacheEvidenceWriter.write(evidence, to: directory.appendingPathComponent("directory-sync-fail"),
-                                          syncDirectory: { _ in -1 })
+            try CacheEvidenceWriter.write(
+                evidence, to: directory.appendingPathComponent("directory-sync-fail"),
+                syncDirectory: { _ in -1 })
         }
     }
 
@@ -98,36 +107,37 @@ struct PreparedBuildStoreTests {
         )
 
         for failure in ["rename", "parent-sync"] {
-            let sourceDescriptor = open("/dev/null", O_RDONLY)
-            #expect(sourceDescriptor >= 0)
-            defer { close(sourceDescriptor) }
-            var replacementDescriptor: Int32 = -1
-            var firstClose = true
+            var closedDescriptors: [Int32] = []
             #expect(throws: PreparedCacheError.invalidCacheState) {
                 try CacheEvidenceWriter.write(
                     evidence,
                     to: directory.appendingPathComponent("\(failure).json"),
+                    openFile: { path in
+                        _ = FileManager.default.createFile(
+                            atPath: path, contents: nil, attributes: [.posixPermissions: 0o600]
+                        )
+                        return 101
+                    },
+                    writeBytes: { _, _, count in count },
+                    syncFile: { _ in 0 },
                     closeFile: { descriptor in
-                        let result = Darwin.close(descriptor)
-                        if firstClose {
-                            firstClose = false
-                            replacementDescriptor = dup2(sourceDescriptor, descriptor)
-                        }
-                        return result
+                        closedDescriptors.append(descriptor)
+                        return 0
                     },
                     renameExclusive: failure == "rename" ? { _, _ in -1 } : { renamex_np($0, $1, UInt32(RENAME_EXCL)) },
-                    syncDirectory: failure == "parent-sync" ? { _ in -1 } : { fsync($0) }
+                    openDirectory: { _ in 202 },
+                    syncDirectory: { _ in failure == "parent-sync" ? -1 : 0 }
                 )
             }
-            #expect(replacementDescriptor >= 0)
-            #expect(fcntl(replacementDescriptor, F_GETFD) >= 0)
-            if replacementDescriptor >= 0 { close(replacementDescriptor) }
+            let expectedDescriptors: [Int32] = failure == "rename" ? [101] : [101, 202]
+            #expect(closedDescriptors == expectedDescriptors)
         }
     }
 
     @Test("Failure evidence covers mode dispatch, duplicate suppression, locks, and corrupt custody")
     func cacheFailureEvidenceBranches() throws {
-        let root = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(UUID().uuidString)
+        let root = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(
+            UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         chmod(root.path, 0o700)
@@ -135,28 +145,32 @@ struct PreparedBuildStoreTests {
         try Data("manifest".utf8).write(to: manifest)
         let identity = String(repeating: "7", count: 64)
         func options(_ mode: ParsedArguments.CacheOptions.Mode, output: URL?) -> ParsedArguments.CacheOptions {
-            .init(mode: mode, buildCacheRoot: root.path, compatibilityID: identity,
-                  projectInputManifest: manifest.path, evidenceOutput: output?.path,
-                  invocationNonce: "abcdefghijklmnopqrstuv")
+            .init(
+                mode: mode, buildCacheRoot: root.path, compatibilityID: identity,
+                projectInputManifest: manifest.path, evidenceOutput: output?.path,
+                invocationNonce: "abcdefghijklmnopqrstuv")
         }
         try CacheFailureEvidenceRecorder.record(options: .init(mode: .prepare))
-        try CacheFailureEvidenceRecorder.record(options: options(.legacy, output: root.appendingPathComponent("legacy.json")))
+        try CacheFailureEvidenceRecorder.record(
+            options: options(.legacy, output: root.appendingPathComponent("legacy.json")))
         #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("legacy.json").path))
 
         let recoverEvidence = root.appendingPathComponent("recover.json")
         try CacheFailureEvidenceRecorder.record(options: options(.recover, output: recoverEvidence))
-        let recover = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: recoverEvidence)) as? [String: Any])
+        let recover = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: recoverEvidence)) as? [String: Any])
         #expect(recover["operation"] as? String == "recover")
         try CacheFailureEvidenceRecorder.record(options: options(.recover, output: recoverEvidence))
         let missingManifestEvidence = root.appendingPathComponent("missing-manifest.json")
-        try CacheFailureEvidenceRecorder.record(options: .init(
-            mode: .prepare,
-            buildCacheRoot: root.path,
-            compatibilityID: String(repeating: "6", count: 64),
-            projectInputManifest: root.appendingPathComponent("absent-manifest").path,
-            evidenceOutput: missingManifestEvidence.path,
-            invocationNonce: "abcdefghijklmnopqrstuv"
-        ))
+        try CacheFailureEvidenceRecorder.record(
+            options: .init(
+                mode: .prepare,
+                buildCacheRoot: root.path,
+                compatibilityID: String(repeating: "6", count: 64),
+                projectInputManifest: root.appendingPathComponent("absent-manifest").path,
+                evidenceOutput: missingManifestEvidence.path,
+                invocationNonce: "abcdefghijklmnopqrstuv"
+            ))
         let missingManifest = try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: missingManifestEvidence)) as? [String: Any]
         )
@@ -167,7 +181,8 @@ struct PreparedBuildStoreTests {
         let lock = try CacheLock(identityDirectory: store.directory)
         let lockedEvidence = root.appendingPathComponent("locked.json")
         try CacheFailureEvidenceRecorder.record(options: options(.prepare, output: lockedEvidence))
-        let locked = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: lockedEvidence)) as? [String: Any])
+        let locked = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: lockedEvidence)) as? [String: Any])
         #expect(locked["sourceBearingBytesScrubbed"] as? Bool == false)
         #expect(locked["childGroupsQuiescent"] as? Bool == false)
         try lock.release()
@@ -177,7 +192,8 @@ struct PreparedBuildStoreTests {
         chmod(registry.path, 0o600)
         let corruptEvidence = root.appendingPathComponent("corrupt.json")
         try CacheFailureEvidenceRecorder.record(options: options(.target, output: corruptEvidence))
-        let corrupt = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: corruptEvidence)) as? [String: Any])
+        let corrupt = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: corruptEvidence)) as? [String: Any])
         #expect(corrupt["childGroupsQuiescent"] as? Bool == false)
 
         try Data("[]".utf8).write(to: registry)
@@ -190,7 +206,8 @@ struct PreparedBuildStoreTests {
 
     @Test("Prepared test enumeration runs the retained product without building")
     func preparedTestEnumeration() async throws {
-        let directory = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(UUID().uuidString)
+        let directory = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(
+            UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         let xctestrun = directory.appendingPathComponent("App.xctestrun")
@@ -216,7 +233,8 @@ struct PreparedBuildStoreTests {
 
     @Test("Prepared enumeration fails closed on xcodebuild and malformed output")
     func preparedTestEnumerationFailures() async throws {
-        let directory = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(UUID().uuidString)
+        let directory = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(
+            UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         let xctestrun = directory.appendingPathComponent("App.xctestrun")
@@ -228,22 +246,25 @@ struct PreparedBuildStoreTests {
             )
         }
         await #expect(throws: PreparedBuildError.preparedBuildMissing) {
-            try await PreparedTestEnumerator(launcher: EnumerationLauncher(output: output, bytes: Data("[]".utf8))).enumerate(
-                xctestrunURL: xctestrun, destination: "platform=macOS", timeout: 1, outputURL: output
-            )
+            try await PreparedTestEnumerator(launcher: EnumerationLauncher(output: output, bytes: Data("[]".utf8)))
+                .enumerate(
+                    xctestrunURL: xctestrun, destination: "platform=macOS", timeout: 1, outputURL: output
+                )
         }
     }
 
     @Test("Preparing an existing identity preserves its DerivedData")
     func prepareDirectoryPreservesDerivedData() throws {
-        let root = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(UUID().uuidString)
+        let root = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(
+            UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         chmod(root.path, 0o700)
         let store = PreparedBuildStore(root: root.path, compatibilityID: String(repeating: "8", count: 64))
         try store.prepareDirectory()
         let product = store.derivedDataURL.appendingPathComponent("Build/Products/product")
-        try FileManager.default.createDirectory(at: product.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: product.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("compiled".utf8).write(to: product)
 
         try store.prepareDirectory()
@@ -253,7 +274,8 @@ struct PreparedBuildStoreTests {
 
     @Test("Prepared identity and state use private filesystem modes")
     func privateFilesystemModes() throws {
-        let root = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(UUID().uuidString)
+        let root = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(
+            UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         chmod(root.path, 0o700)
@@ -283,9 +305,29 @@ struct PreparedBuildStoreTests {
         #expect(store.sandboxURL.lastPathComponent == "project")
     }
 
+    @Test("Reset rejects an identity reached through a symlink")
+    func resetRejectsSymlinkIdentity() throws {
+        let root = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        chmod(root.path, 0o700)
+        let outside = root.appendingPathComponent("outside")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: false)
+        chmod(outside.path, 0o700)
+        let marker = outside.appendingPathComponent("marker")
+        try Data("keep".utf8).write(to: marker)
+        let store = PreparedBuildStore(root: root.path, compatibilityID: String(repeating: "7", count: 64))
+        try FileManager.default.createSymbolicLink(at: store.directory, withDestinationURL: outside)
+
+        #expect(throws: PreparedCacheError.unsafeCachePath) { try store.reset() }
+        #expect(FileManager.default.fileExists(atPath: marker.path))
+    }
+
     @Test("Prepared state round trips through the compatibility root")
     func stateRoundTrips() throws {
-        let root = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(UUID().uuidString)
+        let root = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(
+            UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         chmod(root.path, 0o700)
@@ -306,7 +348,8 @@ struct PreparedBuildStoreTests {
         try store.save(state)
 
         let product = store.derivedDataURL.appendingPathComponent("Build/Products/App")
-        try FileManager.default.createDirectory(at: product.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: product.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("compiled".utf8).write(to: product)
         let xctestrun = URL(fileURLWithPath: state.xctestrunPath)
         try Data("plist".utf8).write(to: xctestrun)
@@ -314,7 +357,8 @@ struct PreparedBuildStoreTests {
 
         #expect(try store.load() == state)
 
-        var object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: store.stateURL)) as? [String: Any])
+        var object = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: store.stateURL)) as? [String: Any])
         var inventoryObject = try #require(object["inventory"] as? [String: Any])
         inventoryObject["unknown"] = true
         object["inventory"] = inventoryObject
@@ -434,9 +478,10 @@ struct PreparedBuildStoreTests {
             attemptOrdinal: 1,
             ownedSourcePaths: manifest.ownedSourcePaths
         )
-        #expect(try retry.validatedSourcePaths(
-            selector: retry.selector, inventorySHA256: digest, inventorySourcePaths: ["Sources/A.swift"]
-        ) == ["Sources/A.swift"])
+        #expect(
+            try retry.validatedSourcePaths(
+                selector: retry.selector, inventorySHA256: digest, inventorySourcePaths: ["Sources/A.swift"]
+            ) == ["Sources/A.swift"])
         #expect(throws: PreparedBuildError.selectionMismatch) {
             try manifest.validatedSourcePaths(
                 selector: "TheGuideTests/OtherTests",
@@ -492,7 +537,9 @@ private final class EnumerationLauncher: @unchecked Sendable, ProcessLaunching {
         self.bytes = bytes
     }
 
-    func launch(executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double) async throws -> Int32 {
+    func launch(
+        executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
+    ) async throws -> Int32 {
         0
     }
 

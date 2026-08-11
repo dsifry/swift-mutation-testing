@@ -30,6 +30,8 @@ final class ProcessCustody: @unchecked Sendable {
     private let syncDescriptor: @Sendable (Int32) -> Int32
     private let openRegistryFile: @Sendable (String) -> Int32
     private let openRegistryDirectory: @Sendable (String) -> Int32
+    private let monotonicNow: @Sendable () -> UInt64
+    private let maximumQuiescenceNanoseconds: UInt64
     private let registrationURL: URL?
     private let mutex = NSLock()
     private var groups: [CustodiedProcessGroup] = []
@@ -49,7 +51,9 @@ final class ProcessCustody: @unchecked Sendable {
         replaceRegistry: @escaping @Sendable (String, String) -> Int32 = { rename($0, $1) },
         syncDescriptor: @escaping @Sendable (Int32) -> Int32 = { fsync($0) },
         openRegistryFile: @escaping @Sendable (String) -> Int32 = { open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) },
-        openRegistryDirectory: @escaping @Sendable (String) -> Int32 = { open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC) }
+        openRegistryDirectory: @escaping @Sendable (String) -> Int32 = { open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC) },
+        monotonicNow: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+        maximumQuiescenceNanoseconds: UInt64 = 15_000_000_000
     ) {
         self.registrationURL = registrationURL
         groups = registeredGroups
@@ -67,6 +71,8 @@ final class ProcessCustody: @unchecked Sendable {
         self.syncDescriptor = syncDescriptor
         self.openRegistryFile = openRegistryFile
         self.openRegistryDirectory = openRegistryDirectory
+        self.monotonicNow = monotonicNow
+        self.maximumQuiescenceNanoseconds = maximumQuiescenceNanoseconds
     }
 
     static func system(
@@ -84,7 +90,8 @@ final class ProcessCustody: @unchecked Sendable {
         } else {
             status = { SystemProcessIdentity.status(of: $0) }
         }
-        let registered = FileManager.default.fileExists(atPath: registrationURL.path)
+        let registered =
+            FileManager.default.fileExists(atPath: registrationURL.path)
             ? try readRegisteredGroups(from: registrationURL) : []
         return ProcessCustody(
             registrationURL: registrationURL,
@@ -99,7 +106,7 @@ final class ProcessCustody: @unchecked Sendable {
             identityStatus: status,
             waitForVerifiedGroup: { group in
                 let processGroupID = group.processGroupID
-                for _ in 0..<50 {
+                for _ in 0 ..< 50 {
                     switch status(group) {
                     case .absent: return
                     case .mismatched: throw PreparedCacheError.unverifiableProcessIdentity
@@ -123,7 +130,7 @@ final class ProcessCustody: @unchecked Sendable {
                 }
             },
             groupIsAbsent: { processGroupID in
-                for _ in 0..<50 {
+                for _ in 0 ..< 50 {
                     let result = signal(-processGroupID, 0)
                     if result == -1, errno == ESRCH { return true }
                     sleep(100_000)
@@ -145,17 +152,21 @@ final class ProcessCustody: @unchecked Sendable {
             guard group.pid > 0, group.processGroupID > 0, !group.birthIdentity.isEmpty else {
                 throw PreparedCacheError.unverifiableProcessIdentity
             }
+            guard
+                !groups.contains(where: {
+                    $0.pid == group.pid || $0.processGroupID == group.processGroupID
+                })
+            else { throw PreparedCacheError.unverifiableProcessIdentity }
             groups.append(group)
             try persistRegistry()
         }
     }
 
     func unregister(pid: Int32) throws {
+        let group = mutex.withLock { groups.first(where: { $0.pid == pid }) }
+        if let group { try requireGroupAbsent(group) }
         try mutex.withLock {
-            if let group = groups.first(where: { $0.pid == pid }) {
-                try requireGroupAbsent(group)
-            }
-            groups.removeAll { $0.pid == pid }
+            if let group { groups.removeAll { $0 == group } }
             try persistRegistry()
         }
     }
@@ -164,22 +175,37 @@ final class ProcessCustody: @unchecked Sendable {
     func handleEngineTermination() throws { try quiesce() }
 
     private func quiesce() throws {
-        try mutex.withLock {
-            for group in groups {
-                switch identityStatus(group) {
-                case .absent:
-                    try requireGroupAbsent(group)
-                    continue
-                case .mismatched: throw PreparedCacheError.unverifiableProcessIdentity
-                case .matching: break
-                }
-                guard verifyIdentity(group) else { throw PreparedCacheError.unverifiableProcessIdentity }
-                try terminateGroup(group.processGroupID)
-                try waitForVerifiedGroup(group)
+        let snapshot = mutex.withLock { groups }
+        let startedAt = monotonicNow()
+        for group in snapshot {
+            try requireWithinQuiescenceDeadline(startedAt)
+            switch identityStatus(group) {
+            case .absent:
                 try requireGroupAbsent(group)
+                try requireWithinQuiescenceDeadline(startedAt)
+                continue
+            case .mismatched: throw PreparedCacheError.unverifiableProcessIdentity
+            case .matching: break
             }
-            groups.removeAll()
+            guard verifyIdentity(group) else { throw PreparedCacheError.unverifiableProcessIdentity }
+            try terminateGroup(group.processGroupID)
+            try requireWithinQuiescenceDeadline(startedAt)
+            try waitForVerifiedGroup(group)
+            try requireWithinQuiescenceDeadline(startedAt)
+            try requireGroupAbsent(group)
+            try requireWithinQuiescenceDeadline(startedAt)
+        }
+        let completed = Set(snapshot)
+        try mutex.withLock {
+            groups.removeAll { completed.contains($0) }
             try persistRegistry()
+        }
+    }
+
+    private func requireWithinQuiescenceDeadline(_ startedAt: UInt64) throws {
+        let current = monotonicNow()
+        guard current >= startedAt, current - startedAt <= maximumQuiescenceNanoseconds else {
+            throw PreparedCacheError.unverifiableProcessIdentity
         }
     }
 
@@ -230,7 +256,8 @@ final class ProcessCustody: @unchecked Sendable {
             guard replaceRegistry(temporary.path, registrationURL.path) == 0 else {
                 throw PreparedCacheError.unsafeCachePath
             }
-            try CachePathGuard.validateRegularFile(registrationURL, containedIn: registrationURL.deletingLastPathComponent())
+            try CachePathGuard.validateRegularFile(
+                registrationURL, containedIn: registrationURL.deletingLastPathComponent())
             let parentDescriptor = openRegistryDirectory(registrationURL.deletingLastPathComponent().path)
             guard parentDescriptor >= 0 else { throw PreparedCacheError.unsafeCachePath }
             let parentSync = syncDescriptor(parentDescriptor)
@@ -298,7 +325,10 @@ final class CustodyFDMonitor: @unchecked Sendable {
     init(
         descriptor: Int,
         custody: ProcessCustody,
-        duplicateDescriptor: (Int32) -> Int32 = { fcntl($0, F_DUPFD_CLOEXEC, 0) }
+        duplicateDescriptor: (Int32) -> Int32 = { fcntl($0, F_DUPFD_CLOEXEC, 0) },
+        readDescriptor: @escaping @Sendable (Int32, UnsafeMutableRawPointer?, Int) -> Int = {
+            Darwin.read($0, $1, $2)
+        }
     ) throws {
         let ownedDescriptor = duplicateDescriptor(Int32(descriptor))
         guard ownedDescriptor >= 0 else { throw PreparedCacheError.unverifiableProcessIdentity }
@@ -308,7 +338,13 @@ final class CustodyFDMonitor: @unchecked Sendable {
         )
         source.setEventHandler { [weak self, source] in
             var byte: UInt8 = 0
-            let count = Darwin.read(ownedDescriptor, &byte, 1)
+            let count = readDescriptor(ownedDescriptor, &byte, 1)
+            if count < 0 {
+                if errno == EINTR { return }
+                self?.mutex.withLock { self?.failure = PreparedCacheError.unverifiableProcessIdentity }
+                source.cancel()
+                return
+            }
             guard count == 0 else { return }
             do {
                 try custody.handleCustodyEOF()

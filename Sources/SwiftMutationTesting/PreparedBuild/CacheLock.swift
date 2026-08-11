@@ -66,6 +66,14 @@ enum CachePathGuard {
         url.path
     }
 
+    static func isLowercaseHexDigest(_ value: String) -> Bool {
+        value.count == 64 && value.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
+
+    static func normalizeRelativePath(_ path: String) -> String {
+        path.split(separator: "/", omittingEmptySubsequences: true).joined(separator: "/")
+    }
+
     static func validateNoSymlinkComponents(
         _ url: URL,
         containedIn root: URL,
@@ -78,9 +86,10 @@ enum CachePathGuard {
         var current = URL(fileURLWithPath: rootPath, isDirectory: true)
         let suffix = targetPath == rootPath ? "" : String(targetPath.dropFirst(rootPath.count + 1))
         let components = suffix.split(separator: "/").map(String.init)
-        let paths = [current] + components.indices.map { index -> URL in
-            current.appendPathComponent(components[index])
-            return current
+        var paths = [current]
+        for component in components {
+            current.appendPathComponent(component)
+            paths.append(current)
         }
         for (index, componentURL) in paths.enumerated() {
             guard let value = metadata(at: componentURL), value.st_uid == expectedUID,

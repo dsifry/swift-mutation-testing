@@ -50,7 +50,8 @@ struct BuildStageTests {
         try plistData.write(to: productsDir.appendingPathComponent("App.xctestrun"))
 
         let sandbox = Sandbox(rootURL: projectDir)
-        let stage = BuildStage(launcher: MockProcessLauncher(exitCode: 0))
+        let launcher = BuildRecordingLauncher()
+        let stage = BuildStage(launcher: launcher)
 
         let artifact = try await stage.build(
             sandbox: sandbox,
@@ -61,6 +62,7 @@ struct BuildStageTests {
 
         #expect(artifact.derivedDataPath == projectDir.appendingPathComponent(".xmr-derived-data").path)
         #expect(artifact.xctestrunURL?.lastPathComponent == "App.xctestrun")
+        #expect(!(try #require(await launcher.request)).arguments.contains("CODE_SIGNING_ALLOWED=NO"))
     }
 
     @Test("Given build failure, when build called, then throws compilationFailed")
@@ -81,6 +83,18 @@ struct BuildStageTests {
         } throws: { error in
             guard case BuildError.compilationFailed = error else { return false }
             return true
+        }
+    }
+
+    @Test("Given an absent sandbox, when build fails, then project discovery remains fail-safe")
+    func absentSandboxBuildFailure() async throws {
+        let sandbox = Sandbox(
+            rootURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString))
+        await #expect(throws: BuildError.self) {
+            try await BuildStage(launcher: MockProcessLauncher(exitCode: 1)).build(
+                sandbox: sandbox, scheme: "App", destination: "platform=macOS", timeout: 1
+            )
         }
     }
 

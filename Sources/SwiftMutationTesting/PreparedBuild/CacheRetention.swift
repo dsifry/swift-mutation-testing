@@ -20,10 +20,18 @@ struct CacheRetention: Sendable {
         FileManager.default.enumerator(at: $0, includingPropertiesForKeys: nil)
     }
     var beforeRemovalAttempt: @Sendable (URL) throws -> Void = { _ in }
+    var beforeTombstoneRemoval: @Sendable (URL) throws -> Void = { _ in }
     var metadataProvider: @Sendable (URL) -> stat? = { CachePathGuard.metadata(at: $0) }
+    var renameIdentity: @Sendable (String, String) -> Int32 = { rename($0, $1) }
+    var openCollectionDirectory: @Sendable (String) -> Int32 = {
+        open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    }
+    var syncCollectionDescriptor: @Sendable (Int32) -> Int32 = { fsync($0) }
+    var closeCollectionDescriptor: @Sendable (Int32) -> Int32 = { close($0) }
 
     func enforce(now: Date = Date()) throws -> [URL] {
         try CachePathGuard.validateDirectory(collectionRoot, containedIn: collectionRoot)
+        try removeAbandonedTombstones()
         var candidates = try loadCandidates().sorted { left, right in
             if left.lastUsed != right.lastUsed { return left.lastUsed < right.lastUsed }
             return left.url.lastPathComponent < right.url.lastPathComponent
@@ -42,7 +50,8 @@ struct CacheRetention: Sendable {
         candidates.removeAll { removedSet.contains($0.url) }
 
         while candidates.count > policy.maximumIdentityCount
-            || candidates.reduce(Int64(0), { $0 + $1.bytes }) > policy.maximumTotalBytes {
+            || candidates.reduce(Int64(0), { $0 + $1.bytes }) > policy.maximumTotalBytes
+        {
             var removedCandidate = false
             for (index, candidate) in candidates.enumerated() {
                 do {
@@ -69,7 +78,8 @@ struct CacheRetention: Sendable {
         ).compactMap { url in
             guard Self.isCompatibilityID(url.lastPathComponent) else { return nil }
             try CachePathGuard.validateDirectory(url, containedIn: collectionRoot)
-            let lastUsed = try CacheRecovery(identityDirectory: url, collectionRoot: collectionRoot).retentionLastUsedAt()
+            let lastUsed = try CacheRecovery(identityDirectory: url, collectionRoot: collectionRoot)
+                .retentionLastUsedAt()
             return Candidate(url: url, bytes: try derivedDataBytes(at: url), lastUsed: lastUsed)
         }
     }
@@ -81,12 +91,12 @@ struct CacheRetention: Sendable {
         guard let rootMetadata = metadataProvider(root), rootMetadata.st_uid == getuid(),
             rootMetadata.st_mode & S_IFMT == S_IFDIR
         else { throw PreparedCacheError.unsafeCachePath }
-        try CachePathGuard.validateOwnedTree(root, containedIn: identity)
         var total: Int64 = 0
         guard let enumerator = makeEnumerator(root) else {
             throw PreparedCacheError.unsafeCachePath
         }
         for case let url as URL in enumerator {
+            try CachePathGuard.validateNoSymlinkComponents(url, containedIn: root)
             guard let metadata = metadataProvider(url),
                 metadata.st_uid == getuid(),
                 metadata.st_mode & S_IFMT != S_IFLNK
@@ -108,10 +118,59 @@ struct CacheRetention: Sendable {
         try CachePathGuard.validateDirectory(candidate.url, containedIn: collectionRoot)
         _ = try CacheRecovery(identityDirectory: candidate.url, collectionRoot: collectionRoot).retentionLastUsedAt()
         try CachePathGuard.validateOwnedTree(candidate.url, containedIn: collectionRoot)
-        try FileManager.default.removeItem(at: candidate.url)
+        let tombstone = collectionRoot.appendingPathComponent(
+            ".evicting-\(candidate.url.lastPathComponent)-\(UUID().uuidString)"
+        )
+        guard renameIdentity(candidate.url.path, tombstone.path) == 0 else {
+            throw PreparedCacheError.unsafeCachePath
+        }
+        try syncCollectionRoot()
+        try CachePathGuard.validateDirectory(tombstone, containedIn: collectionRoot)
+        try beforeTombstoneRemoval(tombstone)
+        try CachePathGuard.validateOwnedTree(tombstone, containedIn: collectionRoot)
+        try FileManager.default.removeItem(at: tombstone)
+        try syncCollectionRoot()
+    }
+
+    private func removeAbandonedTombstones() throws {
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: collectionRoot, includingPropertiesForKeys: nil
+        )
+        for tombstone in entries where Self.isTombstoneName(tombstone.lastPathComponent) {
+            try CachePathGuard.validateDirectory(tombstone, containedIn: collectionRoot)
+            let lock: CacheLock
+            do {
+                lock = try CacheLock(identityDirectory: tombstone)
+            } catch PreparedCacheError.lockBusy {
+                continue
+            }
+            defer { try? lock.release() }
+            try CachePathGuard.validateOwnedTree(tombstone, containedIn: collectionRoot)
+            try FileManager.default.removeItem(at: tombstone)
+            try syncCollectionRoot()
+        }
+    }
+
+    private func syncCollectionRoot() throws {
+        let descriptor = openCollectionDirectory(collectionRoot.path)
+        guard descriptor >= 0 else { throw PreparedCacheError.unsafeCachePath }
+        let syncResult = syncCollectionDescriptor(descriptor)
+        let closeResult = closeCollectionDescriptor(descriptor)
+        guard syncResult == 0, closeResult == 0 else { throw PreparedCacheError.unsafeCachePath }
     }
 
     private static func isCompatibilityID(_ value: String) -> Bool {
-        value.count == 64 && value.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+        CachePathGuard.isLowercaseHexDigest(value)
+    }
+
+    private static func isTombstoneName(_ value: String) -> Bool {
+        let prefix = ".evicting-"
+        guard value.hasPrefix(prefix) else { return false }
+        let suffix = String(value.dropFirst(prefix.count))
+        guard suffix.count == 64 + 1 + 36 else { return false }
+        let separator = suffix.index(suffix.startIndex, offsetBy: 64)
+        let compatibilityID = String(suffix[..<separator])
+        let uuid = String(suffix[suffix.index(after: separator)...])
+        return suffix[separator] == "-" && isCompatibilityID(compatibilityID) && UUID(uuidString: uuid) != nil
     }
 }

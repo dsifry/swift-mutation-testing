@@ -32,6 +32,7 @@ struct ProjectInputMaterializer: Sendable {
         FileManager.default.createFile(atPath: path, contents: data, attributes: [.posixPermissions: mode])
     }
     var outputFileExists: @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    var didPrepareOutputDirectory: @Sendable (URL) -> Void = { _ in }
 
     func materialize(
         manifestAt manifestURL: URL,
@@ -52,15 +53,23 @@ struct ProjectInputMaterializer: Sendable {
         try makePrivateDirectory(projectURL)
 
         do {
-            let overrides = try schematizedOverrides(schematizedFiles)
+            var overrides = try schematizedOverrides(schematizedFiles)
+            var preparedOutputDirectories: Set<String> = []
             for entry in manifest.entries {
                 try assertDirectoryIdentity(sourceIdentity, at: sourceRoot)
                 let sourceURL = sourceRoot.appendingPathComponent(entry.path)
                 let data = try authenticatedRead(sourceURL, entry: entry)
                 try assertDirectoryIdentity(sourceIdentity, at: sourceRoot)
                 let output = projectURL.appendingPathComponent(entry.path)
-                try makePrivateDirectory(output.deletingLastPathComponent())
-                let materialized = overrides[entry.path].map { Data(fixEmptySwitchCaseBodies($0).utf8) } ?? data
+                let outputDirectory = output.deletingLastPathComponent()
+                let relativeOutputDirectory = (entry.path as NSString).deletingLastPathComponent
+                if preparedOutputDirectories.insert(relativeOutputDirectory).inserted {
+                    try makePrivateDirectory(outputDirectory)
+                    didPrepareOutputDirectory(outputDirectory)
+                }
+                let materialized =
+                    overrides.removeValue(forKey: entry.path)
+                    .map { Data(fixEmptySwitchCaseBodies($0).utf8) } ?? data
                 guard createOutputFile(output.path, materialized, entry.mode) else {
                     throw PreparedCacheError.unsafeCachePath
                 }
@@ -70,7 +79,13 @@ struct ProjectInputMaterializer: Sendable {
                     ofItemAtPath: output.path
                 )
             }
-            try injectSupportFile(supportFileContent, into: projectURL, schematizedFiles: schematizedFiles)
+            try Self.requireNoUnusedOverrides(overrides)
+            try injectSupportFile(
+                supportFileContent,
+                into: projectURL,
+                schematizedFiles: schematizedFiles,
+                manifest: manifest
+            )
             return projectURL
         } catch {
             try? FileManager.default.removeItem(at: projectURL)
@@ -101,12 +116,11 @@ struct ProjectInputMaterializer: Sendable {
         var prior: String?
         for entry in manifest.entries {
             guard isSafeRelativePath(entry.path),
-                !isForbidden(entry.path),
+                !Self.isForbidden(entry.path),
                 prior.map({ $0 < entry.path }) ?? true,
                 entry.mode == 0o600 || entry.mode == 0o644 || entry.mode == 0o700 || entry.mode == 0o755,
                 entry.byteSize >= 0,
-                entry.sha256.count == 64,
-                entry.sha256.allSatisfy({ $0.isHexDigit && !$0.isUppercase }),
+                CachePathGuard.isLowercaseHexDigest(entry.sha256),
                 entry.deterministicMTime == ProjectInputManifest.deterministicMTime(forSHA256: entry.sha256)
             else { throw PreparedCacheError.invalidProjectInputManifest }
             if let sourceMetadata = metadata(at: sourceRoot.appendingPathComponent(entry.path)),
@@ -145,8 +159,7 @@ struct ProjectInputMaterializer: Sendable {
         sourceRoot: URL,
         validator: (URL, URL) throws -> Void = { try CachePathGuard.validateNoSymlinkComponents($0, containedIn: $1) }
     ) throws {
-        do { try validator(url, sourceRoot) }
-        catch { throw PreparedCacheError.projectInputDrift }
+        do { try validator(url, sourceRoot) } catch { throw PreparedCacheError.projectInputDrift }
     }
 
     private func schematizedOverrides(_ files: [SchematizedFile]) throws -> [String: String] {
@@ -156,27 +169,40 @@ struct ProjectInputMaterializer: Sendable {
             let absolute = URL(fileURLWithPath: file.originalPath).standardizedFileURL.path
             guard absolute.hasPrefix(root + "/") else { throw PreparedCacheError.invalidProjectInputManifest }
             let relative = String(absolute.dropFirst(root.count + 1))
-            guard isSafeRelativePath(relative), result.updateValue(file.schematizedContent, forKey: relative) == nil else {
+            guard isSafeRelativePath(relative), result.updateValue(file.schematizedContent, forKey: relative) == nil
+            else {
                 throw PreparedCacheError.invalidProjectInputManifest
             }
         }
         return result
     }
 
-    private func injectSupportFile(_ content: String, into projectURL: URL, schematizedFiles: [SchematizedFile]) throws {
+    private func injectSupportFile(
+        _ content: String,
+        into projectURL: URL,
+        schematizedFiles: [SchematizedFile],
+        manifest: ProjectInputManifest
+    ) throws {
         guard !content.isEmpty, let first = schematizedFiles.first else { return }
         let root = sourceRoot.standardizedFileURL.path
         let original = URL(fileURLWithPath: first.originalPath).standardizedFileURL.path
         let relative = String(original.dropFirst(root.count + 1))
         let target = projectURL.appendingPathComponent(relative)
-        guard outputFileExists(target.path) else {
+        guard outputFileExists(target.path), let entry = manifest.entries.first(where: { $0.path == relative }) else {
             throw PreparedCacheError.invalidProjectInputManifest
         }
-        let computed = "var __swiftMutationTestingID: String {\n    ProcessInfo.processInfo.environment[\"__SWIFT_MUTATION_TESTING_ACTIVE\"] ?? \"\"\n}"
-        let stored = "nonisolated(unsafe) var __swiftMutationTestingID: String = ProcessInfo.processInfo.environment[\"__SWIFT_MUTATION_TESTING_ACTIVE\"] ?? \"\""
+        let computed =
+            "var __swiftMutationTestingID: String {\n    ProcessInfo.processInfo.environment[\"__SWIFT_MUTATION_TESTING_ACTIVE\"] ?? \"\"\n}"
+        let stored =
+            "nonisolated(unsafe) var __swiftMutationTestingID: String = ProcessInfo.processInfo.environment[\"__SWIFT_MUTATION_TESTING_ACTIVE\"] ?? \"\""
         let adjusted = content.replacingOccurrences(of: computed, with: stored)
         let existing = try String(contentsOf: target, encoding: .utf8)
         try (existing + "\n" + adjusted).write(to: target, atomically: true, encoding: .utf8)
+        chmod(target.path, mode_t(entry.mode))
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: TimeInterval(entry.deterministicMTime))],
+            ofItemAtPath: target.path
+        )
     }
 
     private func validateRemovableProject(_ url: URL) throws {
@@ -235,18 +261,24 @@ struct ProjectInputMaterializer: Sendable {
         }
     }
 
-    private func isForbidden(_ path: String) -> Bool {
+    static func isForbidden(_ path: String) -> Bool {
         let components = path.lowercased().split(separator: "/").map(String.init)
         let forbiddenComponents: Set<String> = [
             ".git", ".build", "deriveddata", ".env", ".ssh", ".gnupg", ".aws", "keychains",
             "xcuserdata", "provisioning profiles",
         ]
         if components.contains(where: forbiddenComponents.contains) { return true }
-        let name = components.last!
+        guard let name = components.last else { return true }
         return name.hasSuffix(".mobileprovision") || name.hasSuffix(".provisionprofile")
             || name.hasSuffix(".p12") || name.hasSuffix(".pfx") || name.hasSuffix(".key")
             || name.hasSuffix(".pem") || name.hasSuffix(".cer") || name.hasSuffix(".p8")
             || name.hasSuffix(".keychain") || name.hasSuffix(".keychain-db")
+    }
+
+    static func requireNoUnusedOverrides(_ overrides: [String: String]) throws {
+        if !overrides.isEmpty {
+            throw PreparedCacheError.invalidProjectInputManifest
+        }
     }
 
     private func fixEmptySwitchCaseBodies(_ content: String) -> String {

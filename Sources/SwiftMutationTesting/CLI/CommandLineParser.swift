@@ -305,15 +305,27 @@ struct CommandLineParser: Sendable {
             guard let target = flags.testTarget, !target.isEmpty,
                 let selectionManifest = flags.mutantSelectionManifest,
                 let output = flags.output,
+                flags.noCache,
                 flags.testEnumerationOutput == nil,
                 flags.mutantInventoryOutput == nil
             else {
-                throw UsageError(message: "target cache mode requires one target, selection manifest, and JSON output")
+                throw UsageError(
+                    message: "target cache mode requires one target, selection manifest, JSON output, and --no-cache"
+                )
             }
             try validateAbsolutePath(selectionManifest, flag: "--mutant-selection-manifest")
             try validateAbsolutePath(output, flag: "--output")
             mode = .target
         }
+
+        try validateDistinctPaths([
+            ("--project-input-manifest", projectManifest),
+            ("--cache-evidence-output", evidenceOutput),
+            ("--test-enumeration-output", flags.testEnumerationOutput),
+            ("--mutant-inventory-output", flags.mutantInventoryOutput),
+            ("--mutant-selection-manifest", flags.mutantSelectionManifest),
+            ("--output", flags.output),
+        ])
 
         return .init(
             mode: mode,
@@ -332,6 +344,18 @@ struct CommandLineParser: Sendable {
     private func validateAbsolutePath(_ path: String, flag: String) throws {
         guard path.hasPrefix("/") else {
             throw UsageError(message: "\(flag) requires an absolute path")
+        }
+    }
+
+    private func validateDistinctPaths(_ paths: [(flag: String, path: String?)]) throws {
+        var seen: [String: String] = [:]
+        for (flag, path) in paths {
+            guard let path else { continue }
+            let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+            if let previous = seen[normalized] {
+                throw UsageError(message: "\(flag) must not match \(previous)")
+            }
+            seen[normalized] = flag
         }
     }
 

@@ -10,6 +10,7 @@ struct BuildStage: Sendable {
         timeout: Double,
         derivedDataURL: URL? = nil
     ) async throws -> BuildArtifact {
+        let usesRetainedDerivedData = derivedDataURL != nil
         let derivedDataURL = derivedDataURL ?? sandbox.rootURL.appendingPathComponent(".xmr-derived-data")
 
         var arguments = [
@@ -17,8 +18,8 @@ struct BuildStage: Sendable {
             "-scheme", scheme,
             "-destination", destination,
             "-derivedDataPath", derivedDataURL.path,
-            "CODE_SIGNING_ALLOWED=NO",
         ]
+        if usesRetainedDerivedData { arguments.append("CODE_SIGNING_ALLOWED=NO") }
 
         if let workspaceURL = findXcworkspace(in: sandbox.rootURL) {
             arguments += ["-workspace", workspaceURL.path]

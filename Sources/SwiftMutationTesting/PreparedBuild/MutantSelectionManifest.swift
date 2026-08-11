@@ -14,8 +14,8 @@ struct MutantSelectionManifest: Codable, Equatable, Sendable {
         inventorySHA256: String,
         inventorySourcePaths: [String]
     ) throws -> [String] {
-        let normalized = ownedSourcePaths.map(Self.normalize)
-        let available = Set(inventorySourcePaths.map(Self.normalize))
+        let normalized = ownedSourcePaths.map(CachePathGuard.normalizeRelativePath)
+        let available = Set(inventorySourcePaths.map(CachePathGuard.normalizeRelativePath))
         guard schemaVersion == 1,
             selector == expectedSelector,
             preparedInventorySHA256 == inventorySHA256,
@@ -33,10 +33,14 @@ struct MutantSelectionManifest: Codable, Equatable, Sendable {
             let data = try Data(contentsOf: URL(fileURLWithPath: path))
             _ = try ExactJSON.object(
                 data,
-                keys: ["schemaVersion", "projectInputManifestSHA256", "preparedInventorySHA256", "selector", "runOrdinal", "attemptOrdinal", "ownedSourcePaths"]
+                keys: [
+                    "schemaVersion", "projectInputManifestSHA256", "preparedInventorySHA256", "selector", "runOrdinal",
+                    "attemptOrdinal", "ownedSourcePaths",
+                ]
             )
             let value = try JSONDecoder().decode(Self.self, from: data)
-            guard isDigest(value.projectInputManifestSHA256), isDigest(value.preparedInventorySHA256),
+            guard CachePathGuard.isLowercaseHexDigest(value.projectInputManifestSHA256),
+                CachePathGuard.isLowercaseHexDigest(value.preparedInventorySHA256),
                 !value.selector.isEmpty
             else { throw PreparedBuildError.selectionMismatch }
             return value
@@ -45,11 +49,4 @@ struct MutantSelectionManifest: Codable, Equatable, Sendable {
         }
     }
 
-    private static func normalize(_ path: String) -> String {
-        path.split(separator: "/", omittingEmptySubsequences: true).joined(separator: "/")
-    }
-
-    private static func isDigest(_ value: String) -> Bool {
-        value.count == 64 && value.allSatisfy { $0.isHexDigit && !$0.isUppercase }
-    }
 }

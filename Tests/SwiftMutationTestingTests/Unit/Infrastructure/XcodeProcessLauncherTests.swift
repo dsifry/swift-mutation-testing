@@ -16,12 +16,13 @@ struct XcodeProcessLauncherTests {
             onTimeout: { _ in }
         )
 
-        #expect(try await runner.launch(
-            executableURL: URL(fileURLWithPath: "/usr/bin/true"),
-            arguments: [],
-            workingDirectoryURL: URL(fileURLWithPath: "/tmp"),
-            timeout: 10
-        ) == 0)
+        #expect(
+            try await runner.launch(
+                executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+                arguments: [],
+                workingDirectoryURL: URL(fileURLWithPath: "/tmp"),
+                timeout: 10
+            ) == 0)
         #expect(recorder.started.count == 1)
         #expect(recorder.finished == recorder.started)
     }
@@ -40,11 +41,12 @@ struct XcodeProcessLauncherTests {
             )
         }
         await #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
-            try await runner.launchCapturing(.init(
-                executableURL: URL(fileURLWithPath: "/bin/sleep"), arguments: ["1"],
-                environment: nil, additionalEnvironment: [:],
-                workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 10
-            ))
+            try await runner.launchCapturing(
+                .init(
+                    executableURL: URL(fileURLWithPath: "/bin/sleep"), arguments: ["1"],
+                    environment: nil, additionalEnvironment: [:],
+                    workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 10
+                ))
         }
         XcodeProcessLauncher().makeRunner().onTimeout(0)
         #expect(ProcessRunner.readCapturedOutput(at: URL(fileURLWithPath: "/definitely/missing")) == "")
@@ -91,37 +93,57 @@ struct XcodeProcessLauncherTests {
                 workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
             )
         }
-        let captureFailure = ProcessRunner(onTimeout: { _ in }, createCaptureFile: { _ in false })
+        let captureFailure = ProcessRunner(onTimeout: { _ in }, createCaptureDescriptor: { _ in -1 })
         await #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
-            try await captureFailure.launchCapturing(.init(
-                executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [],
-                environment: nil, additionalEnvironment: [:],
-                workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
-            ))
+            try await captureFailure.launchCapturing(
+                .init(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [],
+                    environment: nil, additionalEnvironment: [:],
+                    workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
+                ))
         }
-        #expect(!ProcessRunner.createPrivateCaptureFile("ignored", openFile: { _ in -1 }))
-        #expect(!ProcessRunner.createPrivateCaptureFile(
-            "ignored", openFile: { _ in open("/dev/null", O_WRONLY) }, closeFile: { descriptor in
-                _ = close(descriptor); return -1
+        let descriptorRecorder = ProcessLifecycleRecorder()
+        let ownedDescriptorRunner = ProcessRunner(
+            onTimeout: { _ in },
+            createCaptureDescriptor: { path in
+                let descriptor = open(path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o600)
+                descriptorRecorder.abort(descriptor)
+                return descriptor
+            },
+            configureSpawn: { _, _, output, _ in
+                #expect(output == descriptorRecorder.aborted.first)
+                return false
             }
-        ))
+        )
+        await #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
+            try await ownedDescriptorRunner.launchCapturing(
+                .init(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [],
+                    environment: nil, additionalEnvironment: [:],
+                    workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
+                ))
+        }
+        #expect(descriptorRecorder.aborted.count == 1)
+        if let ownedDescriptor = descriptorRecorder.aborted.first {
+            #expect(fcntl(ownedDescriptor, F_GETFD) == -1)
+        }
+        #expect(ProcessRunner.openPrivateCaptureFile("ignored", openFile: { _ in -1 }) == -1)
         #expect(throws: PreparedCacheError.unsafeCachePath) {
             try ProcessRunner.captureDirectory(nil, canonicalizer: { _ in nil })
         }
         let insecureCapture = ProcessRunner(
             onTimeout: { _ in },
-            createCaptureFile: { path in
-                FileManager.default.createFile(
-                    atPath: path, contents: nil, attributes: [.posixPermissions: 0o644]
-                )
+            createCaptureDescriptor: { path in
+                open(path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o644)
             }
         )
         await #expect(throws: PreparedCacheError.unsafeCachePath) {
-            try await insecureCapture.launchCapturing(.init(
-                executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [],
-                environment: nil, additionalEnvironment: [:],
-                workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
-            ))
+            try await insecureCapture.launchCapturing(
+                .init(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [],
+                    environment: nil, additionalEnvironment: [:],
+                    workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
+                ))
         }
         let initializeFailure = ProcessRunner(
             onTimeout: { _ in },
@@ -148,19 +170,27 @@ struct XcodeProcessLauncherTests {
         var actions: posix_spawn_file_actions_t?
         var attributes: posix_spawnattr_t?
         let destroyed = ProcessLifecycleRecorder()
-        #expect(!ProcessRunner.initializeSpawnResources(
-            actions: &actions,
-            attributes: &attributes,
-            initializeActions: { pointer in posix_spawn_file_actions_init(pointer) },
-            initializeAttributes: { _ in EIO },
-            destroyActions: { pointer in destroyed.abort(1); return posix_spawn_file_actions_destroy(pointer) }
-        ))
+        #expect(
+            !ProcessRunner.initializeSpawnResources(
+                actions: &actions,
+                attributes: &attributes,
+                initializeActions: { pointer in posix_spawn_file_actions_init(pointer) },
+                initializeAttributes: { _ in EIO },
+                destroyActions: { pointer in
+                    destroyed.abort(1)
+                    return posix_spawn_file_actions_destroy(pointer)
+                }
+            ))
         #expect(destroyed.aborted == [1])
-        #expect(!ProcessRunner.initializeSpawnResources(
-            actions: &actions, attributes: &attributes,
-            initializeActions: { _ in EIO }, initializeAttributes: { _ in 0 },
-            destroyActions: { _ in destroyed.abort(2); return 0 }
-        ))
+        #expect(
+            !ProcessRunner.initializeSpawnResources(
+                actions: &actions, attributes: &attributes,
+                initializeActions: { _ in EIO }, initializeAttributes: { _ in 0 },
+                destroyActions: { _ in
+                    destroyed.abort(2)
+                    return 0
+                }
+            ))
         #expect(destroyed.aborted == [1])
 
         #expect(posix_spawn_file_actions_init(&actions) == 0)
@@ -169,21 +199,65 @@ struct XcodeProcessLauncherTests {
             posix_spawn_file_actions_destroy(&actions)
             posix_spawnattr_destroy(&attributes)
         }
-        #expect(ProcessRunner.configureSpawnResources(
-            actions: &actions, attributes: &attributes, output: STDERR_FILENO, directory: "/tmp"
-        ))
+        #expect(
+            ProcessRunner.configureSpawnResources(
+                actions: &actions, attributes: &attributes, output: STDERR_FILENO, directory: "/tmp"
+            ))
+        let inputActions = SpawnInputRecorder()
+        #expect(
+            !ProcessRunner.configureSpawnResources(
+                actions: &actions,
+                attributes: &attributes,
+                output: STDERR_FILENO,
+                directory: "/tmp",
+                addInput: { _, descriptor, path, flags, _ in
+                    inputActions.record(descriptor: descriptor, path: path, flags: flags)
+                    return EIO
+                }
+            ))
+        #expect(inputActions.descriptor == STDIN_FILENO)
+        #expect(inputActions.path == "/dev/null")
+        #expect(inputActions.flags == O_RDONLY)
         var flags: Int16 = 0
         #expect(posix_spawnattr_getflags(&attributes, &flags) == 0)
         #expect(flags & Int16(POSIX_SPAWN_SETPGROUP) != 0)
         #expect(flags & Int16(POSIX_SPAWN_CLOEXEC_DEFAULT) != 0)
+
+        let captureCloseCalls = ProcessLifecycleRecorder()
+        var captureCloseFailure = ProcessRunner(
+            onTimeout: { _ in },
+            createCaptureDescriptor: { path in
+                _ = FileManager.default.createFile(
+                    atPath: path, contents: nil, attributes: [.posixPermissions: 0o600]
+                )
+                return 101
+            },
+            configureSpawn: { _, _, _, _ in true }
+        )
+        captureCloseFailure.closeCaptureDescriptor = { descriptor in
+            captureCloseCalls.abort(descriptor)
+            return -1
+        }
+        await #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
+            try await captureCloseFailure.launchCapturing(
+                .init(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [],
+                    environment: nil, additionalEnvironment: [:],
+                    workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
+                ))
+        }
+        #expect(captureCloseCalls.aborted == [101])
     }
 
     @Test("waitpid retries EINTR and returns the eventual child status")
     func waitRetriesEINTR() {
         let recorder = WaitRecorder(results: [-1, 77], statuses: [0, 3 << 8], errors: [EINTR, 0])
-        #expect(waitForExit(77, wait: { pid, status, options in
-            recorder.wait(pid: pid, status: status, options: options)
-        }) == 3)
+        #expect(
+            waitForExit(
+                77,
+                wait: { pid, status, options in
+                    recorder.wait(pid: pid, status: status, options: options)
+                }) == 3)
         #expect(recorder.calls == 2)
     }
 
@@ -195,17 +269,19 @@ struct XcodeProcessLauncherTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         chmod(root.path, 0o700)
         let launcher = XcodeProcessLauncher(captureRoot: root)
-        let result = try await launcher.launchCapturing(.init(
-            executableURL: URL(fileURLWithPath: "/bin/echo"), arguments: ["private-output"],
-            environment: nil, additionalEnvironment: [:], workingDirectoryURL: root, timeout: 10
-        ))
+        let result = try await launcher.launchCapturing(
+            .init(
+                executableURL: URL(fileURLWithPath: "/bin/echo"), arguments: ["private-output"],
+                environment: nil, additionalEnvironment: [:], workingDirectoryURL: root, timeout: 10
+            ))
         #expect(result.output.contains("private-output"))
         #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
         await #expect(throws: (any Error).self) {
-            try await launcher.launchCapturing(.init(
-                executableURL: URL(fileURLWithPath: "/missing/executable"), arguments: [],
-                environment: nil, additionalEnvironment: [:], workingDirectoryURL: root, timeout: 10
-            ))
+            try await launcher.launchCapturing(
+                .init(
+                    executableURL: URL(fileURLWithPath: "/missing/executable"), arguments: [],
+                    environment: nil, additionalEnvironment: [:], workingDirectoryURL: root, timeout: 10
+                ))
         }
         #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
     }
@@ -216,34 +292,55 @@ struct XcodeProcessLauncherTests {
         let signals = ProcessLifecycleRecorder()
         let escalation = ProcessEscalationController(
             identity: { _ in group }, status: { _ in .matching },
-            signal: { _, signal in signals.abort(signal); return 0 }, delay: {}
+            signal: { _, signal in
+                signals.abort(signal)
+                return 0
+            }, delay: {}
         )
         escalation.begin(pid: 44)
-        for _ in 0..<50 where signals.aborted.count < 2 { try await Task.sleep(for: .milliseconds(2)) }
+        for _ in 0 ..< 50 where signals.aborted.count < 2 { try await Task.sleep(for: .milliseconds(2)) }
         #expect(signals.aborted == [SIGTERM, SIGKILL])
 
         let cancelledSignals = ProcessLifecycleRecorder()
         let cancelled = ProcessEscalationController(
             identity: { _ in group }, status: { _ in .matching },
-            signal: { _, signal in cancelledSignals.abort(signal); return 0 },
+            signal: { _, signal in
+                cancelledSignals.abort(signal)
+                return 0
+            },
             delay: { try await Task.sleep(for: .seconds(30)) }
         )
         cancelled.begin(pid: 44)
-        for _ in 0..<50 where cancelledSignals.aborted.isEmpty { try await Task.sleep(for: .milliseconds(2)) }
+        for _ in 0 ..< 50 where cancelledSignals.aborted.isEmpty { try await Task.sleep(for: .milliseconds(2)) }
         cancelled.cancel(pid: 44)
         try await Task.sleep(for: .milliseconds(10))
         #expect(cancelledSignals.aborted == [SIGTERM])
 
-        let wrongGroup = ProcessEscalationController(identity: { _ in
-            .init(pid: 44, processGroupID: 1, birthIdentity: "caller")
-        })
+        let directSignals = ProcessLifecycleRecorder()
+        let wrongGroup = ProcessEscalationController(
+            identity: { _ in .init(pid: 44, processGroupID: 1, birthIdentity: "caller") },
+            status: { _ in .matching },
+            signal: { process, signal in
+                directSignals.recordSignal(process: process, signal: signal)
+                return 0
+            },
+            delay: {}
+        )
         wrongGroup.begin(pid: 44)
+        for _ in 0 ..< 500 where directSignals.signaledProcesses.count < 2 {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        #expect(directSignals.signaledProcesses == [44, 44])
+        #expect(directSignals.signals == [SIGTERM, SIGKILL])
 
         let statuses = ProcessStatusRecorder([.mismatched])
         let rejectedSignals = ProcessLifecycleRecorder()
         let rejected = ProcessEscalationController(
             identity: { _ in group }, status: { _ in statuses.next() },
-            signal: { _, signal in rejectedSignals.abort(signal); return 0 }, delay: {}
+            signal: { _, signal in
+                rejectedSignals.abort(signal)
+                return 0
+            }, delay: {}
         )
         rejected.begin(pid: 44)
         rejected.begin(pid: 44)
@@ -254,10 +351,13 @@ struct XcodeProcessLauncherTests {
         let preKillSignals = ProcessLifecycleRecorder()
         let preKill = ProcessEscalationController(
             identity: { _ in group }, status: { _ in preKillStatuses.next() },
-            signal: { _, signal in preKillSignals.abort(signal); return 0 }, delay: {}
+            signal: { _, signal in
+                preKillSignals.abort(signal)
+                return 0
+            }, delay: {}
         )
         preKill.begin(pid: 44)
-        for _ in 0..<50 where preKillSignals.aborted.isEmpty { try await Task.sleep(for: .milliseconds(2)) }
+        for _ in 0 ..< 50 where preKillSignals.aborted.isEmpty { try await Task.sleep(for: .milliseconds(2)) }
         #expect(preKillSignals.aborted == [SIGTERM])
     }
 
@@ -266,46 +366,51 @@ struct XcodeProcessLauncherTests {
         let base = RecordingBuildLauncher()
         let counter = ObservedBuildCountingLauncher(base: base)
         await #expect(throws: PreparedCacheError.invalidCacheState) {
-            try await counter.launchCapturing(.init(
-                executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
-                arguments: ["build-for-testing"], environment: nil, additionalEnvironment: [:],
-                workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
-            ))
+            try await counter.launchCapturing(
+                .init(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
+                    arguments: ["build-for-testing"], environment: nil, additionalEnvironment: [:],
+                    workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
+                ))
         }
         #expect(counter.buildForTestingAttempts == 1)
         #expect(counter.fallbackBuildAttempts == 0)
 
         let fallbackCounter = ObservedBuildCountingLauncher(base: base, countAsFallback: true)
         await #expect(throws: PreparedCacheError.invalidCacheState) {
-            try await fallbackCounter.launchCapturing(ProcessRequest(
-                executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
-                arguments: ["build-for-testing"], environment: nil, additionalEnvironment: [:],
-                workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
-            ))
+            try await fallbackCounter.launchCapturing(
+                ProcessRequest(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
+                    arguments: ["build-for-testing"], environment: nil, additionalEnvironment: [:],
+                    workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
+                ))
         }
         #expect(fallbackCounter.buildForTestingAttempts == 1)
         #expect(fallbackCounter.fallbackBuildAttempts == 0)
         await #expect(throws: PreparedCacheError.invalidCacheState) {
-            try await fallbackCounter.launchCapturing(ProcessRequest(
-                executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
-                arguments: ["test", "-scheme", "App"], environment: nil, additionalEnvironment: [:],
-                workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
-            ))
+            try await fallbackCounter.launchCapturing(
+                ProcessRequest(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
+                    arguments: ["test", "-scheme", "App"], environment: nil, additionalEnvironment: [:],
+                    workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
+                ))
         }
         #expect(fallbackCounter.fallbackBuildAttempts == 1)
         await #expect(throws: PreparedCacheError.invalidCacheState) {
-            try await fallbackCounter.launchCapturing(ProcessRequest(
-                executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
-                arguments: ["test-without-building"], environment: nil, additionalEnvironment: [:],
-                workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
-            ))
+            try await fallbackCounter.launchCapturing(
+                ProcessRequest(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"),
+                    arguments: ["test-without-building"], environment: nil, additionalEnvironment: [:],
+                    workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
+                ))
         }
         await #expect(throws: PreparedCacheError.invalidCacheState) {
-            try await fallbackCounter.launchCapturing(ProcessRequest(
-                executableURL: URL(fileURLWithPath: "/usr/bin/false"),
-                arguments: ["test"], environment: nil, additionalEnvironment: [:],
-                workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
-            ))
+            try await fallbackCounter.launchCapturing(
+                ProcessRequest(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/false"),
+                    arguments: ["test"], environment: nil, additionalEnvironment: [:],
+                    workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
+                ))
         }
         #expect(fallbackCounter.fallbackBuildAttempts == 1)
 
@@ -336,26 +441,29 @@ struct XcodeProcessLauncherTests {
 
     @Test("Custodial launcher persists the live process group and clears it on termination")
     func custodialLauncherRegistryLifecycle() async throws {
-        let directory = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(UUID().uuidString)
+        let directory = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(
+            UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         chmod(directory.path, 0o700)
         let registry = directory.appendingPathComponent("process-custody.json")
         let custody = try ProcessCustody.system(registrationURL: registry)
         let launcher = XcodeProcessLauncher(custody: custody)
+        let release = directory.appendingPathComponent("release")
 
         let task = Task {
             try await launcher.launch(
-                executableURL: URL(fileURLWithPath: "/bin/sleep"),
-                arguments: ["0.2"],
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "while [ ! -f '\(release.path)' ]; do sleep 0.01; done"],
                 workingDirectoryURL: URL(fileURLWithPath: "/tmp"),
                 timeout: 10
             )
         }
-        for _ in 0..<50 where !FileManager.default.fileExists(atPath: registry.path) {
+        for _ in 0 ..< 50 where !FileManager.default.fileExists(atPath: registry.path) {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(try ProcessCustody.readRegisteredGroups(from: registry).count == 1)
+        try Data().write(to: release)
         #expect(try await task.value == 0)
         #expect(try ProcessCustody.readRegisteredGroups(from: registry).isEmpty)
     }
@@ -553,10 +661,30 @@ private final class ProcessLifecycleRecorder: @unchecked Sendable {
     private(set) var started: [Int32] = []
     private(set) var finished: [Int32] = []
     private(set) var aborted: [Int32] = []
+    private(set) var signaledProcesses: [Int32] = []
+    private(set) var signals: [Int32] = []
 
     func start(_ pid: Int32) throws { lock.withLock { started.append(pid) } }
     func finish(_ pid: Int32) { lock.withLock { finished.append(pid) } }
     func abort(_ pid: Int32) { lock.withLock { aborted.append(pid) } }
+    func recordSignal(process: Int32, signal: Int32) {
+        lock.withLock {
+            signaledProcesses.append(process)
+            signals.append(signal)
+        }
+    }
+}
+
+private final class SpawnInputRecorder: @unchecked Sendable {
+    private(set) var descriptor: Int32?
+    private(set) var path: String?
+    private(set) var flags: Int32?
+
+    func record(descriptor: Int32, path: String, flags: Int32) {
+        self.descriptor = descriptor
+        self.path = path
+        self.flags = flags
+    }
 }
 
 private final class WaitRecorder: @unchecked Sendable {
@@ -581,7 +709,9 @@ private final class WaitRecorder: @unchecked Sendable {
 }
 
 private final class RecordingBuildLauncher: @unchecked Sendable, ProcessLaunching {
-    func launch(executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double) async throws -> Int32 {
+    func launch(
+        executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
+    ) async throws -> Int32 {
         throw PreparedCacheError.invalidCacheState
     }
 

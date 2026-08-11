@@ -32,22 +32,27 @@ struct PreparedBuildRecoveryTests {
         let manifest = fixture.root.appendingPathComponent("absent-manifest.json")
         try Data("manifest".utf8).write(to: manifest)
         let evidence = fixture.root.appendingPathComponent("absent-evidence.json")
-        try PreparedBuildCoordinator.recover(options: .init(
-            mode: .recover,
-            buildCacheRoot: fixture.root.path,
-            compatibilityID: String(repeating: "f", count: 64),
-            projectInputManifest: manifest.path,
-            evidenceOutput: evidence.path,
-            invocationNonce: "abcdefghijklmnopqrstuv"
-        ), enableCustody: false)
+        try PreparedBuildCoordinator.recover(
+            options: .init(
+                mode: .recover,
+                buildCacheRoot: fixture.root.path,
+                compatibilityID: String(repeating: "f", count: 64),
+                projectInputManifest: manifest.path,
+                evidenceOutput: evidence.path,
+                invocationNonce: "abcdefghijklmnopqrstuv"
+            ), enableCustody: false)
         let receipt = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: evidence)) as? [String: Any])
         #expect(receipt["outcome"] as? String == "absent")
 
-        let runtimeStore = PreparedBuildStore(root: fixture.root.path, compatibilityID: String(repeating: "e", count: 64))
+        let runtimeStore = PreparedBuildStore(
+            root: fixture.root.path, compatibilityID: String(repeating: "e", count: 64))
         try runtimeStore.prepareDirectory()
         var descriptors: [Int32] = [0, 0]
         #expect(pipe(&descriptors) == 0)
-        defer { close(descriptors[0]); close(descriptors[1]) }
+        defer {
+            close(descriptors[0])
+            close(descriptors[1])
+        }
         let runtimeCoordinator = PreparedBuildCoordinator(
             configuration: makeRunnerConfiguration(),
             options: .init(mode: .prepare, custodyFD: Int(descriptors[0])),
@@ -71,9 +76,15 @@ struct PreparedBuildRecoveryTests {
         }
         #expect(throws: PreparedCacheError.invalidCacheState) {
             try PreparedBuildCoordinator.writeRecoveryEvidence(
-                options: .init(mode: .recover, evidenceOutput: fixture.root.appendingPathComponent("invalid-recovery.json").path),
+                options: .init(
+                    mode: .recover, evidenceOutput: fixture.root.appendingPathComponent("invalid-recovery.json").path),
                 outcome: "failed",
                 state: nil
+            )
+        }
+        #expect(throws: PreparedBuildError.preparedBuildMissing) {
+            try PreparedBuildCoordinator.requireXCTestRun(
+                from: BuildArtifact(derivedDataPath: "/tmp", xctestrunURL: nil, plist: nil)
             )
         }
     }
@@ -84,13 +95,15 @@ struct PreparedBuildRecoveryTests {
         defer { fixture.cleanup() }
         let project = fixture.root.appendingPathComponent("source-project")
         let projectFile = project.appendingPathComponent("App.xcodeproj/project.pbxproj")
-        try FileManager.default.createDirectory(at: projectFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: projectFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         let projectBytes = Data("// project".utf8)
         try projectBytes.write(to: projectFile)
         chmod(projectFile.path, 0o644)
         let digest = ProjectInputManifest.sha256(projectBytes)
         let sourceFile = project.appendingPathComponent("Sources/App.swift")
-        try FileManager.default.createDirectory(at: sourceFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: sourceFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         let sourceBytes = Data("let enabled = true\n".utf8)
         try sourceBytes.write(to: sourceFile)
         chmod(sourceFile.path, 0o644)
@@ -160,17 +173,20 @@ struct PreparedBuildRecoveryTests {
         let preparedStore = PreparedBuildStore(root: fixture.root.path, compatibilityID: compatibilityID)
         let rawState = try Data(contentsOf: preparedStore.stateURL)
         let stateObject = try #require(JSONSerialization.jsonObject(with: rawState) as? [String: Any])
-        #expect(Set(stateObject.keys) == [
-            "schemaVersion", "sandboxPath", "derivedDataPath", "xctestrunPath",
-            "productManifestSHA256", "inventory",
-        ])
+        #expect(
+            Set(stateObject.keys) == [
+                "schemaVersion", "sandboxPath", "derivedDataPath", "xctestrunPath",
+                "productManifestSHA256", "inventory",
+            ])
         let recordedXCTestRun = try #require(stateObject["xctestrunPath"] as? String)
         #expect(FileManager.default.fileExists(atPath: recordedXCTestRun))
         let decodedState = try JSONDecoder().decode(PreparedBuildState.self, from: rawState)
         #expect(decodedState.schemaVersion == 1)
         #expect(decodedState.sandboxPath == preparedStore.sandboxURL.path)
         #expect(decodedState.derivedDataPath == preparedStore.derivedDataURL.path)
-        #expect(CachePathGuard.isContained(URL(fileURLWithPath: decodedState.xctestrunPath), in: preparedStore.derivedDataURL))
+        #expect(
+            CachePathGuard.isContained(
+                URL(fileURLWithPath: decodedState.xctestrunPath), in: preparedStore.derivedDataURL))
         #expect(decodedState.productManifestSHA256.count == 64)
         #expect(decodedState.productManifestSHA256.allSatisfy { $0.isHexDigit && !$0.isUppercase })
         var stateMetadata = stat()
@@ -184,12 +200,14 @@ struct PreparedBuildRecoveryTests {
         try CachePathGuard.validateDirectory(fixture.root, containedIn: fixture.root)
         try CachePathGuard.validateDirectory(preparedStore.directory, containedIn: fixture.root)
         try CachePathGuard.validateRegularFile(preparedStore.stateURL, containedIn: preparedStore.directory)
-        try CachePathGuard.validateNoSymlinkComponents(preparedStore.derivedDataURL, containedIn: preparedStore.directory)
+        try CachePathGuard.validateNoSymlinkComponents(
+            preparedStore.derivedDataURL, containedIn: preparedStore.directory)
         var derivedMetadata = stat()
         #expect(lstat(preparedStore.derivedDataURL.path, &derivedMetadata) == 0)
         #expect(derivedMetadata.st_uid == getuid())
         #expect(derivedMetadata.st_mode & S_IFMT == S_IFDIR)
-        try CachePathGuard.validateNoSymlinkComponents(URL(fileURLWithPath: recordedXCTestRun), containedIn: preparedStore.derivedDataURL)
+        try CachePathGuard.validateNoSymlinkComponents(
+            URL(fileURLWithPath: recordedXCTestRun), containedIn: preparedStore.derivedDataURL)
         let state = try preparedStore.load()
         let selection = MutantSelectionManifest(
             schemaVersion: 1,
@@ -220,7 +238,61 @@ struct PreparedBuildRecoveryTests {
                 configuration: configuration, options: targetOptions(), launcher: launcher
             ).target(input)
         }
-        try Data("compiled".utf8).write(to: product)
+        let mismatchRecoveryEvidence = fixture.root.appendingPathComponent("prepare-after-product-mismatch.json")
+        try await PreparedBuildCoordinator(
+            configuration: configuration,
+            options: .init(
+                mode: .prepare,
+                buildCacheRoot: fixture.root.path,
+                compatibilityID: compatibilityID,
+                projectInputManifest: manifestURL.path,
+                testEnumerationOutput: fixture.root.appendingPathComponent("tests-after-product-mismatch.json").path,
+                mutantInventoryOutput: fixture.root.appendingPathComponent("inventory-after-product-mismatch.json")
+                    .path,
+                evidenceOutput: mismatchRecoveryEvidence.path,
+                custodyFD: 0,
+                invocationNonce: "abcdefghijklmnopqrstuv"
+            ),
+            launcher: launcher
+        ).prepare(input)
+        #expect(try Data(contentsOf: product) == Data("compiled".utf8))
+        let mismatchRecoveryReceipt = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: mismatchRecoveryEvidence)) as? [String: Any]
+        )
+        #expect(mismatchRecoveryReceipt["outcome"] as? String == "ready")
+        #expect(mismatchRecoveryReceipt["fullBuilds"] as? Int == 1)
+
+        let lockURL = preparedStore.directory.appendingPathComponent("engine.lock")
+        let lockInode = try #require(CachePathGuard.metadata(at: lockURL)?.st_ino)
+        let cacheStateURL = preparedStore.directory.appendingPathComponent("cache-state.json")
+        var divergentCacheState = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: cacheStateURL)) as? [String: Any]
+        )
+        divergentCacheState["productManifestSHA256"] = String(repeating: "0", count: 64)
+        try JSONSerialization.data(withJSONObject: divergentCacheState).write(to: cacheStateURL)
+        chmod(cacheStateURL.path, 0o600)
+        let divergentEvidence = fixture.root.appendingPathComponent("prepare-after-journal-mismatch.json")
+        try await PreparedBuildCoordinator(
+            configuration: configuration,
+            options: .init(
+                mode: .prepare,
+                buildCacheRoot: fixture.root.path,
+                compatibilityID: compatibilityID,
+                projectInputManifest: manifestURL.path,
+                testEnumerationOutput: fixture.root.appendingPathComponent("tests-after-journal-mismatch.json").path,
+                mutantInventoryOutput: fixture.root.appendingPathComponent("inventory-after-journal-mismatch.json")
+                    .path,
+                evidenceOutput: divergentEvidence.path,
+                custodyFD: 0,
+                invocationNonce: "abcdefghijklmnopqrstuv"
+            ),
+            launcher: launcher
+        ).prepare(input)
+        #expect(CachePathGuard.metadata(at: lockURL)?.st_ino == lockInode)
+        let repairedProduct = try PreparedBuildStore(root: fixture.root.path, compatibilityID: compatibilityID).load()
+            .productManifestSHA256
+        let actualProduct = try RetainedProductManifest.sha256(derivedDataURL: preparedStore.derivedDataURL)
+        #expect(repairedProduct == actualProduct)
 
         let changedManifest = fixture.root.appendingPathComponent("changed-manifest.json")
         try Data("changed".utf8).write(to: changedManifest)
@@ -242,15 +314,17 @@ struct PreparedBuildRecoveryTests {
             ).target(input)
         }
         let mismatchedSelection = fixture.root.appendingPathComponent("mismatched-selection.json")
-        try JSONEncoder().encode(MutantSelectionManifest(
-            schemaVersion: 1,
-            projectInputManifestSHA256: String(repeating: "0", count: 64),
-            preparedInventorySHA256: try state.inventory.sha256,
-            selector: selection.selector,
-            runOrdinal: 0,
-            attemptOrdinal: 0,
-            ownedSourcePaths: []
-        )).write(to: mismatchedSelection)
+        try JSONEncoder().encode(
+            MutantSelectionManifest(
+                schemaVersion: 1,
+                projectInputManifestSHA256: String(repeating: "0", count: 64),
+                preparedInventorySHA256: try state.inventory.sha256,
+                selector: selection.selector,
+                runOrdinal: 0,
+                attemptOrdinal: 0,
+                ownedSourcePaths: []
+            )
+        ).write(to: mismatchedSelection)
         await #expect(throws: PreparedBuildError.selectionMismatch) {
             try await PreparedBuildCoordinator(
                 configuration: configuration,
@@ -259,15 +333,17 @@ struct PreparedBuildRecoveryTests {
             ).target(input)
         }
         let wrongSelector = fixture.root.appendingPathComponent("wrong-selector.json")
-        try JSONEncoder().encode(MutantSelectionManifest(
-            schemaVersion: 1,
-            projectInputManifestSHA256: manifestDigest,
-            preparedInventorySHA256: try state.inventory.sha256,
-            selector: "OtherTests",
-            runOrdinal: 0,
-            attemptOrdinal: 0,
-            ownedSourcePaths: []
-        )).write(to: wrongSelector)
+        try JSONEncoder().encode(
+            MutantSelectionManifest(
+                schemaVersion: 1,
+                projectInputManifestSHA256: manifestDigest,
+                preparedInventorySHA256: try state.inventory.sha256,
+                selector: "OtherTests",
+                runOrdinal: 0,
+                attemptOrdinal: 0,
+                ownedSourcePaths: []
+            )
+        ).write(to: wrongSelector)
         await #expect(throws: PreparedBuildError.selectionMismatch) {
             try await PreparedBuildCoordinator(
                 configuration: configuration,
@@ -291,7 +367,8 @@ struct PreparedBuildRecoveryTests {
             launcher: launcher
         ).target(input)
         #expect(results.isEmpty)
-        let targetObject = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: targetEvidence)) as? [String: Any])
+        let targetObject = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: targetEvidence)) as? [String: Any])
         #expect(targetObject["outcome"] as? String == "reused")
         let nonceFreeEvidence = fixture.root.appendingPathComponent("target-no-nonce-evidence.json")
         _ = try await PreparedBuildCoordinator(
@@ -339,14 +416,16 @@ struct PreparedBuildRecoveryTests {
         let validXCTestRun = try Data(contentsOf: xctestrun)
         try Data("invalid plist".utf8).write(to: xctestrun)
         let storeForInvalidPlist = PreparedBuildStore(root: fixture.root.path, compatibilityID: compatibilityID)
-        let invalidProductDigest = try RetainedProductManifest.sha256(derivedDataURL: storeForInvalidPlist.derivedDataURL)
-        try storeForInvalidPlist.save(.init(
-            sandboxPath: state.sandboxPath,
-            derivedDataPath: state.derivedDataPath,
-            xctestrunPath: state.xctestrunPath,
-            productManifestSHA256: invalidProductDigest,
-            inventory: state.inventory
-        ))
+        let invalidProductDigest = try RetainedProductManifest.sha256(
+            derivedDataURL: storeForInvalidPlist.derivedDataURL)
+        try storeForInvalidPlist.save(
+            .init(
+                sandboxPath: state.sandboxPath,
+                derivedDataPath: state.derivedDataPath,
+                xctestrunPath: state.xctestrunPath,
+                productManifestSHA256: invalidProductDigest,
+                inventory: state.inventory
+            ))
         try CacheRecovery(identityDirectory: storeForInvalidPlist.directory, collectionRoot: fixture.root)
             .markReady(productManifestSHA256: invalidProductDigest)
         let invalidPlistEvidence = fixture.root.appendingPathComponent("target-invalid-plist-evidence.json")
@@ -405,7 +484,8 @@ struct PreparedBuildRecoveryTests {
                 launcher: launcher
             ).prepare(input)
         }
-        let failed = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: failedEvidence)) as? [String: Any])
+        let failed = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: failedEvidence)) as? [String: Any])
         #expect(failed["outcome"] as? String == "failed")
         #expect(failed["fullBuilds"] as? Int == 1)
         #expect(failed["incrementalBuilds"] as? Int == 0)
@@ -455,29 +535,34 @@ struct PreparedBuildRecoveryTests {
         ).markReady(productManifestSHA256: latestState.productManifestSHA256)
         var recoveryDescriptors: [Int32] = [0, 0]
         #expect(pipe(&recoveryDescriptors) == 0)
-        defer { close(recoveryDescriptors[0]); close(recoveryDescriptors[1]) }
+        defer {
+            close(recoveryDescriptors[0])
+            close(recoveryDescriptors[1])
+        }
         let readyEvidence = fixture.root.appendingPathComponent("ready-recovery-evidence.json")
-        try PreparedBuildCoordinator.recover(options: .init(
-            mode: .recover,
-            buildCacheRoot: fixture.root.path,
-            compatibilityID: compatibilityID,
-            projectInputManifest: manifestURL.path,
-            evidenceOutput: readyEvidence.path,
-            custodyFD: Int(recoveryDescriptors[0]),
-            invocationNonce: "abcdefghijklmnopqrstuv"
-        ), enableCustody: true)
+        try PreparedBuildCoordinator.recover(
+            options: .init(
+                mode: .recover,
+                buildCacheRoot: fixture.root.path,
+                compatibilityID: compatibilityID,
+                projectInputManifest: manifestURL.path,
+                evidenceOutput: readyEvidence.path,
+                custodyFD: Int(recoveryDescriptors[0]),
+                invocationNonce: "abcdefghijklmnopqrstuv"
+            ), enableCustody: true)
         let readyReceipt = try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: readyEvidence)) as? [String: Any]
         )
         #expect(readyReceipt["outcome"] as? String == "ready")
-        try PreparedBuildCoordinator.recover(options: .init(
-            mode: .recover,
-            buildCacheRoot: fixture.root.path,
-            compatibilityID: compatibilityID,
-            projectInputManifest: manifestURL.path,
-            custodyFD: 0,
-            invocationNonce: "abcdefghijklmnopqrstuv"
-        ), enableCustody: false)
+        try PreparedBuildCoordinator.recover(
+            options: .init(
+                mode: .recover,
+                buildCacheRoot: fixture.root.path,
+                compatibilityID: compatibilityID,
+                projectInputManifest: manifestURL.path,
+                custodyFD: 0,
+                invocationNonce: "abcdefghijklmnopqrstuv"
+            ), enableCustody: false)
 
         launcher.omitBuildProducts = true
         let missingProductEvidence = fixture.root.appendingPathComponent("missing-product-evidence.json")
@@ -513,18 +598,23 @@ struct PreparedBuildRecoveryTests {
         let products = fixture.identityA.appendingPathComponent("DerivedData/Build/Products")
         try FileManager.default.createDirectory(at: products, withIntermediateDirectories: true)
         let binary = products.appendingPathComponent("App.app/App")
-        try FileManager.default.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("binary-a".utf8).write(to: binary)
         chmod(binary.path, 0o755)
         let xctestrun = products.appendingPathComponent("App.xctestrun")
         try Data("plist".utf8).write(to: xctestrun)
         chmod(xctestrun.path, 0o644)
 
-        let first = try RetainedProductManifest.sha256(derivedDataURL: fixture.identityA.appendingPathComponent("DerivedData"))
-        let second = try RetainedProductManifest.sha256(derivedDataURL: fixture.identityA.appendingPathComponent("DerivedData"))
+        let first = try RetainedProductManifest.sha256(
+            derivedDataURL: fixture.identityA.appendingPathComponent("DerivedData"))
+        let second = try RetainedProductManifest.sha256(
+            derivedDataURL: fixture.identityA.appendingPathComponent("DerivedData"))
         #expect(first == second)
         try Data("binary-b".utf8).write(to: binary)
-        #expect(try RetainedProductManifest.sha256(derivedDataURL: fixture.identityA.appendingPathComponent("DerivedData")) != first)
+        #expect(
+            try RetainedProductManifest.sha256(derivedDataURL: fixture.identityA.appendingPathComponent("DerivedData"))
+                != first)
         #expect(throws: PreparedCacheError.productManifestMismatch) {
             try RetainedProductManifest.sha256(
                 derivedDataURL: fixture.identityA.appendingPathComponent("DerivedData"),
@@ -592,7 +682,8 @@ struct PreparedBuildRecoveryTests {
         }
         let outside = fixture.root.appendingPathComponent("outside-product")
         try Data("product".utf8).write(to: outside)
-        try FileManager.default.createSymbolicLink(at: products.appendingPathComponent("linked"), withDestinationURL: outside)
+        try FileManager.default.createSymbolicLink(
+            at: products.appendingPathComponent("linked"), withDestinationURL: outside)
         #expect(throws: PreparedCacheError.productManifestMismatch) {
             try RetainedProductManifest.sha256(derivedDataURL: derived)
         }
@@ -626,6 +717,78 @@ struct PreparedBuildRecoveryTests {
         }
     }
 
+    @Test("Recovery journals replace atomically and sync file plus parent")
+    func recoveryJournalDurability() throws {
+        let fixture = try RecoveryFixture()
+        defer { fixture.cleanup() }
+        try fixture.makeIdentity(fixture.identityA)
+
+        let syncCalls = LockedCounter()
+        let durable = CacheRecovery(
+            identityDirectory: fixture.identityA,
+            collectionRoot: fixture.root,
+            syncDescriptor: { _ in
+                syncCalls.increment()
+                return 0
+            }
+        )
+        try durable.markDirty(previousReadyProductManifestSHA256: fixture.productA)
+        #expect(syncCalls.value == 2)
+
+        let stateURL = fixture.identityA.appendingPathComponent("cache-state.json")
+        let prior = try Data(contentsOf: stateURL)
+        let replacementFailure = CacheRecovery(
+            identityDirectory: fixture.identityA,
+            collectionRoot: fixture.root,
+            replaceJournal: { _, _ in
+                errno = EIO
+                return -1
+            }
+        )
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try replacementFailure.markReady(productManifestSHA256: fixture.productB)
+        }
+        #expect(try Data(contentsOf: stateURL) == prior)
+        #expect(
+            try FileManager.default.contentsOfDirectory(atPath: fixture.identityA.path)
+                .filter { $0.hasPrefix(".cache-state.json.") }.isEmpty
+        )
+
+        let syncFailure = CacheRecovery(
+            identityDirectory: fixture.identityA,
+            collectionRoot: fixture.root,
+            syncDescriptor: { _ in
+                errno = EIO
+                return -1
+            }
+        )
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try syncFailure.writeRetentionMetadata(lastUsedAt: .distantPast)
+        }
+        let openFileFailure = CacheRecovery(
+            identityDirectory: fixture.identityA,
+            collectionRoot: fixture.root,
+            openJournalFile: { _ in -1 }
+        )
+        #expect(throws: PreparedCacheError.unsafeCachePath) { try openFileFailure.markDirty() }
+        let openDirectoryFailure = CacheRecovery(
+            identityDirectory: fixture.identityA,
+            collectionRoot: fixture.root,
+            openJournalDirectory: { _ in -1 }
+        )
+        #expect(throws: PreparedCacheError.unsafeCachePath) { try openDirectoryFailure.markDirty() }
+        let parentSyncCalls = LockedCounter()
+        let parentSyncFailure = CacheRecovery(
+            identityDirectory: fixture.identityA,
+            collectionRoot: fixture.root,
+            syncDescriptor: { _ in
+                parentSyncCalls.increment()
+                return parentSyncCalls.value == 1 ? 0 : -1
+            }
+        )
+        #expect(throws: PreparedCacheError.unsafeCachePath) { try parentSyncFailure.markDirty() }
+    }
+
     @Test("Closed project manifests materialize identical private trees across source roots")
     func projectInputMaterializationIsStable() throws {
         let fixture = try RecoveryFixture()
@@ -639,7 +802,8 @@ struct PreparedBuildRecoveryTests {
         let bytes = Data("let enabled = true\n".utf8)
         for source in [sourceA, sourceB] {
             let file = source.appendingPathComponent("Sources/Nested/Feature.swift")
-            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
             try bytes.write(to: file)
             chmod(file.path, 0o644)
         }
@@ -673,10 +837,15 @@ struct PreparedBuildRecoveryTests {
         let fileB = outputB.appendingPathComponent("Sources/Nested/Feature.swift")
         #expect(try Data(contentsOf: fileA) == bytes)
         #expect(try Data(contentsOf: fileB) == bytes)
-        #expect(try FileManager.default.attributesOfItem(atPath: fileA.path)[.modificationDate] as? Date
-            == FileManager.default.attributesOfItem(atPath: fileB.path)[.modificationDate] as? Date)
-        #expect(try FileManager.default.attributesOfItem(atPath: outputA.appendingPathComponent("Sources").path)[.posixPermissions] as? Int == 0o700)
-        #expect(try FileManager.default.attributesOfItem(atPath: outputA.appendingPathComponent("Sources/Nested").path)[.posixPermissions] as? Int == 0o700)
+        #expect(
+            try FileManager.default.attributesOfItem(atPath: fileA.path)[.modificationDate] as? Date
+                == FileManager.default.attributesOfItem(atPath: fileB.path)[.modificationDate] as? Date)
+        #expect(
+            try FileManager.default.attributesOfItem(atPath: outputA.appendingPathComponent("Sources").path)[
+                .posixPermissions] as? Int == 0o700)
+        #expect(
+            try FileManager.default.attributesOfItem(atPath: outputA.appendingPathComponent("Sources/Nested").path)[
+                .posixPermissions] as? Int == 0o700)
     }
 
     @Test("Project materialization rejects forbidden paths, symlinks, and manifest drift")
@@ -749,13 +918,15 @@ struct PreparedBuildRecoveryTests {
         let nestedDigest = ProjectInputManifest.sha256(nestedBytes)
         let intermediateLinkManifest = ProjectInputManifest(
             schemaVersion: 1,
-            entries: [.init(
-                path: "Linked/Nested.swift",
-                mode: 0o644,
-                byteSize: nestedBytes.count,
-                sha256: nestedDigest,
-                deterministicMTime: ProjectInputManifest.deterministicMTime(forSHA256: nestedDigest)
-            )]
+            entries: [
+                .init(
+                    path: "Linked/Nested.swift",
+                    mode: 0o644,
+                    byteSize: nestedBytes.count,
+                    sha256: nestedDigest,
+                    deterministicMTime: ProjectInputManifest.deterministicMTime(forSHA256: nestedDigest)
+                )
+            ]
         )
         let intermediateLinkURL = fixture.root.appendingPathComponent("intermediate-link.json")
         try JSONEncoder().encode(intermediateLinkManifest).write(to: intermediateLinkURL)
@@ -788,10 +959,14 @@ struct PreparedBuildRecoveryTests {
             try JSONSerialization.data(withJSONObject: object).write(to: url)
             return url
         }
-        func entry(path: String = "Sources/App.swift", mode: Int = 0o644, size: Int? = nil,
-                   hash: String? = nil, time: Int64? = nil) -> [String: Any] {
-            ["path": path, "mode": mode, "byteSize": size ?? bytes.count,
-             "sha256": hash ?? digest, "deterministicMTime": time ?? mtime]
+        func entry(
+            path: String = "Sources/App.swift", mode: Int = 0o644, size: Int? = nil,
+            hash: String? = nil, time: Int64? = nil
+        ) -> [String: Any] {
+            [
+                "path": path, "mode": mode, "byteSize": size ?? bytes.count,
+                "sha256": hash ?? digest, "deterministicMTime": time ?? mtime,
+            ]
         }
         let invalidRoots: [[String: Any]] = [
             ["schemaVersion": 2, "entries": [entry()]],
@@ -822,7 +997,29 @@ struct PreparedBuildRecoveryTests {
         }
 
         let valid = try write(["schemaVersion": 1, "entries": [entry()]])
-        let override = SchematizedFile(originalPath: file.path, schematizedContent: String(decoding: bytes, as: UTF8.self))
+        #expect(ProjectInputMaterializer.isForbidden(""))
+        try ProjectInputMaterializer.requireNoUnusedOverrides([:])
+        #expect(throws: PreparedCacheError.invalidProjectInputManifest) {
+            try ProjectInputMaterializer.requireNoUnusedOverrides(["Sources/Missing.swift": ""])
+        }
+        let sibling = source.appendingPathComponent("Sources/B.swift")
+        try bytes.write(to: sibling)
+        chmod(sibling.path, 0o644)
+        let directoryPreparations = LockedCounter()
+        let cachedDirectoryMaterializer = ProjectInputMaterializer(
+            sourceRoot: source,
+            identityDirectory: fixture.identityA,
+            collectionRoot: fixture.root,
+            didPrepareOutputDirectory: { _ in directoryPreparations.increment() }
+        )
+        let siblingManifest = try write([
+            "schemaVersion": 1,
+            "entries": [entry(), entry(path: "Sources/B.swift")],
+        ])
+        _ = try cachedDirectoryMaterializer.materialize(manifestAt: siblingManifest)
+        #expect(directoryPreparations.value == 1)
+        let override = SchematizedFile(
+            originalPath: file.path, schematizedContent: String(decoding: bytes, as: UTF8.self))
         let project = try materializer.materialize(
             manifestAt: valid,
             schematizedFiles: [override],
@@ -831,6 +1028,10 @@ struct PreparedBuildRecoveryTests {
         let output = try String(contentsOf: project.appendingPathComponent("Sources/App.swift"), encoding: .utf8)
         #expect(output.contains("break"))
         #expect(output.contains("nonisolated(unsafe) var __swiftMutationTestingID"))
+        let outputMetadata = try #require(
+            CachePathGuard.metadata(at: project.appendingPathComponent("Sources/App.swift")))
+        #expect(outputMetadata.st_mode & 0o777 == 0o644)
+        #expect(outputMetadata.st_mtimespec.tv_sec == mtime)
         let missingMaterializedTarget = ProjectInputMaterializer(
             sourceRoot: source,
             identityDirectory: fixture.identityA,
@@ -855,8 +1056,11 @@ struct PreparedBuildRecoveryTests {
         #expect(throws: PreparedCacheError.invalidProjectInputManifest) {
             try materializer.materialize(
                 manifestAt: valid,
-                schematizedFiles: [.init(originalPath: fixture.root.appendingPathComponent("outside.swift").path,
-                                          schematizedContent: "")]
+                schematizedFiles: [
+                    .init(
+                        originalPath: fixture.root.appendingPathComponent("outside.swift").path,
+                        schematizedContent: "")
+                ]
             )
         }
 
@@ -882,6 +1086,13 @@ struct PreparedBuildRecoveryTests {
                 manifestAt: valid,
                 schematizedFiles: [missingOverride],
                 supportFileContent: "support"
+            )
+        }
+        #expect(throws: PreparedCacheError.invalidProjectInputManifest) {
+            try materializer.materialize(
+                manifestAt: valid,
+                schematizedFiles: [missingOverride],
+                supportFileContent: ""
             )
         }
 
@@ -996,27 +1207,35 @@ struct PreparedBuildRecoveryTests {
         #expect(closeRecorder.count == 1)
 
         #expect(throws: PreparedCacheError.unsafeCachePath) {
-            try CacheLock(identityDirectory: fixture.identityA, openLock: { path in
-                open(path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0o000)
-            })
+            try CacheLock(
+                identityDirectory: fixture.identityA,
+                openLock: { path in
+                    open(path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0o000)
+                })
         }
         #expect(throws: PreparedCacheError.unsafeCachePath) {
-            try CacheLock(identityDirectory: fixture.identityA, openLock: { _ in
-                errno = EACCES
-                return -1
-            })
+            try CacheLock(
+                identityDirectory: fixture.identityA,
+                openLock: { _ in
+                    errno = EACCES
+                    return -1
+                })
         }
         #expect(throws: PreparedCacheError.unsafeCachePath) {
-            try CacheLock(identityDirectory: fixture.identityA, openLock: { path in
-                _ = open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
-                return open("/dev/null", O_RDONLY)
-            })
+            try CacheLock(
+                identityDirectory: fixture.identityA,
+                openLock: { path in
+                    _ = open(path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
+                    return open("/dev/null", O_RDONLY)
+                })
         }
         #expect(throws: PreparedCacheError.unsafeCachePath) {
-            try CacheLock(identityDirectory: fixture.identityA, acquireLock: { _ in
-                errno = EIO
-                return -1
-            })
+            try CacheLock(
+                identityDirectory: fixture.identityA,
+                acquireLock: { _ in
+                    errno = EIO
+                    return -1
+                })
         }
     }
 
@@ -1067,7 +1286,8 @@ struct PreparedBuildRecoveryTests {
         try recovery.markDirty()
         try fixture.makeMaterializedSource(in: fixture.identityA)
         let dirtyProduct = fixture.identityA.appendingPathComponent("DerivedData/Build/Products/App")
-        try FileManager.default.createDirectory(at: dirtyProduct.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: dirtyProduct.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("partial".utf8).write(to: dirtyProduct)
         let dirtyPreparedState = fixture.identityA.appendingPathComponent("prepared-build.json")
         try Data("partial".utf8).write(to: dirtyPreparedState)
@@ -1198,7 +1418,8 @@ struct PreparedBuildRecoveryTests {
         let selection = fixture.identityA.appendingPathComponent("selection.json")
         try Data("private selector".utf8).write(to: selection)
         let derived = fixture.identityA.appendingPathComponent("DerivedData/Build/product.bin")
-        try FileManager.default.createDirectory(at: derived.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: derived.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("compiled product".utf8).write(to: derived)
 
         #expect(try recovery.recover(expectedProductManifestSHA256: fixture.productA) == .recovered)
@@ -1216,7 +1437,7 @@ struct PreparedBuildRecoveryTests {
             terminateGroup: { try recorder.terminate($0) },
             waitForGroup: { try recorder.wait($0) }
         )
-        let groups = (1...4).map {
+        let groups = (1 ... 4).map {
             CustodiedProcessGroup(pid: Int32($0), processGroupID: Int32(100 + $0), birthIdentity: "birth-\($0)")
         }
         for group in groups {
@@ -1355,7 +1576,10 @@ struct PreparedBuildRecoveryTests {
             verifyIdentity: { recorder.verify($0) },
             terminateGroup: { try recorder.terminate($0) },
             waitForGroup: { try recorder.wait($0) },
-            replaceRegistry: { _, _ in errno = EIO; return -1 }
+            replaceRegistry: { _, _ in
+                errno = EIO
+                return -1
+            }
         )
         #expect(throws: PreparedCacheError.unsafeCachePath) {
             try replacementFailure.unregister(pid: group.pid)
@@ -1367,18 +1591,23 @@ struct PreparedBuildRecoveryTests {
             verifyIdentity: { recorder.verify($0) },
             terminateGroup: { try recorder.terminate($0) },
             waitForGroup: { try recorder.wait($0) },
-            syncDescriptor: { _ in errno = EIO; return -1 }
+            syncDescriptor: { _ in
+                errno = EIO
+                return -1
+            }
         )
         #expect(throws: PreparedCacheError.unsafeCachePath) { try syncFailure.register(group) }
         #expect(try ProcessCustody.readRegisteredGroups(from: registry).isEmpty)
 
         for failingCustody in [
             ProcessCustody(
-                registrationURL: registry, verifyIdentity: { _ in true }, terminateGroup: { _ in }, waitForGroup: { _ in },
+                registrationURL: registry, verifyIdentity: { _ in true }, terminateGroup: { _ in },
+                waitForGroup: { _ in },
                 openRegistryFile: { _ in -1 }
             ),
             ProcessCustody(
-                registrationURL: registry, verifyIdentity: { _ in true }, terminateGroup: { _ in }, waitForGroup: { _ in },
+                registrationURL: registry, verifyIdentity: { _ in true }, terminateGroup: { _ in },
+                waitForGroup: { _ in },
                 openRegistryDirectory: { _ in -1 }
             ),
         ] {
@@ -1387,7 +1616,10 @@ struct PreparedBuildRecoveryTests {
         let syncCalls = LockedCounter()
         let parentSyncFailure = ProcessCustody(
             registrationURL: registry, verifyIdentity: { _ in true }, terminateGroup: { _ in }, waitForGroup: { _ in },
-            syncDescriptor: { _ in syncCalls.increment(); return syncCalls.value == 1 ? 0 : -1 }
+            syncDescriptor: { _ in
+                syncCalls.increment()
+                return syncCalls.value == 1 ? 0 : -1
+            }
         )
         #expect(throws: PreparedCacheError.unsafeCachePath) { try parentSyncFailure.register(group) }
     }
@@ -1419,7 +1651,10 @@ struct PreparedBuildRecoveryTests {
         let descendantsLive = try ProcessCustody.system(
             registrationURL: fixture.identityA.appendingPathComponent("descendants-live.json"),
             identityStatus: { _ in .absent },
-            signal: { process, signal in liveRecorder.record(process: process, signal: signal); return 0 },
+            signal: { process, signal in
+                liveRecorder.record(process: process, signal: signal)
+                return 0
+            },
             sleep: { _ in }
         )
         try descendantsLive.register(.init(pid: Int32.max, processGroupID: 43, birthIdentity: "gone"))
@@ -1430,15 +1665,19 @@ struct PreparedBuildRecoveryTests {
         #expect(liveRecorder.calls.first?.0 == -43)
         #expect(liveRecorder.calls.first?.1 == 0)
         #expect(!descendantsLive.isQuiescent)
-        #expect(try ProcessCustody.readRegisteredGroups(
-            from: fixture.identityA.appendingPathComponent("descendants-live.json")
-        ).count == 1)
+        #expect(
+            try ProcessCustody.readRegisteredGroups(
+                from: fixture.identityA.appendingPathComponent("descendants-live.json")
+            ).count == 1)
 
         let probeFailureRegistry = fixture.identityA.appendingPathComponent("group-probe-failure.json")
         let probeFailure = try ProcessCustody.system(
             registrationURL: probeFailureRegistry,
             identityStatus: { _ in .absent },
-            signal: { _, _ in errno = EACCES; return -1 },
+            signal: { _, _ in
+                errno = EACCES
+                return -1
+            },
             sleep: { _ in }
         )
         let unprovable = CustodiedProcessGroup(pid: Int32.max, processGroupID: 44, birthIdentity: "gone")
@@ -1487,6 +1726,90 @@ struct PreparedBuildRecoveryTests {
         #expect(try ProcessCustody.readRegisteredGroups(from: recoveryRegistry) == [group])
     }
 
+    @Test("Custody polling never blocks concurrent process registration")
+    func custodyPollingDoesNotHoldRegistryMutex() throws {
+        let fixture = try RecoveryFixture()
+        defer { fixture.cleanup() }
+        try fixture.makeIdentity(fixture.identityA)
+        let registry = fixture.identityA.appendingPathComponent("concurrent-custody.json")
+        let first = CustodiedProcessGroup(pid: 7, processGroupID: 42, birthIdentity: "first")
+        let second = CustodiedProcessGroup(pid: 8, processGroupID: 43, birthIdentity: "second")
+        let pollingStarted = DispatchSemaphore(value: 0)
+        let allowAbsence = DispatchSemaphore(value: 0)
+        let unregisterFinished = DispatchSemaphore(value: 0)
+        let registrationFinished = DispatchSemaphore(value: 0)
+        let custody = ProcessCustody(
+            registrationURL: registry,
+            verifyIdentity: { _ in true },
+            terminateGroup: { _ in },
+            waitForGroup: { _ in },
+            groupIsAbsent: { _ in
+                pollingStarted.signal()
+                _ = allowAbsence.wait(timeout: .now() + 2)
+                return true
+            }
+        )
+        try custody.register(first)
+        #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
+            try custody.register(.init(pid: first.pid, processGroupID: 99, birthIdentity: "reused-pid"))
+        }
+        #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
+            try custody.register(.init(pid: 99, processGroupID: first.processGroupID, birthIdentity: "reused-pgid"))
+        }
+        let unregisterThread = Thread {
+            try? custody.unregister(pid: first.pid)
+            unregisterFinished.signal()
+        }
+        unregisterThread.start()
+        #expect(pollingStarted.wait(timeout: .now() + 1) == .success)
+        let registerThread = Thread {
+            try? custody.register(second)
+            registrationFinished.signal()
+        }
+        registerThread.start()
+        let registeredWhilePolling = registrationFinished.wait(timeout: .now() + 1) == .success
+        allowAbsence.signal()
+        #expect(unregisterFinished.wait(timeout: .now() + 1) == .success)
+        #expect(registeredWhilePolling)
+        #expect(!custody.isQuiescent)
+        #expect(try ProcessCustody.readRegisteredGroups(from: registry) == [second])
+    }
+
+    @Test("Custody quiescence reconciles but does not erase a concurrent new group")
+    func custodyQuiescenceReconcilesConcurrentRegistration() throws {
+        let first = CustodiedProcessGroup(pid: 17, processGroupID: 52, birthIdentity: "first")
+        let second = CustodiedProcessGroup(pid: 18, processGroupID: 53, birthIdentity: "second")
+        let waitStarted = DispatchSemaphore(value: 0)
+        let allowWait = DispatchSemaphore(value: 0)
+        let quiescenceFinished = DispatchSemaphore(value: 0)
+        let registrationFinished = DispatchSemaphore(value: 0)
+        let custody = ProcessCustody(
+            verifyIdentity: { _ in true },
+            terminateGroup: { _ in },
+            waitForGroup: { _ in
+                waitStarted.signal()
+                _ = allowWait.wait(timeout: .now() + 2)
+            }
+        )
+        try custody.register(first)
+        let quiescenceThread = Thread {
+            try? custody.handleEngineTermination()
+            quiescenceFinished.signal()
+        }
+        quiescenceThread.start()
+        #expect(waitStarted.wait(timeout: .now() + 1) == .success)
+        let registerThread = Thread {
+            try? custody.register(second)
+            registrationFinished.signal()
+        }
+        registerThread.start()
+        let registeredWhileWaiting = registrationFinished.wait(timeout: .now() + 1) == .success
+        allowWait.signal()
+        #expect(quiescenceFinished.wait(timeout: .now() + 1) == .success)
+        #expect(registeredWhileWaiting)
+        #expect(!custody.isQuiescent)
+    }
+
     @Test("Command failure scrub preserves unresolved custody for the next recovery")
     func commandFailurePreservesCustodyRegistry() throws {
         let fixture = try RecoveryFixture()
@@ -1521,7 +1844,10 @@ struct PreparedBuildRecoveryTests {
             identityStatus: { _ in statuses.next() },
             signal: { process, signal in
                 signals.record(process: process, signal: signal)
-                if signal == 0 { errno = ESRCH; return -1 }
+                if signal == 0 {
+                    errno = ESRCH
+                    return -1
+                }
                 return 0
             },
             sleep: { _ in }
@@ -1553,7 +1879,10 @@ struct PreparedBuildRecoveryTests {
         let termCustody = try ProcessCustody.system(
             registrationURL: fixture.identityA.appendingPathComponent("term-revalidation.json"),
             identityStatus: { _ in beforeTerm.next() },
-            signal: { process, signal in termSignals.record(process: process, signal: signal); return 0 },
+            signal: { process, signal in
+                termSignals.record(process: process, signal: signal)
+                return 0
+            },
             sleep: { _ in }
         )
         try termCustody.register(group)
@@ -1567,7 +1896,10 @@ struct PreparedBuildRecoveryTests {
         let killCustody = try ProcessCustody.system(
             registrationURL: fixture.identityA.appendingPathComponent("kill-revalidation.json"),
             identityStatus: { _ in beforeKill.next() },
-            signal: { process, signal in killSignals.record(process: process, signal: signal); return 0 },
+            signal: { process, signal in
+                killSignals.record(process: process, signal: signal)
+                return 0
+            },
             sleep: { _ in }
         )
         try killCustody.register(group)
@@ -1582,7 +1914,8 @@ struct PreparedBuildRecoveryTests {
         try legacyFalse.register(group)
         #expect(throws: PreparedCacheError.unverifiableProcessIdentity) { try legacyFalse.handleEngineTermination() }
         errno = EACCES
-        #expect(SystemProcessIdentity.status(of: group, birthIdentity: { _ in nil }, getGroup: { _ in 0 }) == .mismatched)
+        #expect(
+            SystemProcessIdentity.status(of: group, birthIdentity: { _ in nil }, getGroup: { _ in 0 }) == .mismatched)
         errno = ESRCH
         #expect(SystemProcessIdentity.status(of: group, birthIdentity: { _ in nil }, getGroup: { _ in 0 }) == .absent)
         #expect(
@@ -1648,14 +1981,22 @@ struct PreparedBuildRecoveryTests {
                 registrationURL: fixture.identityA.appendingPathComponent("wait-\(terminalStatus).json"),
                 identityStatus: { _ in statuses.next() },
                 signal: { _, signal in
-                    if signal == 0, terminalStatus == .absent { errno = ESRCH; return -1 }
+                    if signal == 0, terminalStatus == .absent {
+                        errno = ESRCH
+                        return -1
+                    }
                     return 0
                 },
                 sleep: { _ in }
             )
             try custody.register(group)
-            if terminalStatus == .absent { try custody.handleEngineTermination() }
-            else { #expect(throws: PreparedCacheError.unverifiableProcessIdentity) { try custody.handleEngineTermination() } }
+            if terminalStatus == .absent {
+                try custody.handleEngineTermination()
+            } else {
+                #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
+                    try custody.handleEngineTermination()
+                }
+            }
         }
 
         for signalError in [ESRCH, EACCES] {
@@ -1663,13 +2004,21 @@ struct PreparedBuildRecoveryTests {
                 registrationURL: fixture.identityA.appendingPathComponent("signal-\(signalError).json"),
                 identityStatus: { _ in .matching },
                 signal: { _, signal in
-                    if signal == 0 { errno = signalError; return -1 }
+                    if signal == 0 {
+                        errno = signalError
+                        return -1
+                    }
                     return 0
                 }, sleep: { _ in }
             )
             try custody.register(group)
-            if signalError == ESRCH { try custody.handleEngineTermination() }
-            else { #expect(throws: PreparedCacheError.unverifiableProcessIdentity) { try custody.handleEngineTermination() } }
+            if signalError == ESRCH {
+                try custody.handleEngineTermination()
+            } else {
+                #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
+                    try custody.handleEngineTermination()
+                }
+            }
         }
     }
 
@@ -1706,7 +2055,10 @@ struct PreparedBuildRecoveryTests {
     func custodyDescriptorEOF() async throws {
         var descriptors: [Int32] = [0, 0]
         #expect(pipe(&descriptors) == 0)
-        defer { close(descriptors[0]); close(descriptors[1]) }
+        defer {
+            close(descriptors[0])
+            close(descriptors[1])
+        }
         let recorder = CustodyRecorder()
         let group = CustodiedProcessGroup(pid: 11, processGroupID: 21, birthIdentity: "birth-11")
         recorder.allow(group)
@@ -1729,7 +2081,7 @@ struct PreparedBuildRecoveryTests {
 
         close(descriptors[1])
         descriptors[1] = -1
-        for _ in 0..<50 where !custody.isQuiescent { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0 ..< 50 where !custody.isQuiescent { try await Task.sleep(for: .milliseconds(10)) }
 
         try monitor.checkFailure()
         #expect(custody.isQuiescent)
@@ -1754,14 +2106,16 @@ struct PreparedBuildRecoveryTests {
         try custody.register(group)
         var descriptors: [Int32] = [0, 0]
         #expect(pipe(&descriptors) == 0)
-        defer { close(descriptors[0]); if descriptors[1] >= 0 { close(descriptors[1]) } }
+        defer {
+            close(descriptors[0])
+            if descriptors[1] >= 0 { close(descriptors[1]) }
+        }
         let monitor = try CustodyFDMonitor(descriptor: Int(descriptors[0]), custody: custody)
         close(descriptors[1])
         descriptors[1] = -1
         var sawFailure = false
-        for _ in 0..<50 where !sawFailure {
-            do { try monitor.checkFailure() }
-            catch { sawFailure = true }
+        for _ in 0 ..< 50 where !sawFailure {
+            do { try monitor.checkFailure() } catch { sawFailure = true }
             if !sawFailure { try await Task.sleep(for: .milliseconds(10)) }
         }
         #expect(sawFailure)
@@ -1775,6 +2129,67 @@ struct PreparedBuildRecoveryTests {
         monitor.cancel()
         #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
             try CustodyFDMonitor(descriptor: -1, custody: custody)
+        }
+        var readErrorDescriptors: [Int32] = [0, 0]
+        #expect(pipe(&readErrorDescriptors) == 0)
+        defer {
+            close(readErrorDescriptors[0])
+            close(readErrorDescriptors[1])
+        }
+        let readErrorMonitor = try CustodyFDMonitor(
+            descriptor: Int(readErrorDescriptors[0]),
+            custody: custody,
+            readDescriptor: { _, _, _ in
+                errno = EIO
+                return -1
+            }
+        )
+        var wakeByte: UInt8 = 1
+        #expect(Darwin.write(readErrorDescriptors[1], &wakeByte, 1) == 1)
+        var sawReadFailure = false
+        for _ in 0 ..< 50 where !sawReadFailure {
+            do { try readErrorMonitor.checkFailure() } catch { sawReadFailure = true }
+            if !sawReadFailure { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        #expect(sawReadFailure)
+        readErrorMonitor.cancel()
+        var interruptedDescriptors: [Int32] = [0, 0]
+        #expect(pipe(&interruptedDescriptors) == 0)
+        defer {
+            close(interruptedDescriptors[0])
+            if interruptedDescriptors[1] >= 0 { close(interruptedDescriptors[1]) }
+        }
+        let readCalls = LockedCounter()
+        let interruptedMonitor = try CustodyFDMonitor(
+            descriptor: Int(interruptedDescriptors[0]),
+            custody: ProcessCustody(
+                verifyIdentity: { _ in true }, terminateGroup: { _ in }, waitForGroup: { _ in }
+            ),
+            readDescriptor: { descriptor, buffer, count in
+                readCalls.increment()
+                if readCalls.value == 1 {
+                    errno = EINTR
+                    return -1
+                }
+                return Darwin.read(descriptor, buffer, count)
+            }
+        )
+        #expect(Darwin.write(interruptedDescriptors[1], &wakeByte, 1) == 1)
+        for _ in 0 ..< 50 where readCalls.value < 2 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(readCalls.value >= 2)
+        close(interruptedDescriptors[1])
+        interruptedDescriptors[1] = -1
+        interruptedMonitor.cancel()
+
+        let deadlineGroup = CustodiedProcessGroup(pid: 91, processGroupID: 91, birthIdentity: "birth")
+        let deadlineClock = MonotonicRecorder(values: [10, 9])
+        let deadlineCustody = ProcessCustody(
+            registeredGroups: [deadlineGroup],
+            verifyIdentity: { _ in true }, terminateGroup: { _ in }, waitForGroup: { _ in },
+            monotonicNow: { deadlineClock.next() }
+        )
+        #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
+            try deadlineCustody.handleEngineTermination()
         }
         #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
             try SystemProcessIdentity.group(for: Int32.max)
@@ -1830,7 +2245,10 @@ struct PreparedBuildRecoveryTests {
             registrationURL: fixture.identityA.appendingPathComponent("term-failure.json"),
             verifyIdentity: { _ in true },
             signal: { _, signal in
-                if signal == SIGTERM { errno = EACCES; return -1 }
+                if signal == SIGTERM {
+                    errno = EACCES
+                    return -1
+                }
                 return -1
             },
             sleep: { _ in }
@@ -1867,9 +2285,11 @@ struct PreparedBuildRecoveryTests {
         try killFailure.register(synthetic)
         #expect(throws: PreparedCacheError.unverifiableProcessIdentity) { try killFailure.handleEngineTermination() }
         let current = try SystemProcessIdentity.group(for: getpid())
-        #expect(!SystemProcessIdentity.matchesOrIsAbsent(.init(
-            pid: current.pid, processGroupID: current.processGroupID, birthIdentity: "wrong"
-        )))
+        #expect(
+            !SystemProcessIdentity.matchesOrIsAbsent(
+                .init(
+                    pid: current.pid, processGroupID: current.processGroupID, birthIdentity: "wrong"
+                )))
 
         var dataDescriptors: [Int32] = [0, 0]
         #expect(pipe(&dataDescriptors) == 0)
@@ -1883,7 +2303,7 @@ struct PreparedBuildRecoveryTests {
         try await Task.sleep(for: .milliseconds(20))
         #expect(!dataCustody.isQuiescent)
         close(dataDescriptors[1])
-        for _ in 0..<50 where !dataCustody.isQuiescent { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0 ..< 50 where !dataCustody.isQuiescent { try await Task.sleep(for: .milliseconds(10)) }
         dataMonitor.cancel()
         close(dataDescriptors[0])
     }
@@ -1904,7 +2324,10 @@ struct PreparedBuildRecoveryTests {
             let executable = strdup("/bin/sleep")!
             let duration = strdup("30")!
             var arguments: [UnsafeMutablePointer<CChar>?] = [executable, duration, nil]
-            defer { free(executable); free(duration) }
+            defer {
+                free(executable)
+                free(duration)
+            }
             let result = arguments.withUnsafeMutableBufferPointer { buffer in
                 posix_spawn(&pid, "/bin/sleep", nil, &attributes, buffer.baseAddress!, environ)
             }
@@ -1921,7 +2344,7 @@ struct PreparedBuildRecoveryTests {
             }
             waiter.start()
             try recovered.handleEngineTermination()
-            for _ in 0..<50 where !waiter.isFinished { usleep(10_000) }
+            for _ in 0 ..< 50 where !waiter.isFinished { usleep(10_000) }
             #expect(waiter.isFinished)
             #expect(recovered.isQuiescent)
             return group
@@ -1980,7 +2403,8 @@ struct PreparedBuildRecoveryTests {
         defer { fixture.cleanup() }
         try fixture.makeIdentity(fixture.identityA)
         let outside = fixture.root.appendingPathComponent("outside")
-        try FileManager.default.createDirectory(at: outside.appendingPathComponent("Products"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: outside.appendingPathComponent("Products"), withIntermediateDirectories: true)
         try Data("compiled".utf8).write(to: outside.appendingPathComponent("Products/App"))
         let derived = fixture.identityA.appendingPathComponent("DerivedData")
         try FileManager.default.createDirectory(at: derived, withIntermediateDirectories: false)
@@ -1989,10 +2413,12 @@ struct PreparedBuildRecoveryTests {
         )
         let productEnumeration = LockedCounter()
         #expect(throws: PreparedCacheError.productManifestMismatch) {
-            try RetainedProductManifest.sha256(derivedDataURL: derived, makeEnumerator: { root in
-                productEnumeration.increment()
-                return FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
-            })
+            try RetainedProductManifest.sha256(
+                derivedDataURL: derived,
+                makeEnumerator: { root in
+                    productEnumeration.increment()
+                    return FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
+                })
         }
         #expect(productEnumeration.value == 0)
 
@@ -2030,7 +2456,8 @@ struct PreparedBuildRecoveryTests {
 
         try recovery.writeRetentionMetadata(lastUsedAt: .distantPast)
         let retentionURL = fixture.identityA.appendingPathComponent("retention.json")
-        var retention = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: retentionURL)) as? [String: Any])
+        var retention = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: retentionURL)) as? [String: Any])
         retention["unknown"] = true
         try JSONSerialization.data(withJSONObject: retention).write(to: retentionURL)
         chmod(retentionURL.path, 0o600)
@@ -2049,7 +2476,9 @@ struct PreparedBuildRecoveryTests {
 private final class PreparedCoordinatorLauncher: @unchecked Sendable, ProcessLaunching {
     var enumerationExitCode: Int32 = 0
     var omitBuildProducts = false
-    func launch(executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double) async throws -> Int32 { 0 }
+    func launch(
+        executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
+    ) async throws -> Int32 { 0 }
 
     func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
         if request.arguments.contains("build-for-testing"),
@@ -2099,6 +2528,14 @@ private final class LockedCounter: @unchecked Sendable {
             return count
         }
     }
+}
+
+private final class MonotonicRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [UInt64]
+
+    init(values: [UInt64]) { self.values = values }
+    func next() -> UInt64 { lock.withLock { values.isEmpty ? 0 : values.removeFirst() } }
 }
 
 private final class CloseRecorder: @unchecked Sendable {
@@ -2151,7 +2588,8 @@ private struct RecoveryFixture {
 
     func makeMaterializedSource(in identity: URL) throws {
         let source = identity.appendingPathComponent("project/Sources/Secret.swift")
-        try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("let secret = \"EXTERNAL_CREDENTIAL_CANARY\"".utf8).write(to: source)
     }
 

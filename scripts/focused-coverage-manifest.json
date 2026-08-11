@@ -1,6 +1,8 @@
 {
   "schemaVersion": 1,
   "include": [
+    "Sources/SwiftMutationTesting/Build/BuildStage.swift",
+    "Sources/SwiftMutationTesting/CLI/CommandLineParser.swift",
     "Sources/SwiftMutationTesting/Configuration/ConfigurationResolver.swift",
     "Sources/SwiftMutationTesting/PreparedBuild/CacheLock.swift",
     "Sources/SwiftMutationTesting/PreparedBuild/CacheRecovery.swift",

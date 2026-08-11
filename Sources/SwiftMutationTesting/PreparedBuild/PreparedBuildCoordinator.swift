@@ -92,7 +92,8 @@ enum CacheFailureEvidenceRecorder {
         let store = PreparedBuildStore(root: root, compatibilityID: compatibilityID)
         let state = try? store.load()
         let cleanup = cleanup(store: store, collectionRoot: URL(fileURLWithPath: root, isDirectory: true))
-        let manifestDigest = (try? Data(contentsOf: URL(fileURLWithPath: manifestPath)))
+        let manifestDigest =
+            (try? Data(contentsOf: URL(fileURLWithPath: manifestPath)))
             .map(ProjectInputManifest.sha256) ?? String(repeating: "0", count: 64)
         let selection = options.mutantSelectionManifest.flatMap { try? MutantSelectionManifest.load(from: $0) }
         let operation: String
@@ -102,23 +103,24 @@ enum CacheFailureEvidenceRecorder {
         case .recover: operation = "recover"
         case .legacy: return
         }
-        try CacheEvidenceWriter.write(CacheEvidence(
-            schemaVersion: 1,
-            invocationNonce: nonce,
-            operation: operation,
-            outcome: "failed",
-            compatibilitySHA256: compatibilityID,
-            projectInputManifestSHA256: manifestDigest,
-            preparedInventorySHA256: try state?.inventory.sha256,
-            runOrdinal: selection?.runOrdinal,
-            attemptOrdinal: selection?.attemptOrdinal,
-            productManifestSHA256: state?.productManifestSHA256,
-            fullBuilds: 0,
-            incrementalBuilds: 0,
-            fallbackBuilds: 0,
-            sourceBearingBytesScrubbed: cleanup.scrubbed,
-            childGroupsQuiescent: cleanup.quiescent
-        ), to: outputURL)
+        try CacheEvidenceWriter.write(
+            CacheEvidence(
+                schemaVersion: 1,
+                invocationNonce: nonce,
+                operation: operation,
+                outcome: "failed",
+                compatibilitySHA256: compatibilityID,
+                projectInputManifestSHA256: manifestDigest,
+                preparedInventorySHA256: try state?.inventory.sha256,
+                runOrdinal: selection?.runOrdinal,
+                attemptOrdinal: selection?.attemptOrdinal,
+                productManifestSHA256: state?.productManifestSHA256,
+                fullBuilds: 0,
+                incrementalBuilds: 0,
+                fallbackBuilds: 0,
+                sourceBearingBytesScrubbed: cleanup.scrubbed,
+                childGroupsQuiescent: cleanup.quiescent
+            ), to: outputURL)
     }
 
     private static func cleanup(store: PreparedBuildStore, collectionRoot: URL) -> (scrubbed: Bool, quiescent: Bool) {
@@ -136,10 +138,11 @@ enum CacheFailureEvidenceRecorder {
                 quiescent = false
             }
         }
-        let scrubbed = (try? CacheRecovery(
-            identityDirectory: store.directory,
-            collectionRoot: collectionRoot
-        ).scrubAfterCommand()) != nil
+        let scrubbed =
+            (try? CacheRecovery(
+                identityDirectory: store.directory,
+                collectionRoot: collectionRoot
+            ).scrubAfterCommand()) != nil
         return (scrubbed, quiescent)
     }
 }
@@ -148,16 +151,6 @@ struct PreparedBuildCoordinator: Sendable {
     let configuration: RunnerConfiguration
     let options: ParsedArguments.CacheOptions
     let launcher: any ProcessLaunching
-
-    init(
-        configuration: RunnerConfiguration,
-        options: ParsedArguments.CacheOptions,
-        launcher: any ProcessLaunching
-    ) {
-        self.configuration = configuration
-        self.options = options
-        self.launcher = launcher
-    }
 
     func prepare(_ input: RunnerInput) async throws {
         guard case .xcode(let scheme, let destination) = configuration.build.projectType,
@@ -189,9 +182,14 @@ struct PreparedBuildCoordinator: Sendable {
             identityDirectory: store.directory,
             collectionRoot: URL(fileURLWithPath: root, isDirectory: true)
         )
-        let previousProduct = try? store.load().productManifestSHA256
-        if let previousProduct {
-            _ = try recovery.recover(expectedProductManifestSHA256: previousProduct)
+        var previousProduct = try? store.load().productManifestSHA256
+        if let currentProduct = previousProduct {
+            do {
+                _ = try recovery.recover(expectedProductManifestSHA256: currentProduct)
+            } catch PreparedCacheError.productManifestMismatch {
+                try recovery.invalidateDivergentPreparedBuild()
+                previousProduct = nil
+            }
         }
         try recovery.writeRetentionMetadata(lastUsedAt: Date())
         _ = try CacheRetention(collectionRoot: URL(fileURLWithPath: root, isDirectory: true)).enforce()
@@ -201,23 +199,24 @@ struct PreparedBuildCoordinator: Sendable {
             let scrubbed = (try? recovery.scrubAfterCommand()) != nil
             let quiescent = Self.custodyIsQuiescent(custodyRuntime)
             if !evidenceWritten {
-                try? writeEvidence(CacheEvidence(
-                    schemaVersion: 1,
-                    invocationNonce: options.invocationNonce ?? "",
-                    operation: "prepare",
-                    outcome: "failed",
-                    compatibilitySHA256: compatibilityID,
-                    projectInputManifestSHA256: manifestHash,
-                    preparedInventorySHA256: inventoryHash,
-                    runOrdinal: nil,
-                    attemptOrdinal: nil,
-                    productManifestSHA256: previousProduct,
-                    fullBuilds: observedLauncher.buildForTestingAttempts,
-                    incrementalBuilds: 0,
-                    fallbackBuilds: 0,
-                    sourceBearingBytesScrubbed: scrubbed,
-                    childGroupsQuiescent: quiescent
-                ))
+                try? writeEvidence(
+                    CacheEvidence(
+                        schemaVersion: 1,
+                        invocationNonce: options.invocationNonce ?? "",
+                        operation: "prepare",
+                        outcome: "failed",
+                        compatibilitySHA256: compatibilityID,
+                        projectInputManifestSHA256: manifestHash,
+                        preparedInventorySHA256: inventoryHash,
+                        runOrdinal: nil,
+                        attemptOrdinal: nil,
+                        productManifestSHA256: previousProduct,
+                        fullBuilds: observedLauncher.buildForTestingAttempts,
+                        incrementalBuilds: 0,
+                        fallbackBuilds: 0,
+                        sourceBearingBytesScrubbed: scrubbed,
+                        childGroupsQuiescent: quiescent
+                    ))
             }
         }
 
@@ -240,7 +239,7 @@ struct PreparedBuildCoordinator: Sendable {
                 timeout: configuration.build.timeout,
                 derivedDataURL: store.derivedDataURL
             )
-            let xctestrunURL = artifact.xctestrunURL!
+            let xctestrunURL = try Self.requireXCTestRun(from: artifact)
             try await PreparedTestEnumerator(launcher: commandLauncher).enumerate(
                 xctestrunURL: xctestrunURL,
                 destination: destination,
@@ -287,6 +286,13 @@ struct PreparedBuildCoordinator: Sendable {
         }
     }
 
+    static func requireXCTestRun(from artifact: BuildArtifact) throws -> URL {
+        guard let xctestrunURL = artifact.xctestrunURL else {
+            throw PreparedBuildError.preparedBuildMissing
+        }
+        return xctestrunURL
+    }
+
     func target(_ input: RunnerInput) async throws -> [ExecutionResult] {
         guard case .xcode = configuration.build.projectType,
             let root = options.buildCacheRoot,
@@ -328,33 +334,33 @@ struct PreparedBuildCoordinator: Sendable {
             inventorySHA256: inventoryHash,
             inventorySourcePaths: state.inventory.mutants.map(\.sourcePath)
         )
-        let selected = try state.inventory.select(
+        let selected = state.inventory.selectValidated(
             mutants: input.mutants,
-            ownedSourcePaths: paths,
-            projectRoot: configuration.projectPath
+            ownedSourcePaths: paths
         )
         var evidenceWritten = false
         defer {
             let scrubbed = (try? recovery.scrubAfterCommand()) != nil
             let quiescent = Self.custodyIsQuiescent(custodyRuntime)
             if !evidenceWritten {
-                try? writeEvidence(CacheEvidence(
-                    schemaVersion: 1,
-                    invocationNonce: options.invocationNonce ?? "",
-                    operation: "target",
-                    outcome: "failed",
-                    compatibilitySHA256: compatibilityID,
-                    projectInputManifestSHA256: currentManifestHash,
-                    preparedInventorySHA256: inventoryHash,
-                    runOrdinal: selection.runOrdinal,
-                    attemptOrdinal: selection.attemptOrdinal,
-                    productManifestSHA256: state.productManifestSHA256,
-                    fullBuilds: 0,
-                    incrementalBuilds: 0,
-                    fallbackBuilds: observedLauncher.fallbackBuildAttempts,
-                    sourceBearingBytesScrubbed: scrubbed,
-                    childGroupsQuiescent: quiescent
-                ))
+                try? writeEvidence(
+                    CacheEvidence(
+                        schemaVersion: 1,
+                        invocationNonce: options.invocationNonce ?? "",
+                        operation: "target",
+                        outcome: "failed",
+                        compatibilitySHA256: compatibilityID,
+                        projectInputManifestSHA256: currentManifestHash,
+                        preparedInventorySHA256: inventoryHash,
+                        runOrdinal: selection.runOrdinal,
+                        attemptOrdinal: selection.attemptOrdinal,
+                        productManifestSHA256: state.productManifestSHA256,
+                        fullBuilds: 0,
+                        incrementalBuilds: 0,
+                        fallbackBuilds: observedLauncher.fallbackBuildAttempts,
+                        sourceBearingBytesScrubbed: scrubbed,
+                        childGroupsQuiescent: quiescent
+                    ))
             }
         }
         if selected.isEmpty {
@@ -532,23 +538,24 @@ struct PreparedBuildCoordinator: Sendable {
             let manifestPath = options.projectInputManifest
         else { throw PreparedCacheError.invalidCacheState }
         let projectDigest = ProjectInputManifest.sha256(try Data(contentsOf: URL(fileURLWithPath: manifestPath)))
-        try CacheEvidenceWriter.write(CacheEvidence(
-            schemaVersion: 1,
-            invocationNonce: nonce,
-            operation: "recover",
-            outcome: outcome,
-            compatibilitySHA256: compatibilityID,
-            projectInputManifestSHA256: projectDigest,
-            preparedInventorySHA256: try state?.inventory.sha256,
-            runOrdinal: nil,
-            attemptOrdinal: nil,
-            productManifestSHA256: state?.productManifestSHA256,
-            fullBuilds: 0,
-            incrementalBuilds: 0,
-            fallbackBuilds: 0,
-            sourceBearingBytesScrubbed: outcome != "absent",
-            childGroupsQuiescent: childGroupsQuiescent
-        ), to: URL(fileURLWithPath: path))
+        try CacheEvidenceWriter.write(
+            CacheEvidence(
+                schemaVersion: 1,
+                invocationNonce: nonce,
+                operation: "recover",
+                outcome: outcome,
+                compatibilitySHA256: compatibilityID,
+                projectInputManifestSHA256: projectDigest,
+                preparedInventorySHA256: try state?.inventory.sha256,
+                runOrdinal: nil,
+                attemptOrdinal: nil,
+                productManifestSHA256: state?.productManifestSHA256,
+                fullBuilds: 0,
+                incrementalBuilds: 0,
+                fallbackBuilds: 0,
+                sourceBearingBytesScrubbed: outcome != "absent",
+                childGroupsQuiescent: childGroupsQuiescent
+            ), to: URL(fileURLWithPath: path))
     }
 
     private func sha256(at path: String) throws -> String {

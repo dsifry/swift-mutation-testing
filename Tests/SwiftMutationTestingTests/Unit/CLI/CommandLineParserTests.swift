@@ -143,6 +143,7 @@ struct CommandLineParserTests {
             "--mutant-selection-manifest", "/tmp/selection.json",
             "--cache-evidence-output", "/tmp/evidence.json",
             "--output", "/tmp/report.json",
+            "--no-cache",
             "--custody-fd", "8",
             "--invocation-nonce", "ABCDEFGHIJKLMNOPQRSTUV",
         ])
@@ -150,6 +151,61 @@ struct CommandLineParserTests {
         #expect(result.cache.mode == .target)
         #expect(result.build.testTarget == "AppTests/ExampleTests/testExample")
         #expect(result.cache.mutantSelectionManifest == "/tmp/selection.json")
+    }
+
+    @Test("Given target evidence and report aliases, when parsed, then the protocol is rejected")
+    func rejectsTargetEvidenceReportAlias() {
+        #expect(throws: UsageError.self) {
+            try parser.parse([
+                "run",
+                "--build-cache-root", "/tmp/swift-mutation-cache",
+                "--cache-compatibility-id", String(repeating: "b", count: 64),
+                "--project-input-manifest", "/tmp/project-inputs.json",
+                "--target", "AppTests/ExampleTests/testExample",
+                "--mutant-selection-manifest", "/tmp/selection.json",
+                "--cache-evidence-output", "/tmp/results/../evidence.json",
+                "--output", "/tmp/evidence.json",
+                "--no-cache",
+                "--custody-fd", "8",
+                "--invocation-nonce", "ABCDEFGHIJKLMNOPQRSTUV",
+            ])
+        }
+    }
+
+    @Test("Given target cache mode without no-cache, when parsed, then retry-unsafe caching is rejected")
+    func rejectsTargetCacheModeWithoutNoCache() {
+        #expect(throws: UsageError.self) {
+            try parser.parse([
+                "run",
+                "--build-cache-root", "/tmp/swift-mutation-cache",
+                "--cache-compatibility-id", String(repeating: "b", count: 64),
+                "--project-input-manifest", "/tmp/project-inputs.json",
+                "--target", "AppTests/ExampleTests/testExample",
+                "--mutant-selection-manifest", "/tmp/selection.json",
+                "--cache-evidence-output", "/tmp/evidence.json",
+                "--output", "/tmp/report.json",
+                "--custody-fd", "8",
+                "--invocation-nonce", "ABCDEFGHIJKLMNOPQRSTUV",
+            ])
+        }
+    }
+
+    @Test("Given prepare enumeration and inventory aliases, when parsed, then the protocol is rejected")
+    func rejectsPrepareArtifactAlias() {
+        #expect(throws: UsageError.self) {
+            try parser.parse([
+                "run",
+                "--build-cache-root", "/tmp/swift-mutation-cache",
+                "--cache-compatibility-id", String(repeating: "a", count: 64),
+                "--project-input-manifest", "/tmp/project-inputs.json",
+                "--prepare-only",
+                "--test-enumeration-output", "/tmp/results/../artifacts.json",
+                "--mutant-inventory-output", "/tmp/artifacts.json",
+                "--cache-evidence-output", "/tmp/evidence.json",
+                "--custody-fd", "7",
+                "--invocation-nonce", "abcdefghijklmnopqrstuv",
+            ])
+        }
     }
 
     @Test("Given complete recovery cache options, when parsed, then recovery mode is accepted")
@@ -173,6 +229,33 @@ struct CommandLineParserTests {
     func rejectsIncompleteCacheMode() {
         #expect(throws: UsageError.self) {
             try parser.parse(["run", "--build-cache-root", "/tmp/cache"])
+        }
+    }
+
+    @Test("Given each cache protocol guard is violated, parsing fails closed")
+    func cacheProtocolGuardBranches() {
+        let common = [
+            "run", "--build-cache-root", "/tmp/cache",
+            "--cache-compatibility-id", String(repeating: "a", count: 64),
+            "--project-input-manifest", "/tmp/manifest.json",
+            "--cache-evidence-output", "/tmp/evidence.json",
+            "--custody-fd", "0", "--invocation-nonce", "abcdefghijklmnopqrstuv",
+        ]
+        let prepare =
+            common + [
+                "--prepare-only", "--test-enumeration-output", "/tmp/tests.json",
+                "--mutant-inventory-output", "/tmp/inventory.json",
+            ]
+        let invalidArguments = [
+            ["run", "--prepare-only"],
+            prepare + ["--target", "AppTests"],
+            common + ["--recover-only", "--output", "/tmp/report.json"],
+            prepare.map { $0 == "/tmp/manifest.json" ? "relative.json" : $0 },
+            prepare.map { $0 == String(repeating: "a", count: 64) ? "ABC" : $0 },
+            prepare.map { $0 == "abcdefghijklmnopqrstuv" ? "short" : $0 },
+        ]
+        for arguments in invalidArguments {
+            #expect(throws: UsageError.self) { try parser.parse(arguments) }
         }
     }
 

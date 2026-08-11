@@ -2,16 +2,18 @@ import Darwin
 import Foundation
 
 struct ProcessRunner: Sendable {
-    typealias SpawnInitializer = @Sendable (
-        UnsafeMutablePointer<posix_spawn_file_actions_t?>,
-        UnsafeMutablePointer<posix_spawnattr_t?>
-    ) -> Bool
-    typealias SpawnConfigurator = @Sendable (
-        UnsafeMutablePointer<posix_spawn_file_actions_t?>,
-        UnsafeMutablePointer<posix_spawnattr_t?>,
-        Int32,
-        String
-    ) -> Bool
+    typealias SpawnInitializer =
+        @Sendable (
+            UnsafeMutablePointer<posix_spawn_file_actions_t?>,
+            UnsafeMutablePointer<posix_spawnattr_t?>
+        ) -> Bool
+    typealias SpawnConfigurator =
+        @Sendable (
+            UnsafeMutablePointer<posix_spawn_file_actions_t?>,
+            UnsafeMutablePointer<posix_spawnattr_t?>,
+            Int32,
+            String
+        ) -> Bool
 
     var processDidStart: (@Sendable (Int32) throws -> Void)?
     var postTerminationCleanup: (@Sendable (Int32) throws -> Void)?
@@ -20,7 +22,8 @@ struct ProcessRunner: Sendable {
     var establishProcessGroup: @Sendable (Int32) -> Bool
     var terminateDirectProcess: @Sendable (Int32) -> Void
     var openNullDescriptor: @Sendable () -> Int32
-    var createCaptureFile: @Sendable (String) -> Bool
+    var createCaptureDescriptor: @Sendable (String) -> Int32
+    var closeCaptureDescriptor: @Sendable (Int32) -> Int32 = { close($0) }
     var captureRoot: URL?
     var initializeSpawn: SpawnInitializer
     var configureSpawn: SpawnConfigurator
@@ -33,8 +36,8 @@ struct ProcessRunner: Sendable {
         establishProcessGroup: @escaping @Sendable (Int32) -> Bool = { getpgid($0) == $0 },
         terminateDirectProcess: @escaping @Sendable (Int32) -> Void = { _ = kill($0, SIGKILL) },
         openNullDescriptor: @escaping @Sendable () -> Int32 = { open("/dev/null", O_WRONLY | O_CLOEXEC) },
-        createCaptureFile: @escaping @Sendable (String) -> Bool = {
-            createPrivateCaptureFile($0)
+        createCaptureDescriptor: @escaping @Sendable (String) -> Int32 = {
+            openPrivateCaptureFile($0)
         },
         captureRoot: URL? = nil,
         initializeSpawn: @escaping SpawnInitializer = { actions, attributes in
@@ -53,7 +56,7 @@ struct ProcessRunner: Sendable {
         self.establishProcessGroup = establishProcessGroup
         self.terminateDirectProcess = terminateDirectProcess
         self.openNullDescriptor = openNullDescriptor
-        self.createCaptureFile = createCaptureFile
+        self.createCaptureDescriptor = createCaptureDescriptor
         self.captureRoot = captureRoot
         self.initializeSpawn = initializeSpawn
         self.configureSpawn = configureSpawn
@@ -93,16 +96,18 @@ struct ProcessRunner: Sendable {
             try CachePathGuard.validateDirectory(root, containedIn: root)
         }
         let tempURL = root.appendingPathComponent(".swift-mutation-capture.\(UUID().uuidString)")
-        guard createCaptureFile(tempURL.path) else {
+        let captureDescriptor = createCaptureDescriptor(tempURL.path)
+        guard captureDescriptor >= 0 else {
             throw PreparedCacheError.unverifiableProcessIdentity
         }
+        var captureDescriptorIsOpen = true
+        defer { if captureDescriptorIsOpen { _ = closeCaptureDescriptor(captureDescriptor) } }
         do {
             try CachePathGuard.validateRegularFile(tempURL, containedIn: root)
         } catch {
             try? FileManager.default.removeItem(at: tempURL)
             throw error
         }
-        let fileHandle = try FileHandle(forWritingTo: tempURL)
         do {
             var environment = request.environment
             if !request.additionalEnvironment.isEmpty {
@@ -115,15 +120,20 @@ struct ProcessRunner: Sendable {
                 arguments: request.arguments,
                 environment: environment,
                 workingDirectoryURL: request.workingDirectoryURL,
-                outputDescriptor: fileHandle.fileDescriptor
+                outputDescriptor: captureDescriptor
             )
-            try fileHandle.close()
+            let closeResult = closeCaptureDescriptor(captureDescriptor)
+            captureDescriptorIsOpen = false
+            guard closeResult == 0 else {
+                _ = kill(-pid, SIGKILL)
+                _ = waitForExit(pid)
+                throw PreparedCacheError.unverifiableProcessIdentity
+            }
             let exitCode = try await supervise(pid: pid, timeout: request.timeout) { status in status }
             let output = Self.readCapturedOutput(at: tempURL)
             try? FileManager.default.removeItem(at: tempURL)
             return (exitCode, output)
         } catch {
-            try? fileHandle.close()
             try? FileManager.default.removeItem(at: tempURL)
             throw error
         }
@@ -198,8 +208,8 @@ struct ProcessRunner: Sendable {
             .sorted()
         let envp = environmentValues.map { strdup($0) } + [nil]
         defer {
-            argv.dropLast().forEach { free($0) }
-            envp.dropLast().forEach { free($0) }
+            for argument in argv.dropLast() { free(argument) }
+            for environmentValue in envp.dropLast() { free(environmentValue) }
         }
         var pid: pid_t = 0
         let result = argv.withUnsafeBufferPointer { argvBuffer in
@@ -225,14 +235,13 @@ struct ProcessRunner: Sendable {
         (try? String(contentsOf: url, encoding: .utf8)) ?? ""
     }
 
-    static func createPrivateCaptureFile(
+    static func openPrivateCaptureFile(
         _ path: String,
-        openFile: (String) -> Int32 = { open($0, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o600) },
-        closeFile: (Int32) -> Int32 = { close($0) }
-    ) -> Bool {
-        let descriptor = openFile(path)
-        guard descriptor >= 0 else { return false }
-        return closeFile(descriptor) == 0
+        openFile: (String) -> Int32 = {
+            open($0, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        }
+    ) -> Int32 {
+        openFile(path)
     }
 
     static func captureDirectory(
@@ -265,9 +274,13 @@ struct ProcessRunner: Sendable {
         actions: UnsafeMutablePointer<posix_spawn_file_actions_t?>,
         attributes: UnsafeMutablePointer<posix_spawnattr_t?>,
         output: Int32,
-        directory: String
+        directory: String,
+        addInput: (
+            UnsafeMutablePointer<posix_spawn_file_actions_t?>, Int32, String, Int32, mode_t
+        ) -> Int32 = { posix_spawn_file_actions_addopen($0, $1, $2, $3, $4) }
     ) -> Bool {
-        posix_spawn_file_actions_adddup2(actions, output, STDOUT_FILENO) == 0
+        addInput(actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0) == 0
+            && posix_spawn_file_actions_adddup2(actions, output, STDOUT_FILENO) == 0
             && posix_spawn_file_actions_adddup2(actions, output, STDERR_FILENO) == 0
             && posix_spawn_file_actions_addchdir_np(actions, directory) == 0
             && posix_spawnattr_setflags(

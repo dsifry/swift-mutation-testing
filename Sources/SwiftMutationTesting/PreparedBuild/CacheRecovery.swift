@@ -1,5 +1,5 @@
-import Darwin
 import CryptoKit
+import Darwin
 import Foundation
 
 enum RetainedProductManifest {
@@ -38,12 +38,13 @@ enum RetainedProductManifest {
             guard value.st_nlink == 1 else { throw PreparedCacheError.productManifestMismatch }
             let bytes = try Data(contentsOf: url, options: .mappedIfSafe)
             let relative = String(url.standardizedFileURL.path.dropFirst(products.standardizedFileURL.path.count + 1))
-            entries.append(Entry(
-                path: relative,
-                mode: UInt16(value.st_mode & 0o777),
-                byteSize: Int64(bytes.count),
-                sha256: ProjectInputManifest.sha256(bytes)
-            ))
+            entries.append(
+                Entry(
+                    path: relative,
+                    mode: UInt16(value.st_mode & 0o777),
+                    byteSize: Int64(bytes.count),
+                    sha256: ProjectInputManifest.sha256(bytes)
+                ))
         }
         guard !entries.isEmpty else { throw PreparedCacheError.productManifestMismatch }
         entries.sort { $0.path < $1.path }
@@ -89,6 +90,14 @@ struct CacheRecovery: Sendable {
     var createPrivateFile: @Sendable (String, Data) -> Bool = {
         FileManager.default.createFile(atPath: $0, contents: $1, attributes: [.posixPermissions: 0o600])
     }
+    var replaceJournal: @Sendable (String, String) -> Int32 = { rename($0, $1) }
+    var syncDescriptor: @Sendable (Int32) -> Int32 = { fsync($0) }
+    var openJournalFile: @Sendable (String) -> Int32 = {
+        open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    }
+    var openJournalDirectory: @Sendable (String) -> Int32 = {
+        open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    }
 
     private var stateURL: URL { identityDirectory.appendingPathComponent("cache-state.json") }
     private var retentionURL: URL { identityDirectory.appendingPathComponent("retention.json") }
@@ -108,7 +117,9 @@ struct CacheRecovery: Sendable {
 
     func markReady(productManifestSHA256: String) throws {
         try validateIdentity()
-        guard Self.isDigest(productManifestSHA256) else { throw PreparedCacheError.invalidCacheState }
+        guard CachePathGuard.isLowercaseHexDigest(productManifestSHA256) else {
+            throw PreparedCacheError.invalidCacheState
+        }
         try scrubSourceBearingArtifacts()
         try write(
             State(
@@ -150,6 +161,12 @@ struct CacheRecovery: Sendable {
         }
     }
 
+    func invalidateDivergentPreparedBuild() throws {
+        try validateIdentity()
+        try scrubSourceBearingArtifacts()
+        try invalidateDirtyProducts()
+    }
+
     func writeRetentionMetadata(lastUsedAt: Date) throws {
         try validateIdentity()
         try write(
@@ -189,8 +206,8 @@ struct CacheRecovery: Sendable {
     private func loadState() throws -> State {
         let state: State = try readState()
         guard state.schemaVersion == 1,
-            state.productManifestSHA256.map(Self.isDigest) ?? true,
-            state.previousReadyProductManifestSHA256.map(Self.isDigest) ?? true,
+            state.productManifestSHA256.map(CachePathGuard.isLowercaseHexDigest) ?? true,
+            state.previousReadyProductManifestSHA256.map(CachePathGuard.isLowercaseHexDigest) ?? true,
             (state.phase == .ready) == (state.productManifestSHA256 != nil)
         else { throw PreparedCacheError.invalidCacheState }
         return state
@@ -234,7 +251,9 @@ struct CacheRecovery: Sendable {
         }
     }
 
-    static func requireMetadata(_ target: URL, provider: (URL) -> stat? = { CachePathGuard.metadata(at: $0) }) throws -> stat {
+    static func requireMetadata(
+        _ target: URL, provider: (URL) -> stat? = { CachePathGuard.metadata(at: $0) }
+    ) throws -> stat {
         guard let metadata = provider(target) else { throw PreparedCacheError.unsafeCachePath }
         return metadata
     }
@@ -242,19 +261,35 @@ struct CacheRecovery: Sendable {
     private func write<T: Encodable>(_ value: T, to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let temporary = url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)")
+        let temporary = url.deletingLastPathComponent().appendingPathComponent(
+            ".\(url.lastPathComponent).\(UUID().uuidString)")
         let data = try encoder.encode(value)
         guard createPrivateFile(temporary.path, data) else {
             throw PreparedCacheError.unsafeCachePath
         }
         do {
             try CachePathGuard.validateRegularFile(temporary, containedIn: identityDirectory)
+            let temporaryDescriptor = openJournalFile(temporary.path)
+            guard temporaryDescriptor >= 0 else { throw PreparedCacheError.unsafeCachePath }
+            let fileSync = syncDescriptor(temporaryDescriptor)
+            let fileClose = close(temporaryDescriptor)
+            guard fileSync == 0, fileClose == 0 else {
+                throw PreparedCacheError.unsafeCachePath
+            }
             if FileManager.default.fileExists(atPath: url.path) {
                 try CachePathGuard.validateRegularFile(url, containedIn: identityDirectory)
-                try FileManager.default.removeItem(at: url)
             }
-            try FileManager.default.moveItem(at: temporary, to: url)
-            chmod(url.path, 0o600)
+            guard replaceJournal(temporary.path, url.path) == 0 else {
+                throw PreparedCacheError.unsafeCachePath
+            }
+            try CachePathGuard.validateRegularFile(url, containedIn: identityDirectory)
+            let parentDescriptor = openJournalDirectory(url.deletingLastPathComponent().path)
+            guard parentDescriptor >= 0 else { throw PreparedCacheError.unsafeCachePath }
+            let parentSync = syncDescriptor(parentDescriptor)
+            let parentClose = close(parentDescriptor)
+            guard parentSync == 0, parentClose == 0 else {
+                throw PreparedCacheError.unsafeCachePath
+            }
         } catch {
             try? FileManager.default.removeItem(at: temporary)
             throw error
@@ -296,7 +331,4 @@ struct CacheRecovery: Sendable {
     ]
     private static let custodyRegistryName = "process-custody.json"
 
-    private static func isDigest(_ value: String) -> Bool {
-        value.count == 64 && value.allSatisfy { $0.isHexDigit && !$0.isUppercase }
-    }
 }
