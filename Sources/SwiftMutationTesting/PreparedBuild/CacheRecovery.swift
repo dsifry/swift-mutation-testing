@@ -236,18 +236,13 @@ struct CacheRecovery: Sendable {
     }
 
     private func invalidateDirtyProducts() throws {
-        for target in [
-            identityDirectory.appendingPathComponent("DerivedData", isDirectory: true),
-            identityDirectory.appendingPathComponent("prepared-build.json"),
-        ] where FileManager.default.fileExists(atPath: target.path) {
-            try CachePathGuard.validateNoSymlinkComponents(target, containedIn: identityDirectory)
-            let metadata = try Self.requireMetadata(target)
-            if metadata.st_mode & S_IFMT == S_IFDIR {
-                try CachePathGuard.validateOwnedTree(target, containedIn: identityDirectory)
-            } else {
-                try CachePathGuard.validateRegularFile(target, containedIn: identityDirectory)
-            }
-            try FileManager.default.removeItem(at: target)
+        let derivedData = identityDirectory.appendingPathComponent("DerivedData", isDirectory: true)
+        if try CacheDeleteTree.entryExists(derivedData, containedIn: identityDirectory) {
+            try CacheDeleteTree.removeDirectory(derivedData, containedIn: identityDirectory)
+        }
+        let preparedState = identityDirectory.appendingPathComponent("prepared-build.json")
+        if try CacheDeleteTree.entryExists(preparedState, containedIn: identityDirectory) {
+            try CacheDeleteTree.removeRegularFile(preparedState, containedIn: identityDirectory)
         }
     }
 

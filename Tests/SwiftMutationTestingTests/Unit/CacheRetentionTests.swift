@@ -87,6 +87,23 @@ struct CacheRetentionTests {
         #expect(FileManager.default.fileExists(atPath: identity.path))
     }
 
+    @Test("Retention rejects a dangling DerivedData root instead of treating it as absent")
+    func danglingDerivedDataRootFailsClosed() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let identity = try fixture.identity("f", bytes: 1, lastUsed: Date())
+        let derivedData = identity.appendingPathComponent("DerivedData")
+        try FileManager.default.removeItem(at: derivedData)
+        try FileManager.default.createSymbolicLink(
+            at: derivedData,
+            withDestinationURL: fixture.root.appendingPathComponent("missing-target")
+        )
+
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheRetention(collectionRoot: fixture.root).enforce(now: Date())
+        }
+    }
+
     @Test("Retention locks and revalidates a victim immediately before deletion")
     func victimAcquiredAfterEnumerationIsPreserved() throws {
         let fixture = try RetentionFixture()
@@ -133,6 +150,34 @@ struct CacheRetentionTests {
         #expect(FileManager.default.fileExists(atPath: try #require(observation.replacement).path))
     }
 
+    @Test("Retention never deletes a directory substituted for its authenticated tombstone")
+    func tombstoneReplacementFailsClosed() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let now = Date(timeIntervalSince1970: 4_650_000)
+        _ = try fixture.identity("f", bytes: 1, lastUsed: now.addingTimeInterval(-1_000))
+        let observation = TombstoneObservation()
+        let retention = CacheRetention(
+            collectionRoot: fixture.root,
+            policy: .init(maximumIdentityCount: 0, maximumTotalBytes: 0, maximumInactiveAge: 1),
+            beforeTombstoneRemoval: { tombstone in
+                observation.url = tombstone
+                let original = fixture.root.appendingPathComponent("saved-tombstone")
+                try FileManager.default.moveItem(at: tombstone, to: original)
+                try FileManager.default.createDirectory(
+                    at: tombstone, withIntermediateDirectories: false)
+                chmod(tombstone.path, 0o700)
+                observation.replacement = original
+            }
+        )
+
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try retention.enforce(now: now)
+        }
+        #expect(FileManager.default.fileExists(atPath: try #require(observation.url).path))
+        #expect(FileManager.default.fileExists(atPath: try #require(observation.replacement).path))
+    }
+
     @Test("Retention resumes an abandoned tombstone after a crash")
     func abandonedTombstoneIsRecovered() throws {
         let fixture = try RetentionFixture()
@@ -147,6 +192,33 @@ struct CacheRetentionTests {
         _ = try CacheRetention(collectionRoot: fixture.root).enforce(now: now)
 
         #expect(!FileManager.default.fileExists(atPath: tombstone.path))
+    }
+
+    @Test("Retention unlinks package symlink leaves after tombstoning without following targets")
+    func retentionUnlinksPackageSymlinkLeaves() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let now = Date(timeIntervalSince1970: 4_725_000)
+        let victim = try fixture.identity("f", bytes: 1, lastUsed: now.addingTimeInterval(-1_000))
+        let external = fixture.root.appendingPathComponent("external-package")
+        try FileManager.default.createDirectory(at: external, withIntermediateDirectories: false)
+        let marker = external.appendingPathComponent("marker.swift")
+        try Data("external bytes".utf8).write(to: marker)
+        let links = victim.appendingPathComponent(
+            "DerivedData/SourcePackages/checkouts/xctest-dynamic-overlay/Sources/IssueReporting/Symbolic Links")
+        try FileManager.default.createDirectory(at: links, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: links.appendingPathComponent("IssueReportingPackageSupport"),
+            withDestinationURL: external
+        )
+
+        let removed = try CacheRetention(
+            collectionRoot: fixture.root,
+            policy: .init(maximumIdentityCount: 0, maximumTotalBytes: 0, maximumInactiveAge: 1)
+        ).enforce(now: now)
+
+        #expect(removed.map(\.path) == [victim.path])
+        #expect(try String(contentsOf: marker, encoding: .utf8) == "external bytes")
     }
 
     @Test("An invalid abandoned tombstone cannot block retention of valid identities")
@@ -228,7 +300,7 @@ struct CacheRetentionTests {
         #expect(FileManager.default.fileExists(atPath: ignored.path))
     }
 
-    @Test("Retention tie breaking, expired locks, and product symlinks fail deterministically")
+    @Test("Retention tie breaking, expired locks, safe symlink leaves, and hardlinks are deterministic")
     func retentionBranchTable() throws {
         let fixture = try RetentionFixture()
         defer { fixture.cleanup() }
@@ -258,9 +330,8 @@ struct CacheRetentionTests {
         try Data("x".utf8).write(to: outside)
         let link = laterName.appendingPathComponent("DerivedData/link")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
-        #expect(throws: PreparedCacheError.unsafeCachePath) {
-            try CacheRetention(collectionRoot: fixture.root).enforce(now: now)
-        }
+        _ = try CacheRetention(collectionRoot: fixture.root).enforce(now: now)
+        #expect(try String(contentsOf: outside, encoding: .utf8) == "x")
         try FileManager.default.removeItem(at: link)
         let payload = laterName.appendingPathComponent("DerivedData/payload")
         let hardlink = laterName.appendingPathComponent("DerivedData/payload-hardlink")
@@ -269,37 +340,198 @@ struct CacheRetentionTests {
             try CacheRetention(collectionRoot: fixture.root).enforce(now: now)
         }
         try FileManager.default.removeItem(at: hardlink)
+        _ = try CacheRetention(collectionRoot: fixture.root).enforce(now: now)
+    }
+
+    @Test("Descriptor syscall adapters report failures without following paths")
+    func descriptorSystemOperationFailures() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let directory = try fixture.identity("d", bytes: 1, lastUsed: Date())
+        let file = directory.appendingPathComponent("retention.json")
+
+        #expect(CacheDeleteTreeOperations.system.metadataAt(-1, "missing") == nil)
+        #expect(CacheDeleteTreeOperations.system.metadataOf(-1) == nil)
+        #expect(CacheDeleteTreeOperations.system.childNames(-1) == nil)
+        #expect(CacheDeleteTreeOperations.system.openChild(-1, "missing") < 0)
+        #expect(CacheDeleteTreeOperations.system.unlinkEntry(-1, "missing", 0) < 0)
+        #expect(CacheDeleteTreeOperations.system.openParent("/definitely/missing") < 0)
+        let regularDescriptor = open(file.path, O_RDONLY | O_CLOEXEC)
+        #expect(regularDescriptor >= 0)
+        #expect(CacheDeleteTreeOperations.system.childNames(regularDescriptor) == nil)
+        _ = close(regularDescriptor)
+        let fakeDirectory = UnsafeMutablePointer<DIR>(bitPattern: 1)!
+        #expect(
+            CacheDeleteTreeOperations.systemChildNames(
+                descriptor: 1,
+                duplicate: { $0 },
+                openDirectory: { _ in fakeDirectory },
+                readEntry: { _ in nil },
+                readError: { EIO },
+                closeDirectory: { _ in 0 }
+            ) == nil
+        )
+        #expect(
+            CacheDeleteTreeOperations.systemChildNames(
+                descriptor: 1,
+                duplicate: { $0 },
+                openDirectory: { _ in fakeDirectory },
+                readEntry: { _ in nil },
+                readError: { 0 },
+                closeDirectory: { _ in -1 }
+            ) == nil
+        )
+    }
+
+    @Test("Descriptor validation fails closed on missing metadata and child access")
+    func descriptorValidationFailures() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let directory = try fixture.identity("d", bytes: 1, lastUsed: Date())
+        let file = directory.appendingPathComponent("retention.json")
+
+        var operations = CacheDeleteTreeOperations.system
+        operations.openParent = { _ in -1 }
         #expect(throws: PreparedCacheError.unsafeCachePath) {
-            try CacheRetention(
-                collectionRoot: fixture.root,
-                metadataProvider: { url in
-                    url.lastPathComponent == "DerivedData" ? nil : CachePathGuard.metadata(at: url)
-                }
-            ).enforce(now: now)
+            try CacheDeleteTree.byteSize(directory, containedIn: fixture.root, operations: operations)
         }
         #expect(throws: PreparedCacheError.unsafeCachePath) {
-            try CacheRetention(
-                collectionRoot: fixture.root,
-                metadataProvider: { url in
-                    url.lastPathComponent == "payload" ? nil : CachePathGuard.metadata(at: url)
-                }
-            ).enforce(now: now)
+            try CacheDeleteTree.byteSize(
+                directory.appendingPathComponent("nested"),
+                containedIn: fixture.root,
+                operations: .system
+            )
+        }
+
+        operations = .system
+        operations.metadataAt = { _, _ in nil }
+        operations.metadataAtError = { ENOENT }
+        #expect(
+            try CacheDeleteTree.entryExists(
+                file, containedIn: directory, operations: operations) == false)
+        operations.metadataAtError = { EIO }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheDeleteTree.entryExists(file, containedIn: directory, operations: operations)
+        }
+
+        operations = .system
+        operations.metadataAt = { _, _ in nil }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheDeleteTree.removeRegularFile(
+                file, containedIn: directory, operations: operations)
+        }
+
+        operations = .system
+        let systemMetadataAt = operations.metadataAt
+        var validationReads = 0
+        operations.metadataAt = { descriptor, name in
+            validationReads += 1
+            return validationReads == 2 ? nil : systemMetadataAt(descriptor, name)
         }
         #expect(throws: PreparedCacheError.unsafeCachePath) {
-            try CacheRetention(
-                collectionRoot: fixture.root,
-                makeEnumerator: { _ in nil }
-            ).enforce(now: now)
+            try CacheDeleteTree.validateForRemoval(
+                directory, containedIn: fixture.root, operations: operations)
         }
-        let enumerationCount = RetentionCounter()
-        _ = try CacheRetention(
-            collectionRoot: fixture.root,
-            makeEnumerator: { root in
-                enumerationCount.increment()
-                return FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
-            }
-        ).enforce(now: now)
-        #expect(enumerationCount.value == 2)
+
+        operations = .system
+        validationReads = 0
+        operations.metadataAt = { descriptor, name in
+            validationReads += 1
+            return validationReads == 2 ? nil : systemMetadataAt(descriptor, name)
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheDeleteTree.byteSize(
+                directory, containedIn: fixture.root, operations: operations)
+        }
+
+        operations = .system
+        operations.openChild = { _, _ in -1 }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheDeleteTree.byteSize(directory, containedIn: fixture.root, operations: operations)
+        }
+
+        operations = .system
+        operations.metadataOf = { _ in nil }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheDeleteTree.byteSize(directory, containedIn: fixture.root, operations: operations)
+        }
+
+        operations = .system
+        operations.childNames = { _ in nil }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheDeleteTree.byteSize(directory, containedIn: fixture.root, operations: operations)
+        }
+    }
+
+    @Test("Descriptor deletion rejects unlink failures and entry replacement")
+    func descriptorRemovalRaceFailures() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let directory = try fixture.identity("d", bytes: 1, lastUsed: Date())
+        let file = directory.appendingPathComponent("retention.json")
+        let emptyDirectory = fixture.root.appendingPathComponent("empty")
+        try FileManager.default.createDirectory(at: emptyDirectory, withIntermediateDirectories: false)
+        chmod(emptyDirectory.path, 0o700)
+
+        var operations = CacheDeleteTreeOperations.system
+        let systemMetadataAt = operations.metadataAt
+        operations.unlinkEntry = { _, _, _ in -1 }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheDeleteTree.removeDirectory(
+                emptyDirectory, containedIn: fixture.root, operations: operations)
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheDeleteTree.removeRegularFile(
+                file, containedIn: directory, operations: operations)
+        }
+
+        operations = .system
+        var directoryReads = 0
+        operations.metadataAt = { descriptor, name in
+            guard var metadata = systemMetadataAt(descriptor, name) else { return nil }
+            directoryReads += 1
+            if directoryReads == 3 { metadata.st_ino ^= 1 }
+            return metadata
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheDeleteTree.removeDirectory(
+                emptyDirectory, containedIn: fixture.root, operations: operations)
+        }
+
+        operations = .system
+        directoryReads = 0
+        operations.metadataAt = { descriptor, name in
+            directoryReads += 1
+            return directoryReads == 3 ? nil : systemMetadataAt(descriptor, name)
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheDeleteTree.removeDirectory(
+                emptyDirectory, containedIn: fixture.root, operations: operations)
+        }
+
+        operations = .system
+        var fileReads = 0
+        operations.metadataAt = { descriptor, name in
+            guard var metadata = systemMetadataAt(descriptor, name) else { return nil }
+            fileReads += 1
+            if fileReads == 3 { metadata.st_ino ^= 1 }
+            return metadata
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheDeleteTree.removeRegularFile(
+                file, containedIn: directory, operations: operations)
+        }
+
+        operations = .system
+        fileReads = 0
+        operations.metadataAt = { descriptor, name in
+            fileReads += 1
+            return fileReads == 3 ? nil : systemMetadataAt(descriptor, name)
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheDeleteTree.removeRegularFile(
+                file, containedIn: directory, operations: operations)
+        }
     }
 }
 
