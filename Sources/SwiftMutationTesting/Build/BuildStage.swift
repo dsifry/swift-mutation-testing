@@ -7,15 +7,17 @@ struct BuildStage: Sendable {
         sandbox: Sandbox,
         scheme: String,
         destination: String,
-        timeout: Double
+        timeout: Double,
+        derivedDataURL: URL? = nil
     ) async throws -> BuildArtifact {
-        let derivedDataURL = sandbox.rootURL.appendingPathComponent(".xmr-derived-data")
+        let derivedDataURL = derivedDataURL ?? sandbox.rootURL.appendingPathComponent(".xmr-derived-data")
 
         var arguments = [
             "build-for-testing",
             "-scheme", scheme,
             "-destination", destination,
             "-derivedDataPath", derivedDataURL.path,
+            "CODE_SIGNING_ALLOWED=NO",
         ]
 
         if let workspaceURL = findXcworkspace(in: sandbox.rootURL) {

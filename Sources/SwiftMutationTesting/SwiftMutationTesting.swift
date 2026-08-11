@@ -62,8 +62,26 @@ public struct SwiftMutationTesting {
 
         let executionLauncher: any ProcessLaunching = launcher ?? defaultLauncher(for: configuration.build.projectType)
 
+        if parsed.cache.mode == .prepare {
+            try await PreparedBuildCoordinator(
+                configuration: configuration,
+                options: parsed.cache,
+                launcher: executionLauncher
+            ).prepare(input)
+            return .success
+        }
+
         let start = Date()
-        let results = try await MutantExecutor(configuration: configuration, launcher: executionLauncher).execute(input)
+        let results: [ExecutionResult]
+        if parsed.cache.mode == .target {
+            results = try await PreparedBuildCoordinator(
+                configuration: configuration,
+                options: parsed.cache,
+                launcher: executionLauncher
+            ).target(input)
+        } else {
+            results = try await MutantExecutor(configuration: configuration, launcher: executionLauncher).execute(input)
+        }
         let duration = Date().timeIntervalSince(start)
 
         let summary = RunnerSummary(results: results, totalDuration: duration)

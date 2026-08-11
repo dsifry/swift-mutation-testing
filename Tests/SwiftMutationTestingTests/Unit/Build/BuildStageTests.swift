@@ -5,6 +5,35 @@ import Testing
 
 @Suite("BuildStage")
 struct BuildStageTests {
+    @Test("Given retained derived data, when build called, then it is reused and signing is disabled")
+    func usesRetainedDerivedDataAndDisablesSigning() async throws {
+        let projectDir = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(projectDir) }
+        let derivedData = projectDir.appendingPathComponent("retained-derived-data")
+        let productsDir = derivedData.appendingPathComponent("Build/Products")
+        try FileManager.default.createDirectory(at: productsDir, withIntermediateDirectories: true)
+        let plistData = try PropertyListSerialization.data(
+            fromPropertyList: ["__xctestrun_metadata__": ["FormatVersion": 1]],
+            format: .xml,
+            options: 0
+        )
+        try plistData.write(to: productsDir.appendingPathComponent("App.xctestrun"))
+        let launcher = BuildRecordingLauncher()
+
+        let artifact = try await BuildStage(launcher: launcher).build(
+            sandbox: Sandbox(rootURL: projectDir),
+            scheme: "App",
+            destination: "platform=macOS",
+            timeout: 60,
+            derivedDataURL: derivedData
+        )
+
+        let request = try #require(await launcher.request)
+        #expect(artifact.derivedDataPath == derivedData.path)
+        #expect(request.arguments.contains(derivedData.path))
+        #expect(request.arguments.contains("CODE_SIGNING_ALLOWED=NO"))
+    }
+
     @Test("Given successful build and xctestrun present, when build called, then returns BuildArtifact")
     func returnsArtifactOnSuccess() async throws {
         let projectDir = try FileHelpers.makeTemporaryDirectory()
@@ -182,4 +211,22 @@ struct BuildStageTests {
         }
     }
 
+}
+
+private actor BuildRecordingLauncher: ProcessLaunching {
+    private(set) var request: ProcessRequest?
+
+    func launch(
+        executableURL: URL,
+        arguments: [String],
+        workingDirectoryURL: URL,
+        timeout: Double
+    ) async throws -> Int32 {
+        0
+    }
+
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        self.request = request
+        return (0, "")
+    }
 }
