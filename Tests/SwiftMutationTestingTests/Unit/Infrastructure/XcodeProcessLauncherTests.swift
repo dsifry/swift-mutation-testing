@@ -49,7 +49,7 @@ struct XcodeProcessLauncherTests {
                 ))
         }
         XcodeProcessLauncher().makeRunner().onTimeout(0)
-        #expect(ProcessRunner.readCapturedOutput(at: URL(fileURLWithPath: "/definitely/missing")) == "")
+        #expect(ProcessRunner.readCapturedOutput(from: -1) == nil)
     }
 
     @Test("Process-group setup failure aborts only the direct child and never registers a caller group")
@@ -106,7 +106,7 @@ struct XcodeProcessLauncherTests {
         let ownedDescriptorRunner = ProcessRunner(
             onTimeout: { _ in },
             createCaptureDescriptor: { path in
-                let descriptor = open(path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o600)
+                let descriptor = ProcessRunner.openPrivateCaptureFile(path)
                 descriptorRecorder.abort(descriptor)
                 return descriptor
             },
@@ -128,13 +128,16 @@ struct XcodeProcessLauncherTests {
             #expect(fcntl(ownedDescriptor, F_GETFD) == -1)
         }
         #expect(ProcessRunner.openPrivateCaptureFile("ignored", openFile: { _ in -1 }) == -1)
+        #expect(ProcessRunner.openPrivateCaptureFile("ignored", openFile: { _ in Int32.max }) == -1)
         #expect(throws: PreparedCacheError.unsafeCachePath) {
             try ProcessRunner.captureDirectory(nil, canonicalizer: { _ in nil })
         }
+        let insecurePath = CapturePathRecorder()
         let insecureCapture = ProcessRunner(
             onTimeout: { _ in },
             createCaptureDescriptor: { path in
-                open(path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o644)
+                insecurePath.path = path
+                return open(path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o644)
             }
         )
         await #expect(throws: PreparedCacheError.unsafeCachePath) {
@@ -145,6 +148,7 @@ struct XcodeProcessLauncherTests {
                     workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
                 ))
         }
+        if let path = insecurePath.path { try? FileManager.default.removeItem(atPath: path) }
         let initializeFailure = ProcessRunner(
             onTimeout: { _ in },
             initializeSpawn: { _, _ in false }
@@ -266,39 +270,19 @@ struct XcodeProcessLauncherTests {
                 ))
         }
 
-        let removalFailurePath = CapturePathRecorder()
-        var removalFailure = ProcessRunner(
+        var readFailure = ProcessRunner(
             onTimeout: { _ in },
-            createCaptureDescriptor: { path in
-                removalFailurePath.path = path
-                return ProcessRunner.openPrivateCaptureFile(path)
-            }
+            createCaptureDescriptor: { ProcessRunner.openPrivateCaptureFile($0) }
         )
-        removalFailure.removeCaptureFile = { _, _ in false }
+        readFailure.readCaptureDescriptor = { _ in nil }
         await #expect(throws: PreparedCacheError.unsafeCachePath) {
-            try await removalFailure.launchCapturing(
+            try await readFailure.launchCapturing(
                 .init(
                     executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [],
                     environment: nil, additionalEnvironment: [:],
                     workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
                 ))
         }
-        if let path = removalFailurePath.path { try? FileManager.default.removeItem(atPath: path) }
-
-        let removalThrowURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-        let removalThrowDescriptor = ProcessRunner.openPrivateCaptureFile(removalThrowURL.path)
-        var removalThrowIdentity = stat()
-        #expect(fstat(removalThrowDescriptor, &removalThrowIdentity) == 0)
-        #expect(close(removalThrowDescriptor) == 0)
-        #expect(
-            !ProcessRunner.removeCaptureIfOwned(
-                removalThrowURL,
-                identity: removalThrowIdentity,
-                remove: { _ in throw PreparedCacheError.unsafeCachePath }
-            ))
-        try? FileManager.default.removeItem(at: removalThrowURL)
-        #expect(!ProcessRunner.capturePathMatches(removalThrowURL, identity: removalThrowIdentity))
     }
 
     @Test("waitpid retries EINTR and returns the eventual child status")
@@ -359,17 +343,81 @@ struct XcodeProcessLauncherTests {
                     actions: actions, attributes: attributes, output: output, directory: directory)
             }
         )
+        let swappedResult = try await swappedRunner.launchCapturing(
+            .init(
+                executableURL: URL(fileURLWithPath: "/bin/echo"), arguments: ["descriptor-output"],
+                environment: nil, additionalEnvironment: [:], workingDirectoryURL: root, timeout: 10
+            ))
+        #expect(swappedResult.output.contains("descriptor-output"))
+        #expect(!swappedResult.output.contains("spoofed-output"))
+        let replacement = try #require(capturePath.path)
+        #expect(FileManager.default.fileExists(atPath: replacement))
+        #expect(try String(contentsOfFile: replacement, encoding: .utf8) == "spoofed-output")
+        try FileManager.default.removeItem(atPath: replacement)
+
+        let earlyFailurePath = CapturePathRecorder()
+        let earlyFailure = ProcessRunner(
+            onTimeout: { _ in },
+            createCaptureDescriptor: { path in
+                earlyFailurePath.path = path
+                _ = FileManager.default.createFile(
+                    atPath: path, contents: Data("unowned".utf8),
+                    attributes: [.posixPermissions: 0o644])
+                return open("/dev/null", O_RDWR | O_CLOEXEC)
+            },
+            captureRoot: root
+        )
         await #expect(throws: PreparedCacheError.unsafeCachePath) {
-            try await swappedRunner.launchCapturing(
+            try await earlyFailure.launchCapturing(
                 .init(
                     executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [],
                     environment: nil, additionalEnvironment: [:], workingDirectoryURL: root, timeout: 10
                 ))
         }
-        let replacement = try #require(capturePath.path)
-        #expect(FileManager.default.fileExists(atPath: replacement))
-        #expect(try String(contentsOfFile: replacement, encoding: .utf8) == "spoofed-output")
-        try FileManager.default.removeItem(atPath: replacement)
+        let unownedPath = try #require(earlyFailurePath.path)
+        #expect(FileManager.default.fileExists(atPath: unownedPath))
+        #expect(try String(contentsOfFile: unownedPath, encoding: .utf8) == "unowned")
+        try FileManager.default.removeItem(atPath: unownedPath)
+
+        let directorySwapRoot = root.appendingPathComponent("directory-swap")
+        let movedDirectory = root.appendingPathComponent("directory-swap-owned")
+        let externalDirectory = root.appendingPathComponent("directory-swap-external")
+        try FileManager.default.createDirectory(at: directorySwapRoot, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: externalDirectory, withIntermediateDirectories: false)
+        chmod(directorySwapRoot.path, 0o700)
+        chmod(externalDirectory.path, 0o700)
+        let directorySwapPath = CapturePathRecorder()
+        let directorySwapRunner = ProcessRunner(
+            onTimeout: { _ in },
+            createCaptureDescriptor: { path in
+                directorySwapPath.path = path
+                return ProcessRunner.openPrivateCaptureFile(path)
+            },
+            captureRoot: directorySwapRoot,
+            configureSpawn: { actions, attributes, output, directory in
+                guard let path = directorySwapPath.path else { return false }
+                try? FileManager.default.moveItem(at: directorySwapRoot, to: movedDirectory)
+                try? FileManager.default.createSymbolicLink(
+                    at: directorySwapRoot, withDestinationURL: externalDirectory)
+                _ = FileManager.default.createFile(
+                    atPath: externalDirectory.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent).path,
+                    contents: Data("directory-spoof".utf8), attributes: [.posixPermissions: 0o600])
+                return ProcessRunner.configureSpawnResources(
+                    actions: actions, attributes: attributes, output: output, directory: directory)
+            }
+        )
+        let directorySwapResult = try await directorySwapRunner.launchCapturing(
+            .init(
+                executableURL: URL(fileURLWithPath: "/bin/echo"), arguments: ["owned-directory-output"],
+                environment: nil, additionalEnvironment: [:], workingDirectoryURL: root, timeout: 10
+            ))
+        #expect(directorySwapResult.output.contains("owned-directory-output"))
+        let directoryReplacement = externalDirectory.appendingPathComponent(
+            URL(fileURLWithPath: try #require(directorySwapPath.path)).lastPathComponent)
+        #expect(try String(contentsOf: directoryReplacement, encoding: .utf8) == "directory-spoof")
+        try FileManager.default.removeItem(at: directorySwapRoot)
+        try FileManager.default.removeItem(at: movedDirectory)
+        try FileManager.default.removeItem(at: externalDirectory)
     }
 
     @Test("Escalation is identity-checked and lifecycle-cancellable")

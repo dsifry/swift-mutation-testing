@@ -28,9 +28,7 @@ struct ProcessRunner: Sendable {
         var identity = stat()
         return fstat(descriptor, &identity) == 0 ? identity : nil
     }
-    var removeCaptureFile: @Sendable (URL, stat) -> Bool = {
-        removeCaptureIfOwned($0, identity: $1)
-    }
+    var readCaptureDescriptor: @Sendable (Int32) -> String? = { readCapturedOutput(from: $0) }
     var captureRoot: URL?
     var initializeSpawn: SpawnInitializer
     var configureSpawn: SpawnConfigurator
@@ -109,14 +107,10 @@ struct ProcessRunner: Sendable {
         }
         var captureDescriptorIsOpen = true
         defer { if captureDescriptorIsOpen { _ = closeCaptureDescriptor(captureDescriptor) } }
-        do {
-            try CachePathGuard.validateRegularFile(tempURL, containedIn: root)
-        } catch {
-            try? FileManager.default.removeItem(at: tempURL)
-            throw error
-        }
-        guard let captureIdentity = captureDescriptorIdentity(captureDescriptor) else {
-            try? FileManager.default.removeItem(at: tempURL)
+        guard let captureIdentity = captureDescriptorIdentity(captureDescriptor),
+            captureIdentity.st_uid == getuid(), captureIdentity.st_mode & S_IFMT == S_IFREG,
+            captureIdentity.st_mode & 0o777 == 0o600, captureIdentity.st_nlink == 0
+        else {
             throw PreparedCacheError.unsafeCachePath
         }
         do {
@@ -133,46 +127,26 @@ struct ProcessRunner: Sendable {
                 workingDirectoryURL: request.workingDirectoryURL,
                 outputDescriptor: captureDescriptor
             )
+            let exitCode = try await supervise(pid: pid, timeout: request.timeout) { status in status }
+            guard let output = readCaptureDescriptor(captureDescriptor) else {
+                throw PreparedCacheError.unsafeCachePath
+            }
             let closeResult = closeCaptureDescriptor(captureDescriptor)
             captureDescriptorIsOpen = false
-            guard closeResult == 0 else {
-                _ = kill(-pid, SIGKILL)
-                _ = waitForExit(pid)
-                throw PreparedCacheError.unverifiableProcessIdentity
-            }
-            let exitCode = try await supervise(pid: pid, timeout: request.timeout) { status in status }
-            guard Self.capturePathMatches(tempURL, identity: captureIdentity) else {
-                throw PreparedCacheError.unsafeCachePath
-            }
-            let output = Self.readCapturedOutput(at: tempURL)
-            guard removeCaptureFile(tempURL, captureIdentity) else {
-                throw PreparedCacheError.unsafeCachePath
-            }
+            guard closeResult == 0 else { throw PreparedCacheError.unverifiableProcessIdentity }
             return (exitCode, output)
         } catch {
-            _ = removeCaptureFile(tempURL, captureIdentity)
             throw error
         }
     }
 
-    static func capturePathMatches(_ url: URL, identity: stat) -> Bool {
-        guard let current = CachePathGuard.metadata(at: url) else { return false }
-        return current.st_dev == identity.st_dev && current.st_ino == identity.st_ino
-            && current.st_uid == getuid() && current.st_mode & S_IFMT == S_IFREG
-            && current.st_mode & 0o777 == 0o600 && current.st_nlink == 1
-    }
-
-    static func removeCaptureIfOwned(
-        _ url: URL,
-        identity: stat,
-        remove: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
-    ) -> Bool {
-        guard capturePathMatches(url, identity: identity) else { return false }
+    static func readCapturedOutput(from descriptor: Int32) -> String? {
         do {
-            try remove(url)
-            return true
+            let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+            try handle.seek(toOffset: 0)
+            return String(decoding: try handle.readToEnd() ?? Data(), as: UTF8.self)
         } catch {
-            return false
+            return nil
         }
     }
 
@@ -268,17 +242,31 @@ struct ProcessRunner: Sendable {
         return pid
     }
 
-    static func readCapturedOutput(at url: URL) -> String {
-        (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-    }
-
     static func openPrivateCaptureFile(
         _ path: String,
         openFile: (String) -> Int32 = {
-            open($0, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o600)
-        }
+            open($0, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        },
+        descriptorIdentity: (Int32) -> stat? = { descriptor in
+            var identity = stat()
+            return fstat(descriptor, &identity) == 0 ? identity : nil
+        },
+        unlinkFile: (String) -> Int32 = { unlink($0) },
+        closeFile: (Int32) -> Void = { _ = close($0) }
     ) -> Int32 {
-        openFile(path)
+        let descriptor = openFile(path)
+        guard descriptor >= 0 else { return -1 }
+        guard let identity = descriptorIdentity(descriptor), identity.st_uid == getuid(),
+            identity.st_mode & S_IFMT == S_IFREG, identity.st_mode & 0o777 == 0o600,
+            identity.st_nlink == 1, unlinkFile(path) == 0,
+            let unlinkedIdentity = descriptorIdentity(descriptor),
+            unlinkedIdentity.st_dev == identity.st_dev, unlinkedIdentity.st_ino == identity.st_ino,
+            unlinkedIdentity.st_nlink == 0
+        else {
+            closeFile(descriptor)
+            return -1
+        }
+        return descriptor
     }
 
     static func captureDirectory(
