@@ -323,6 +323,36 @@ struct ConfigurationResolverTests {
         #expect(result.build.concurrency == 8)
     }
 
+    @Test("Given concurrency at the custody protocol limit, when resolved, then it is preserved")
+    func maximumSupportedConcurrencyIsPreserved() throws {
+        let result = try resolver.resolve(
+            cliArguments: ParsedArguments(
+                build: .init(
+                    scheme: "App", destination: "d",
+                    concurrency: ProcessCustody.maximumTrackedProcessGroups
+                )
+            ),
+            fileValues: [:]
+        )
+
+        #expect(result.build.concurrency == ProcessCustody.maximumTrackedProcessGroups)
+    }
+
+    @Test("Given concurrency above the custody protocol limit, when resolved, then it is rejected")
+    func concurrencyAboveCustodyProtocolLimitIsRejected() {
+        #expect(throws: UsageError.self) {
+            try resolver.resolve(
+                cliArguments: ParsedArguments(
+                    build: .init(
+                        scheme: "App", destination: "d",
+                        concurrency: ProcessCustody.maximumTrackedProcessGroups + 1
+                    )
+                ),
+                fileValues: [:]
+            )
+        }
+    }
+
     @Test("Given explicit project path, when resolved, then path is standardized")
     func explicitProjectPathIsStandardized() throws {
         let result = try resolver.resolve(

@@ -13,6 +13,9 @@ enum ProcessIdentityStatus: Equatable, Sendable {
 }
 
 final class ProcessCustody: @unchecked Sendable {
+    /// The execution protocol's hard ceiling for parallel workers and live child groups.
+    static let maximumTrackedProcessGroups = 64
+
     typealias IdentityVerifier = @Sendable (CustodiedProcessGroup) -> Bool
     typealias IdentityStatusVerifier = @Sendable (CustodiedProcessGroup) -> ProcessIdentityStatus
     typealias GroupOperation = @Sendable (Int32) throws -> Void
@@ -123,7 +126,6 @@ final class ProcessCustody: @unchecked Sendable {
                 for _ in 0..<50 {
                     let result = signal(-processGroupID, 0)
                     if result == -1, errno == ESRCH { return true }
-                    if result == -1 { return false }
                     sleep(100_000)
                 }
                 return false
@@ -137,7 +139,9 @@ final class ProcessCustody: @unchecked Sendable {
 
     func register(_ group: CustodiedProcessGroup) throws {
         try mutex.withLock {
-            guard groups.count < 4 else { throw PreparedCacheError.tooManyProcessGroups }
+            guard groups.count < Self.maximumTrackedProcessGroups else {
+                throw PreparedCacheError.tooManyProcessGroups
+            }
             guard group.pid > 0, group.processGroupID > 0, !group.birthIdentity.isEmpty else {
                 throw PreparedCacheError.unverifiableProcessIdentity
             }
@@ -190,7 +194,7 @@ final class ProcessCustody: @unchecked Sendable {
         let data = try Data(contentsOf: url)
         _ = try ExactJSON.arrayOfObjects(data, keys: ["pid", "processGroupID", "birthIdentity"])
         let groups = try JSONDecoder().decode([CustodiedProcessGroup].self, from: data)
-        guard groups.count <= 4,
+        guard groups.count <= maximumTrackedProcessGroups,
             groups.allSatisfy({ $0.pid > 0 && $0.processGroupID > 0 && !$0.birthIdentity.isEmpty }),
             Set(groups.map(\.pid)).count == groups.count
         else { throw PreparedCacheError.invalidCacheState }
@@ -265,8 +269,10 @@ enum SystemProcessIdentity {
         guard let current = birthIdentity(group.pid) else {
             return errno == ESRCH ? .absent : .mismatched
         }
-        return current == group.birthIdentity && getGroup(group.pid) == group.processGroupID
-            ? .matching : .mismatched
+        guard current == group.birthIdentity else { return .mismatched }
+        let currentGroup = getGroup(group.pid)
+        if currentGroup == group.processGroupID { return .matching }
+        return currentGroup == -1 && errno == ESRCH ? .absent : .mismatched
     }
 
     private static func birthIdentity(pid: Int32) -> String? {

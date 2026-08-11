@@ -11,6 +11,11 @@ struct ConfigurationResolver: Sendable {
         guard concurrency >= 1 else {
             throw UsageError(message: "--concurrency must be >= 1")
         }
+        guard concurrency <= ProcessCustody.maximumTrackedProcessGroups else {
+            throw UsageError(
+                message: "--concurrency must be <= \(ProcessCustody.maximumTrackedProcessGroups)"
+            )
+        }
 
         let projectType = try resolveProjectType(
             cliArguments: cliArguments,

@@ -1237,22 +1237,88 @@ struct PreparedBuildRecoveryTests {
         #expect(!recorder.terminated.contains(150))
     }
 
-    @Test("Custody refuses a fifth live child group")
+    @Test("Custody refuses groups beyond the bounded concurrency protocol")
     func custodyGroupBound() throws {
+        let fixture = try RecoveryFixture()
+        defer { fixture.cleanup() }
+        try fixture.makeIdentity(fixture.identityA)
         let recorder = CustodyRecorder()
         let custody = ProcessCustody(
+            registeredGroups: (0 ..< ProcessCustody.maximumTrackedProcessGroups).map { index in
+                CustodiedProcessGroup(
+                    pid: Int32(index + 1),
+                    processGroupID: Int32(index + 100),
+                    birthIdentity: "b\(index)"
+                )
+            },
             verifyIdentity: { recorder.verify($0) },
             terminateGroup: { try recorder.terminate($0) },
             waitForGroup: { try recorder.wait($0) }
         )
-        for index in 0..<4 {
-            let group = CustodiedProcessGroup(pid: Int32(index + 1), processGroupID: Int32(index + 10), birthIdentity: "b\(index)")
-            recorder.allow(group)
-            try custody.register(group)
-        }
         #expect(throws: PreparedCacheError.tooManyProcessGroups) {
-            try custody.register(CustodiedProcessGroup(pid: 9, processGroupID: 99, birthIdentity: "fifth"))
+            try custody.register(
+                CustodiedProcessGroup(
+                    pid: Int32(ProcessCustody.maximumTrackedProcessGroups + 1),
+                    processGroupID: 999,
+                    birthIdentity: "beyond-bound"
+                )
+            )
         }
+
+        let oversizedRegistry = fixture.identityA.appendingPathComponent("oversized-custody.json")
+        let oversizedGroups = (0 ... ProcessCustody.maximumTrackedProcessGroups).map { index in
+            CustodiedProcessGroup(
+                pid: Int32(index + 1),
+                processGroupID: Int32(index + 100),
+                birthIdentity: "b\(index)"
+            )
+        }
+        try JSONEncoder().encode(oversizedGroups).write(to: oversizedRegistry)
+        chmod(oversizedRegistry.path, 0o600)
+        #expect(throws: PreparedCacheError.invalidCacheState) {
+            try ProcessCustody.readRegisteredGroups(from: oversizedRegistry)
+        }
+    }
+
+    @Test("Custody durably tracks eight parallel prepared-target process groups")
+    func custodySupportsPreparedTargetConcurrency() async throws {
+        let fixture = try RecoveryFixture()
+        defer { fixture.cleanup() }
+        try fixture.makeIdentity(fixture.identityA)
+        let registry = fixture.identityA.appendingPathComponent("parallel-custody.json")
+        let custody = ProcessCustody(
+            registrationURL: registry,
+            verifyIdentity: { _ in true },
+            terminateGroup: { _ in },
+            waitForGroup: { _ in }
+        )
+        let groups = (1 ... 8).map {
+            CustodiedProcessGroup(
+                pid: Int32($0),
+                processGroupID: Int32(100 + $0),
+                birthIdentity: "birth-\($0)"
+            )
+        }
+        try await withThrowingTaskGroup(of: Void.self) { tasks in
+            for group in groups {
+                tasks.addTask { try custody.register(group) }
+            }
+            try await tasks.waitForAll()
+        }
+        #expect(Set(try ProcessCustody.readRegisteredGroups(from: registry)) == Set(groups))
+
+        let recovered = try ProcessCustody.system(
+            registrationURL: registry,
+            identityStatus: { _ in .absent },
+            signal: { _, _ in
+                errno = ESRCH
+                return -1
+            },
+            sleep: { _ in }
+        )
+        try recovered.handleEngineTermination()
+        #expect(recovered.isQuiescent)
+        #expect(try ProcessCustody.readRegisteredGroups(from: registry).isEmpty)
     }
 
     @Test("Custody atomically persists its verified registry through quiescence")
@@ -1519,6 +1585,62 @@ struct PreparedBuildRecoveryTests {
         #expect(SystemProcessIdentity.status(of: group, birthIdentity: { _ in nil }, getGroup: { _ in 0 }) == .mismatched)
         errno = ESRCH
         #expect(SystemProcessIdentity.status(of: group, birthIdentity: { _ in nil }, getGroup: { _ in 0 }) == .absent)
+        #expect(
+            SystemProcessIdentity.status(
+                of: group,
+                birthIdentity: { _ in group.birthIdentity },
+                getGroup: { _ in
+                    errno = ESRCH
+                    return -1
+                }
+            ) == .absent
+        )
+        #expect(
+            SystemProcessIdentity.status(
+                of: group,
+                birthIdentity: { _ in group.birthIdentity },
+                getGroup: { _ in
+                    errno = EACCES
+                    return -1
+                }
+            ) == .mismatched
+        )
+
+        let transientProbeCalls = LockedCounter()
+        let transientProbe = try ProcessCustody.system(
+            registrationURL: fixture.identityA.appendingPathComponent("transient-probe.json"),
+            identityStatus: { _ in .matching },
+            signal: { _, signal in
+                guard signal == 0 else { return 0 }
+                let call = transientProbeCalls.incrementedValue()
+                if call <= 50 { return 0 }
+                errno = call == 51 ? EPERM : ESRCH
+                return -1
+            },
+            sleep: { _ in }
+        )
+        try transientProbe.register(group)
+        try transientProbe.handleEngineTermination()
+        #expect(transientProbeCalls.value == 52)
+
+        let persistentProbeCalls = LockedCounter()
+        let persistentProbe = try ProcessCustody.system(
+            registrationURL: fixture.identityA.appendingPathComponent("persistent-probe.json"),
+            identityStatus: { _ in .matching },
+            signal: { _, signal in
+                guard signal == 0 else { return 0 }
+                let call = persistentProbeCalls.incrementedValue()
+                if call <= 50 { return 0 }
+                errno = EPERM
+                return -1
+            },
+            sleep: { _ in }
+        )
+        try persistentProbe.register(group)
+        #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
+            try persistentProbe.handleEngineTermination()
+        }
+        #expect(persistentProbeCalls.value == 100)
 
         for terminalStatus in [ProcessIdentityStatus.absent, .mismatched] {
             let statuses = IdentityStatusRecorder(statuses: [.matching, .matching, terminalStatus])
@@ -1971,6 +2093,12 @@ private final class LockedCounter: @unchecked Sendable {
     private var count = 0
     var value: Int { lock.withLock { count } }
     func increment() { lock.withLock { count += 1 } }
+    func incrementedValue() -> Int {
+        lock.withLock {
+            count += 1
+            return count
+        }
+    }
 }
 
 private final class CloseRecorder: @unchecked Sendable {

@@ -9,7 +9,7 @@ cd "$repository_root"
 DEVELOPER_DIR="$developer_directory" xcrun swift test \
   --no-parallel \
   --enable-code-coverage \
-  --filter 'PreparedBuildRecoveryTests|CacheRetentionTests|PreparedBuildStoreTests|SwiftMutationTestingExecutionPathTests|SwiftMutationTestingRunTests|WriteReportsTests|CommandLineParserTests|BuildStageTests|XcodeProcessLauncherTests'
+  --filter 'PreparedBuildRecoveryTests|CacheRetentionTests|PreparedBuildStoreTests|SwiftMutationTestingExecutionPathTests|SwiftMutationTestingRunTests|WriteReportsTests|CommandLineParserTests|ConfigurationResolverTests|BuildStageTests|XcodeProcessLauncherTests'
 
 coverage_path="$(DEVELOPER_DIR="$developer_directory" xcrun swift test --show-codecov-path)"
 test -f "$coverage_path"
