@@ -1399,6 +1399,25 @@ struct PreparedBuildRecoveryTests {
             try hardlinkRecovery.recover(expectedProductManifestSHA256: hardlinkFixture.productA)
         }
         #expect(try String(contentsOf: externalState, encoding: .utf8) == "external bytes")
+
+        let productFixture = try RecoveryFixture()
+        defer { productFixture.cleanup() }
+        try productFixture.makeIdentity(productFixture.identityA)
+        let productRecovery = CacheRecovery(
+            identityDirectory: productFixture.identityA,
+            collectionRoot: productFixture.root
+        )
+        try productRecovery.markDirty()
+        let externalProduct = productFixture.root.appendingPathComponent("external-product")
+        try Data("external bytes".utf8).write(to: externalProduct)
+        let derivedData = productFixture.identityA.appendingPathComponent("DerivedData")
+        try FileManager.default.createDirectory(at: derivedData, withIntermediateDirectories: false)
+        let productHardlink = derivedData.appendingPathComponent("product")
+        #expect(linkat(AT_FDCWD, externalProduct.path, AT_FDCWD, productHardlink.path, 0) == 0)
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try productRecovery.recover(expectedProductManifestSHA256: productFixture.productA)
+        }
+        #expect(try String(contentsOf: externalProduct, encoding: .utf8) == "external bytes")
     }
 
     @Test("Cache path validation rejects mode, uid, symlink, link count, and containment attacks")

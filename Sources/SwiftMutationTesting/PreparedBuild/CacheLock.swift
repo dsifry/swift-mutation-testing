@@ -307,7 +307,7 @@ enum CacheDeleteTree {
         ) { descriptor, name in
             try inspectEntry(
                 parentDescriptor: descriptor, name: name, remove: true,
-                rejectHardlinks: false, expectedIdentity: nil, operations: operations)
+                rejectHardlinks: true, expectedIdentity: nil, operations: operations)
         }
     }
 
