@@ -338,8 +338,10 @@ struct CacheRetentionTests {
         defer {
             free(executable)
             free(duration)
-            _ = kill(pid, SIGKILL)
-            _ = waitpid(pid, nil, 0)
+            if pid > 0 {
+                _ = kill(pid, SIGKILL)
+                _ = waitpid(pid, nil, 0)
+            }
         }
         let spawnResult = arguments.withUnsafeMutableBufferPointer { buffer in
             posix_spawn(&pid, "/bin/sleep", nil, &attributes, buffer.baseAddress!, environ)

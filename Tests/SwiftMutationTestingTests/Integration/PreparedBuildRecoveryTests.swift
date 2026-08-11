@@ -46,7 +46,7 @@ struct PreparedBuildRecoveryTests {
 
         let runtimeStore = PreparedBuildStore(
             root: fixture.root.path, compatibilityID: String(repeating: "e", count: 64))
-        try runtimeStore.prepareDirectory()
+        _ = try runtimeStore.prepareDirectory()
         var descriptors: [Int32] = [0, 0]
         #expect(pipe(&descriptors) == 0)
         defer {
@@ -2380,7 +2380,7 @@ struct PreparedBuildRecoveryTests {
         #expect(try ProcessCustody.readRegisteredGroups(from: registry) == [second])
     }
 
-    @Test("Custody persists a sorted set and rejects unsorted or duplicate groups")
+    @Test("Custody persists a sorted set, upgrades legacy order, and rejects duplicate groups")
     func custodyRegistryIsCanonicalSortedSet() throws {
         let fixture = try RecoveryFixture()
         defer { fixture.cleanup() }
@@ -2395,9 +2395,18 @@ struct PreparedBuildRecoveryTests {
         try custody.register(earlier)
         #expect(try ProcessCustody.readRegisteredGroups(from: registry) == [earlier, later])
 
+        let legacy = fixture.identityA.appendingPathComponent("legacy-order.json")
+        try JSONEncoder().encode([later, earlier]).write(to: legacy)
+        chmod(legacy.path, 0o600)
+        _ = try ProcessCustody.system(
+            registrationURL: legacy,
+            identityStatus: { _ in .absent },
+            signal: { _, _ in 0 },
+            sleep: { _ in })
+        #expect(try ProcessCustody.readRegisteredGroups(from: legacy) == [earlier, later])
+
         for invalid in [
-            [later, earlier],
-            [earlier, .init(pid: 10, processGroupID: earlier.processGroupID, birthIdentity: "duplicate")],
+            [earlier, .init(pid: 10, processGroupID: earlier.processGroupID, birthIdentity: "duplicate")]
         ] {
             let url = fixture.identityA.appendingPathComponent("noncanonical-\(UUID().uuidString).json")
             try JSONEncoder().encode(invalid).write(to: url)

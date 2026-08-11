@@ -220,15 +220,20 @@ enum CacheFailureEvidenceRecorder {
         guard !FileManager.default.fileExists(atPath: outputURL.path) else { return }
         let store = PreparedBuildStore(root: root, compatibilityID: compatibilityID)
         let collectionRoot = URL(fileURLWithPath: root, isDirectory: true)
-        let collectionLock = try CacheLock.collection(collectionRoot: collectionRoot)
-        defer { try? collectionLock.release() }
-        afterCollectionLockAcquired(collectionRoot)
-        try collectionLock.validateDirectoryIdentity()
-        let cleanup = cleanup(
-            store: store, collectionRoot: collectionRoot, collectionLock: collectionLock,
-            afterIdentityClaimed: afterIdentityClaimed,
-            afterCleanupLockAcquired: afterCleanupLockAcquired)
-        let state = cleanup.state
+        let cleanupResult: (state: PreparedBuildState?, scrubbed: Bool, quiescent: Bool)
+        do {
+            let collectionLock = try CacheLock.collection(collectionRoot: collectionRoot)
+            defer { try? collectionLock.release() }
+            afterCollectionLockAcquired(collectionRoot)
+            try collectionLock.validateDirectoryIdentity()
+            cleanupResult = cleanup(
+                store: store, collectionRoot: collectionRoot, collectionLock: collectionLock,
+                afterIdentityClaimed: afterIdentityClaimed,
+                afterCleanupLockAcquired: afterCleanupLockAcquired)
+        } catch PreparedCacheError.lockBusy {
+            cleanupResult = (nil, false, false)
+        }
+        let state = cleanupResult.state
         let manifestDigest =
             (try? Data(contentsOf: URL(fileURLWithPath: manifestPath)))
             .map(ProjectInputManifest.sha256) ?? String(repeating: "0", count: 64)
@@ -255,8 +260,8 @@ enum CacheFailureEvidenceRecorder {
                 fullBuilds: 0,
                 incrementalBuilds: 0,
                 fallbackBuilds: 0,
-                sourceBearingBytesScrubbed: cleanup.scrubbed,
-                childGroupsQuiescent: cleanup.quiescent
+                sourceBearingBytesScrubbed: cleanupResult.scrubbed,
+                childGroupsQuiescent: cleanupResult.quiescent
             ), to: outputURL)
     }
 

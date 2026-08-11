@@ -453,6 +453,20 @@ struct XcodeProcessLauncherTests {
         #expect(
             ProcessRunner.releaseLaunchGateDescriptor(
                 1, writeByte: { _, _, _ in 1 }, closeFile: { _ in -1 }) == false)
+        var interruptedWrites = 0
+        #expect(
+            ProcessRunner.releaseLaunchGateDescriptor(
+                1,
+                writeByte: { _, _, _ in
+                    interruptedWrites += 1
+                    if interruptedWrites == 1 {
+                        errno = EINTR
+                        return -1
+                    }
+                    return 1
+                },
+                closeFile: { _ in 0 }) == true)
+        #expect(interruptedWrites == 2)
 
         let releaseFailure = ProcessRunner(
             processDidStart: { _ in }, onTimeout: { _ in },

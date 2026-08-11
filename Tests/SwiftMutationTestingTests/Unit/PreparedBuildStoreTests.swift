@@ -244,8 +244,17 @@ struct PreparedBuildStoreTests {
         )
         #expect(missingManifest["projectInputManifestSHA256"] as? String == String(repeating: "0", count: 64))
 
+        let collectionLock = try CacheLock.collection(collectionRoot: root)
+        let collectionBusyEvidence = root.appendingPathComponent("collection-busy.json")
+        try CacheFailureEvidenceRecorder.record(options: options(.prepare, output: collectionBusyEvidence))
+        let collectionBusy = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: collectionBusyEvidence)) as? [String: Any])
+        #expect(collectionBusy["sourceBearingBytesScrubbed"] as? Bool == false)
+        #expect(collectionBusy["childGroupsQuiescent"] as? Bool == false)
+        try collectionLock.release()
+
         let store = PreparedBuildStore(root: root.path, compatibilityID: identity)
-        try store.prepareDirectory()
+        _ = try store.prepareDirectory()
         let lock = try CacheLock(identityDirectory: store.directory)
         let lockedEvidence = root.appendingPathComponent("locked.json")
         try CacheFailureEvidenceRecorder.record(options: options(.prepare, output: lockedEvidence))
@@ -388,13 +397,13 @@ struct PreparedBuildStoreTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         chmod(root.path, 0o700)
         let store = PreparedBuildStore(root: root.path, compatibilityID: String(repeating: "8", count: 64))
-        try store.prepareDirectory()
+        _ = try store.prepareDirectory()
         let product = store.derivedDataURL.appendingPathComponent("Build/Products/product")
         try FileManager.default.createDirectory(
             at: product.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("compiled".utf8).write(to: product)
 
-        try store.prepareDirectory()
+        _ = try store.prepareDirectory()
 
         #expect(FileManager.default.fileExists(atPath: product.path))
     }
@@ -409,7 +418,7 @@ struct PreparedBuildStoreTests {
         let store = PreparedBuildStore(
             root: root.path, compatibilityID: String(repeating: "a", count: 64))
 
-        try store.prepareDirectory(createDirectory: { path, _ in
+        _ = try store.prepareDirectory(createDirectory: { path, _ in
             try! FileManager.default.createDirectory(
                 at: URL(fileURLWithPath: path), withIntermediateDirectories: false)
             chmod(path, 0o700)

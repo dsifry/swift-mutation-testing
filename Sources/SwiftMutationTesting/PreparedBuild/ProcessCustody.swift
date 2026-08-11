@@ -94,7 +94,7 @@ final class ProcessCustody: @unchecked Sendable {
             try CacheDeleteTree.entryExists(
                 registrationURL, containedIn: registrationURL.deletingLastPathComponent())
             ? readRegisteredGroups(from: registrationURL) : []
-        return ProcessCustody(
+        let custody = ProcessCustody(
             registrationURL: registrationURL,
             registeredGroups: registered,
             verifyIdentity: { status($0) == .matching },
@@ -139,6 +139,11 @@ final class ProcessCustody: @unchecked Sendable {
                 return false
             }
         )
+        if registered != canonicalGroups(registered) {
+            custody.groups = canonicalGroups(registered)
+            try custody.persistRegistry()
+        }
+        return custody
     }
 
     var isQuiescent: Bool {
@@ -230,8 +235,7 @@ final class ProcessCustody: @unchecked Sendable {
         guard groups.count <= maximumTrackedProcessGroups,
             groups.allSatisfy({ $0.pid > 0 && $0.processGroupID > 0 && !$0.birthIdentity.isEmpty }),
             Set(groups.map(\.pid)).count == groups.count,
-            Set(groups.map(\.processGroupID)).count == groups.count,
-            groups == canonicalGroups(groups)
+            Set(groups.map(\.processGroupID)).count == groups.count
         else { throw PreparedCacheError.invalidCacheState }
         return groups
     }

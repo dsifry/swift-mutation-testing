@@ -2,6 +2,8 @@ import Darwin
 import Foundation
 
 struct ProcessRunner: Sendable {
+    private static let launchGateChildDescriptor: Int32 = 3
+
     private struct SpawnedProcess: Sendable {
         let pid: Int32
         let launchGateDescriptor: Int32?
@@ -48,6 +50,7 @@ struct ProcessRunner: Sendable {
     var configureSpawn: SpawnConfigurator
     var createLaunchGate: LaunchGateCreator
     var spawnProcess: ProcessSpawner
+    /// The injected operation owns and closes the supplied descriptor on every result.
     var releaseLaunchGate: @Sendable (Int32) -> Bool
 
     init(
@@ -71,8 +74,8 @@ struct ProcessRunner: Sendable {
             )
         },
         createLaunchGate: @escaping LaunchGateCreator = { makeLaunchGate(actions: $0) },
-        spawnProcess: @escaping ProcessSpawner = {
-            pid, path, actions, attributes, arguments, environment in
+        // swiftlint:disable:next closure_parameter_position
+        spawnProcess: @escaping ProcessSpawner = { pid, path, actions, attributes, arguments, environment in
             posix_spawn(pid, path, actions, attributes, arguments, environment)
         },
         releaseLaunchGate: @escaping @Sendable (Int32) -> Bool = { releaseLaunchGateDescriptor($0) }
@@ -353,21 +356,14 @@ struct ProcessRunner: Sendable {
         guard descriptors.withUnsafeMutableBufferPointer({ createPipe($0.baseAddress!) }) == 0 else {
             return nil
         }
-        guard setCloseOnExec(descriptors[0]) == 0 else {
+        func abort() -> (read: Int32, write: Int32)? {
             closeFile(descriptors[0])
             closeFile(descriptors[1])
             return nil
         }
-        guard setCloseOnExec(descriptors[1]) == 0 else {
-            closeFile(descriptors[0])
-            closeFile(descriptors[1])
-            return nil
-        }
-        guard addDuplicate(actions, descriptors[0], 3) == 0 else {
-            closeFile(descriptors[0])
-            closeFile(descriptors[1])
-            return nil
-        }
+        guard setCloseOnExec(descriptors[0]) == 0 else { return abort() }
+        guard setCloseOnExec(descriptors[1]) == 0 else { return abort() }
+        guard addDuplicate(actions, descriptors[0], launchGateChildDescriptor) == 0 else { return abort() }
         return (descriptors[0], descriptors[1])
     }
 
@@ -377,7 +373,10 @@ struct ProcessRunner: Sendable {
         closeFile: (Int32) -> Int32 = { close($0) }
     ) -> Bool {
         var start: UInt8 = 0x0A
-        let writeResult = writeByte(descriptor, &start, 1)
+        var writeResult: Int
+        repeat {
+            writeResult = writeByte(descriptor, &start, 1)
+        } while writeResult == -1 && errno == EINTR
         let closeResult = closeFile(descriptor)
         return writeResult == 1 && closeResult == 0
     }

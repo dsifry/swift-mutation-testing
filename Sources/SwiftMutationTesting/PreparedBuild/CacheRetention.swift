@@ -168,7 +168,6 @@ struct CacheRetention: Sendable {
             do {
                 try requireCustodyEligible(tombstone)
             } catch {
-                _ = try CacheDeleteTree.byteSize(tombstone, containedIn: collectionRoot)
                 throw PreparedCacheError.retentionUnsatisfied
             }
             do {
