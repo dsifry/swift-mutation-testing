@@ -323,14 +323,46 @@ struct ConfigurationResolverTests {
         #expect(result.build.concurrency == 8)
     }
 
-    @Test("Given concurrency at the custody protocol limit, when resolved, then it is preserved")
-    func maximumSupportedConcurrencyIsPreserved() throws {
+    @Test("Given legacy concurrency above the custody limit, when resolved, then it remains compatible")
+    func legacyConcurrencyAboveCustodyLimitIsPreserved() throws {
+        let result = try resolver.resolve(
+            cliArguments: ParsedArguments(
+                build: .init(
+                    scheme: "App", destination: "d",
+                    concurrency: 128
+                )
+            ),
+            fileValues: [:]
+        )
+
+        #expect(result.build.concurrency == 128)
+    }
+
+    @Test("Given target Swift Testing concurrency above the custody limit, when resolved, then it is rejected")
+    func targetSwiftTestingConcurrencyAboveCustodyLimitIsRejected() {
+        #expect(throws: UsageError.self) {
+            try resolver.resolve(
+                cliArguments: ParsedArguments(
+                    build: .init(
+                        scheme: "App", destination: "d",
+                        concurrency: ProcessCustody.maximumTrackedProcessGroups + 1
+                    ),
+                    cache: .init(mode: .target)
+                ),
+                fileValues: [:]
+            )
+        }
+    }
+
+    @Test("Given target Swift Testing concurrency at the custody limit, when resolved, then it is preserved")
+    func targetSwiftTestingConcurrencyAtCustodyLimitIsPreserved() throws {
         let result = try resolver.resolve(
             cliArguments: ParsedArguments(
                 build: .init(
                     scheme: "App", destination: "d",
                     concurrency: ProcessCustody.maximumTrackedProcessGroups
-                )
+                ),
+                cache: .init(mode: .target)
             ),
             fileValues: [:]
         )
@@ -338,19 +370,20 @@ struct ConfigurationResolverTests {
         #expect(result.build.concurrency == ProcessCustody.maximumTrackedProcessGroups)
     }
 
-    @Test("Given concurrency above the custody protocol limit, when resolved, then it is rejected")
-    func concurrencyAboveCustodyProtocolLimitIsRejected() {
-        #expect(throws: UsageError.self) {
-            try resolver.resolve(
-                cliArguments: ParsedArguments(
-                    build: .init(
-                        scheme: "App", destination: "d",
-                        concurrency: ProcessCustody.maximumTrackedProcessGroups + 1
-                    )
+    @Test("Given target Xcode XCTest with a high request, when resolved, then effective concurrency is one")
+    func targetXCTestHighRequestedConcurrencyResolvesToOne() throws {
+        let result = try resolver.resolve(
+            cliArguments: ParsedArguments(
+                build: .init(
+                    scheme: "App", destination: "d", concurrency: 128,
+                    testingFramework: "xctest"
                 ),
-                fileValues: [:]
-            )
-        }
+                cache: .init(mode: .target)
+            ),
+            fileValues: [:]
+        )
+
+        #expect(result.build.concurrency == 1)
     }
 
     @Test("Given explicit project path, when resolved, then path is standardized")
