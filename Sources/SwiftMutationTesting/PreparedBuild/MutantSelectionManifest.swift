@@ -29,10 +29,27 @@ struct MutantSelectionManifest: Codable, Equatable, Sendable {
     }
 
     static func load(from path: String) throws -> Self {
-        try JSONDecoder().decode(Self.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        do {
+            let data = try Data(contentsOf: URL(fileURLWithPath: path))
+            _ = try ExactJSON.object(
+                data,
+                keys: ["schemaVersion", "projectInputManifestSHA256", "preparedInventorySHA256", "selector", "runOrdinal", "attemptOrdinal", "ownedSourcePaths"]
+            )
+            let value = try JSONDecoder().decode(Self.self, from: data)
+            guard isDigest(value.projectInputManifestSHA256), isDigest(value.preparedInventorySHA256),
+                !value.selector.isEmpty
+            else { throw PreparedBuildError.selectionMismatch }
+            return value
+        } catch {
+            throw PreparedBuildError.selectionMismatch
+        }
     }
 
     private static func normalize(_ path: String) -> String {
         path.split(separator: "/", omittingEmptySubsequences: true).joined(separator: "/")
+    }
+
+    private static func isDigest(_ value: String) -> Bool {
+        value.count == 64 && value.allSatisfy { $0.isHexDigit && !$0.isUppercase }
     }
 }

@@ -46,6 +46,20 @@ struct PreparedMutantInventory: Codable, Equatable, Sendable {
         }
     }
 
+    func validatePersisted() throws {
+        guard schemaVersion == 1,
+            Self.isDigest(projectInputManifestSHA256),
+            Set(mutants.map(\.id)).count == mutants.count,
+            mutants.allSatisfy({ row in
+                !row.id.isEmpty && !row.sourcePath.isEmpty
+                    && row.sourcePath == Self.normalizeRelativePath(row.sourcePath)
+                    && !row.sourcePath.split(separator: "/").contains("..")
+                    && row.sourceUTF8Offset >= 0 && !row.operatorIdentifier.isEmpty
+                    && Self.isDigest(row.replacementBytesSHA256)
+            })
+        else { throw PreparedBuildError.inventoryMismatch }
+    }
+
     func select(
         mutants current: [MutantDescriptor],
         ownedSourcePaths: [String],
@@ -80,5 +94,9 @@ struct PreparedMutantInventory: Codable, Equatable, Sendable {
 
     private static func sha256(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func isDigest(_ value: String) -> Bool {
+        value.count == 64 && value.allSatisfy { $0.isHexDigit && !$0.isUppercase }
     }
 }

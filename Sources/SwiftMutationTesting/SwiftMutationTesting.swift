@@ -2,15 +2,23 @@ import Foundation
 
 public struct SwiftMutationTesting {
 
-    public static func main() async {
+    public static func main(args: [String] = Array(CommandLine.arguments.dropFirst())) async -> Int32 {
         SandboxCleaner.installSignalHandlers()
         SandboxCleaner.removeOrphaned()
-        exit(await run(args: Array(CommandLine.arguments.dropFirst())).rawValue)
+        return await run(args: args).rawValue
     }
 
     static func run(args: [String], launcher: (any ProcessLaunching)? = nil) async -> ExitCode {
         do {
-            return try await execute(args: args, launcher: launcher)
+            let parsed = try CommandLineParser().parse(args)
+            do {
+                return try await execute(parsed: parsed, launcher: launcher)
+            } catch {
+                if parsed.cache.mode != .legacy {
+                    try? CacheFailureEvidenceRecorder.record(options: parsed.cache)
+                }
+                throw error
+            }
         } catch let error as UsageError {
             fputs(error.message + "\n", stderr)
             return .error
@@ -20,9 +28,7 @@ public struct SwiftMutationTesting {
         }
     }
 
-    private static func execute(args: [String], launcher: (any ProcessLaunching)?) async throws -> ExitCode {
-        let parsed = try CommandLineParser().parse(args)
-
+    private static func execute(parsed: ParsedArguments, launcher: (any ProcessLaunching)?) async throws -> ExitCode {
         if parsed.showHelp {
             print(HelpText.usage)
             return .success
@@ -40,11 +46,19 @@ public struct SwiftMutationTesting {
             return .success
         }
 
+        if parsed.cache.mode == .recover {
+            try PreparedBuildCoordinator.recover(options: parsed.cache, enableCustody: launcher == nil)
+            return .success
+        }
+
         let fileValues = try ConfigurationFileParser().parse(at: parsed.projectPath)
         let configuration = try ConfigurationResolver().resolve(
             cliArguments: parsed,
             fileValues: fileValues
         )
+
+        let executionLauncher: any ProcessLaunching = launcher
+            ?? defaultLauncher(for: configuration.build.projectType)
 
         let (input, discoveryDuration) = try await discover(configuration: configuration)
 
@@ -59,8 +73,6 @@ public struct SwiftMutationTesting {
                     duration: discoveryDuration
                 ))
         }
-
-        let executionLauncher: any ProcessLaunching = launcher ?? defaultLauncher(for: configuration.build.projectType)
 
         if parsed.cache.mode == .prepare {
             try await PreparedBuildCoordinator(
@@ -90,6 +102,7 @@ public struct SwiftMutationTesting {
 
         return .success
     }
+
 
     private static func discover(configuration: RunnerConfiguration) async throws -> (RunnerInput, TimeInterval) {
         let start = Date()

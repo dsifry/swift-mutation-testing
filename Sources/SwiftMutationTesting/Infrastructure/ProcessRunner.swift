@@ -1,29 +1,70 @@
+import Darwin
 import Foundation
 
 struct ProcessRunner: Sendable {
-    var postTerminationCleanup: (@Sendable (Int32) -> Void)?
-    let onTimeout: @Sendable (Int32) -> Void
+    typealias SpawnInitializer = @Sendable (
+        UnsafeMutablePointer<posix_spawn_file_actions_t?>,
+        UnsafeMutablePointer<posix_spawnattr_t?>
+    ) -> Bool
+    typealias SpawnConfigurator = @Sendable (
+        UnsafeMutablePointer<posix_spawn_file_actions_t?>,
+        UnsafeMutablePointer<posix_spawnattr_t?>,
+        Int32,
+        String
+    ) -> Bool
 
-    private struct CaptureTarget {
-        let fileHandle: FileHandle
-        let tempURL: URL
+    var processDidStart: (@Sendable (Int32) throws -> Void)?
+    var postTerminationCleanup: (@Sendable (Int32) throws -> Void)?
+    let onTimeout: @Sendable (Int32) -> Void
+    let timeoutDidFinish: @Sendable (Int32) -> Void
+    var establishProcessGroup: @Sendable (Int32) -> Bool
+    var terminateDirectProcess: @Sendable (Int32) -> Void
+    var openNullDescriptor: @Sendable () -> Int32
+    var createCaptureFile: @Sendable (String) -> Bool
+    var captureRoot: URL?
+    var initializeSpawn: SpawnInitializer
+    var configureSpawn: SpawnConfigurator
+
+    init(
+        processDidStart: (@Sendable (Int32) throws -> Void)? = nil,
+        postTerminationCleanup: (@Sendable (Int32) throws -> Void)? = nil,
+        onTimeout: @escaping @Sendable (Int32) -> Void,
+        timeoutDidFinish: @escaping @Sendable (Int32) -> Void = { _ in },
+        establishProcessGroup: @escaping @Sendable (Int32) -> Bool = { getpgid($0) == $0 },
+        terminateDirectProcess: @escaping @Sendable (Int32) -> Void = { _ = kill($0, SIGKILL) },
+        openNullDescriptor: @escaping @Sendable () -> Int32 = { open("/dev/null", O_WRONLY | O_CLOEXEC) },
+        createCaptureFile: @escaping @Sendable (String) -> Bool = {
+            createPrivateCaptureFile($0)
+        },
+        captureRoot: URL? = nil,
+        initializeSpawn: @escaping SpawnInitializer = { actions, attributes in
+            initializeSpawnResources(actions: actions, attributes: attributes)
+        },
+        configureSpawn: @escaping SpawnConfigurator = { actions, attributes, output, directory in
+            configureSpawnResources(
+                actions: actions, attributes: attributes, output: output, directory: directory
+            )
+        }
+    ) {
+        self.processDidStart = processDidStart
+        self.postTerminationCleanup = postTerminationCleanup
+        self.onTimeout = onTimeout
+        self.timeoutDidFinish = timeoutDidFinish
+        self.establishProcessGroup = establishProcessGroup
+        self.terminateDirectProcess = terminateDirectProcess
+        self.openNullDescriptor = openNullDescriptor
+        self.createCaptureFile = createCaptureFile
+        self.captureRoot = captureRoot
+        self.initializeSpawn = initializeSpawn
+        self.configureSpawn = configureSpawn
     }
 
     final class KilledByUsFlag: @unchecked Sendable {
         private let lock = NSLock()
         private var flag = false
 
-        var value: Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            return flag
-        }
-
-        func mark() {
-            lock.lock()
-            flag = true
-            lock.unlock()
-        }
+        var value: Bool { lock.withLock { flag } }
+        func mark() { lock.withLock { flag = true } }
     }
 
     func launch(
@@ -32,131 +73,222 @@ struct ProcessRunner: Sendable {
         workingDirectoryURL: URL,
         timeout: Double
     ) async throws -> Int32 {
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = arguments
-        process.currentDirectoryURL = workingDirectoryURL
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        let killedByUs = KilledByUsFlag()
-
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                self.startProcess(
-                    process, killedByUs: killedByUs, timeout: timeout,
-                    continuation: continuation
-                )
-            }
-        } onCancel: {
-            killedByUs.mark()
-            onTimeout(process.processIdentifier)
-        }
+        let nullDescriptor = openNullDescriptor()
+        guard nullDescriptor >= 0 else { throw PreparedCacheError.unverifiableProcessIdentity }
+        defer { close(nullDescriptor) }
+        let pid = try spawn(
+            executableURL: executableURL,
+            arguments: arguments,
+            environment: nil,
+            workingDirectoryURL: workingDirectoryURL,
+            outputDescriptor: nullDescriptor
+        )
+        return try await supervise(pid: pid, timeout: timeout) { status in status }
     }
 
-    func launchCapturing(
-        _ request: ProcessRequest
-    ) async throws -> (exitCode: Int32, output: String) {
-        let process = Process()
-        process.executableURL = request.executableURL
-        process.arguments = request.arguments
-        process.currentDirectoryURL = request.workingDirectoryURL
-
-        if let environment = request.environment {
-            process.environment = environment
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        let root = try Self.captureDirectory(captureRoot)
+        if captureRoot != nil {
+            try CachePathGuard.validateCanonicalAbsoluteRoot(root)
+            try CachePathGuard.validateDirectory(root, containedIn: root)
         }
-
-        if !request.additionalEnvironment.isEmpty {
-            var env = process.environment ?? ProcessInfo.processInfo.environment
-            for (key, value) in request.additionalEnvironment {
-                env[key] = value
-            }
-            process.environment = env
+        let tempURL = root.appendingPathComponent(".swift-mutation-capture.\(UUID().uuidString)")
+        guard createCaptureFile(tempURL.path) else {
+            throw PreparedCacheError.unverifiableProcessIdentity
         }
-
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-        FileManager.default.createFile(atPath: tempURL.path, contents: nil)
+        do {
+            try CachePathGuard.validateRegularFile(tempURL, containedIn: root)
+        } catch {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw error
+        }
         let fileHandle = try FileHandle(forWritingTo: tempURL)
-        process.standardOutput = fileHandle
-        process.standardError = fileHandle
+        do {
+            var environment = request.environment
+            if !request.additionalEnvironment.isEmpty {
+                var merged = environment ?? ProcessInfo.processInfo.environment
+                for (key, value) in request.additionalEnvironment { merged[key] = value }
+                environment = merged
+            }
+            let pid = try spawn(
+                executableURL: request.executableURL,
+                arguments: request.arguments,
+                environment: environment,
+                workingDirectoryURL: request.workingDirectoryURL,
+                outputDescriptor: fileHandle.fileDescriptor
+            )
+            try fileHandle.close()
+            let exitCode = try await supervise(pid: pid, timeout: request.timeout) { status in status }
+            let output = Self.readCapturedOutput(at: tempURL)
+            try? FileManager.default.removeItem(at: tempURL)
+            return (exitCode, output)
+        } catch {
+            try? fileHandle.close()
+            try? FileManager.default.removeItem(at: tempURL)
+            throw error
+        }
+    }
 
+    private func supervise<T: Sendable>(
+        pid: Int32,
+        timeout: Double,
+        transform: @escaping @Sendable (Int32) -> T
+    ) async throws -> T {
+        guard establishProcessGroup(pid) else {
+            terminateDirectProcess(pid)
+            _ = waitForExit(pid)
+            throw PreparedCacheError.unverifiableProcessIdentity
+        }
+        do {
+            try processDidStart?(pid)
+        } catch {
+            _ = kill(-pid, SIGKILL)
+            _ = waitForExit(pid)
+            throw error
+        }
         let killedByUs = KilledByUsFlag()
-
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                self.startCapturingProcess(
-                    process, killedByUs: killedByUs, timeout: request.timeout,
-                    capture: CaptureTarget(fileHandle: fileHandle, tempURL: tempURL),
-                    continuation: continuation
-                )
+                let timeoutTask = Task {
+                    try await Task.sleep(for: .seconds(timeout))
+                    killedByUs.mark()
+                    onTimeout(pid)
+                }
+                DispatchQueue.global().async {
+                    let status = waitForExit(pid)
+                    timeoutTask.cancel()
+                    timeoutDidFinish(pid)
+                    do {
+                        try postTerminationCleanup?(pid)
+                        continuation.resume(returning: transform(killedByUs.value ? -1 : status))
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
             }
         } onCancel: {
             killedByUs.mark()
-            onTimeout(process.processIdentifier)
+            onTimeout(pid)
         }
     }
 
-    private func startProcess(
-        _ process: Process,
-        killedByUs: KilledByUsFlag,
-        timeout: Double,
-        continuation: CheckedContinuation<Int32, any Error>
-    ) {
-        let timeoutTask = Task {
-            try await Task.sleep(for: .seconds(timeout))
-            killedByUs.mark()
-            onTimeout(process.processIdentifier)
+    private func spawn(
+        executableURL: URL,
+        arguments: [String],
+        environment: [String: String]?,
+        workingDirectoryURL: URL,
+        outputDescriptor: Int32
+    ) throws -> Int32 {
+        var actions: posix_spawn_file_actions_t?
+        var attributes: posix_spawnattr_t?
+        guard initializeSpawn(&actions, &attributes) else {
+            throw PreparedCacheError.unverifiableProcessIdentity
+        }
+        defer {
+            posix_spawn_file_actions_destroy(&actions)
+            posix_spawnattr_destroy(&attributes)
+        }
+        guard configureSpawn(&actions, &attributes, outputDescriptor, workingDirectoryURL.path) else {
+            throw PreparedCacheError.unverifiableProcessIdentity
         }
 
-        process.terminationHandler = { proc in
-            timeoutTask.cancel()
-            postTerminationCleanup?(proc.processIdentifier)
-            let exitCode: Int32 = killedByUs.value ? -1 : proc.terminationStatus
-            continuation.resume(returning: exitCode)
+        let argv = ([executableURL.path] + arguments).map { strdup($0) } + [nil]
+        let environmentValues = (environment ?? ProcessInfo.processInfo.environment)
+            .map { "\($0.key)=\($0.value)" }
+            .sorted()
+        let envp = environmentValues.map { strdup($0) } + [nil]
+        defer {
+            argv.dropLast().forEach { free($0) }
+            envp.dropLast().forEach { free($0) }
         }
-
-        do {
-            try process.run()
-            setpgid(process.processIdentifier, process.processIdentifier)
-        } catch {
-            timeoutTask.cancel()
-            continuation.resume(throwing: error)
+        var pid: pid_t = 0
+        let result = argv.withUnsafeBufferPointer { argvBuffer in
+            envp.withUnsafeBufferPointer { envBuffer in
+                posix_spawn(
+                    &pid,
+                    executableURL.path,
+                    &actions,
+                    &attributes,
+                    UnsafeMutablePointer(mutating: argvBuffer.baseAddress!),
+                    UnsafeMutablePointer(mutating: envBuffer.baseAddress!)
+                )
+            }
         }
+        guard result == 0, pid > 0 else {
+            errno = result
+            throw CocoaError(.executableNotLoadable)
+        }
+        return pid
     }
 
-    private func startCapturingProcess(
-        _ process: Process,
-        killedByUs: KilledByUsFlag,
-        timeout: Double,
-        capture: CaptureTarget,
-        continuation: CheckedContinuation<(exitCode: Int32, output: String), any Error>
-    ) {
-        let timeoutTask = Task {
-            try await Task.sleep(for: .seconds(timeout))
-            killedByUs.mark()
-            onTimeout(process.processIdentifier)
-        }
-
-        process.terminationHandler = { terminated in
-            timeoutTask.cancel()
-            postTerminationCleanup?(terminated.processIdentifier)
-            capture.fileHandle.closeFile()
-            let output = (try? String(contentsOf: capture.tempURL, encoding: .utf8)) ?? ""
-            try? FileManager.default.removeItem(at: capture.tempURL)
-            let exitCode: Int32 = killedByUs.value ? -1 : terminated.terminationStatus
-            continuation.resume(returning: (exitCode: exitCode, output: output))
-        }
-
-        do {
-            try process.run()
-            setpgid(process.processIdentifier, process.processIdentifier)
-        } catch {
-            timeoutTask.cancel()
-            capture.fileHandle.closeFile()
-            try? FileManager.default.removeItem(at: capture.tempURL)
-            continuation.resume(throwing: error)
-        }
+    static func readCapturedOutput(at url: URL) -> String {
+        (try? String(contentsOf: url, encoding: .utf8)) ?? ""
     }
 
+    static func createPrivateCaptureFile(
+        _ path: String,
+        openFile: (String) -> Int32 = { open($0, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0o600) },
+        closeFile: (Int32) -> Int32 = { close($0) }
+    ) -> Bool {
+        let descriptor = openFile(path)
+        guard descriptor >= 0 else { return false }
+        return closeFile(descriptor) == 0
+    }
+
+    static func captureDirectory(
+        _ requested: URL?,
+        canonicalizer: (URL) -> URL? = { CachePathGuard.canonicalURL($0) }
+    ) throws -> URL {
+        if let requested { return requested }
+        guard let root = canonicalizer(FileManager.default.temporaryDirectory) else {
+            throw PreparedCacheError.unsafeCachePath
+        }
+        return root
+    }
+
+    static func initializeSpawnResources(
+        actions: UnsafeMutablePointer<posix_spawn_file_actions_t?>,
+        attributes: UnsafeMutablePointer<posix_spawnattr_t?>,
+        initializeActions: (UnsafeMutablePointer<posix_spawn_file_actions_t?>) -> Int32 = posix_spawn_file_actions_init,
+        initializeAttributes: (UnsafeMutablePointer<posix_spawnattr_t?>) -> Int32 = posix_spawnattr_init,
+        destroyActions: (UnsafeMutablePointer<posix_spawn_file_actions_t?>) -> Int32 = posix_spawn_file_actions_destroy
+    ) -> Bool {
+        guard initializeActions(actions) == 0 else { return false }
+        guard initializeAttributes(attributes) == 0 else {
+            _ = destroyActions(actions)
+            return false
+        }
+        return true
+    }
+
+    static func configureSpawnResources(
+        actions: UnsafeMutablePointer<posix_spawn_file_actions_t?>,
+        attributes: UnsafeMutablePointer<posix_spawnattr_t?>,
+        output: Int32,
+        directory: String
+    ) -> Bool {
+        posix_spawn_file_actions_adddup2(actions, output, STDOUT_FILENO) == 0
+            && posix_spawn_file_actions_adddup2(actions, output, STDERR_FILENO) == 0
+            && posix_spawn_file_actions_addchdir_np(actions, directory) == 0
+            && posix_spawnattr_setflags(
+                attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)
+            ) == 0
+            && posix_spawnattr_setpgroup(attributes, 0) == 0
+    }
+}
+
+func waitForExit(
+    _ pid: Int32,
+    wait: (Int32, UnsafeMutablePointer<Int32>?, Int32) -> Int32 = { waitpid($0, $1, $2) }
+) -> Int32 {
+    var status: Int32 = 0
+    while true {
+        let result = wait(pid, &status, 0)
+        if result == pid { break }
+        if result == -1, errno == EINTR { continue }
+        return -1
+    }
+    let waitStatus = status & 0o177
+    if waitStatus == 0 { return (status >> 8) & 0xff }
+    return 128 + waitStatus
 }
