@@ -2,6 +2,21 @@ import CryptoKit
 import Darwin
 import Foundation
 
+struct CacheEvidenceCodingKey: CodingKey, Equatable {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
+
 struct CacheEvidence: Codable, Equatable, Sendable {
     let schemaVersion: Int
     let invocationNonce: String
@@ -18,6 +33,115 @@ struct CacheEvidence: Codable, Equatable, Sendable {
     let fallbackBuilds: Int
     let sourceBearingBytesScrubbed: Bool
     let childGroupsQuiescent: Bool
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case schemaVersion, invocationNonce, operation, outcome, compatibilitySHA256
+        case projectInputManifestSHA256, preparedInventorySHA256, runOrdinal, attemptOrdinal
+        case productManifestSHA256, fullBuilds, incrementalBuilds, fallbackBuilds
+        case sourceBearingBytesScrubbed, childGroupsQuiescent
+    }
+
+    init(
+        schemaVersion: Int,
+        invocationNonce: String,
+        operation: String,
+        outcome: String,
+        compatibilitySHA256: String,
+        projectInputManifestSHA256: String,
+        preparedInventorySHA256: String?,
+        runOrdinal: Int?,
+        attemptOrdinal: Int?,
+        productManifestSHA256: String?,
+        fullBuilds: Int,
+        incrementalBuilds: Int,
+        fallbackBuilds: Int,
+        sourceBearingBytesScrubbed: Bool,
+        childGroupsQuiescent: Bool
+    ) {
+        self.schemaVersion = schemaVersion
+        self.invocationNonce = invocationNonce
+        self.operation = operation
+        self.outcome = outcome
+        self.compatibilitySHA256 = compatibilitySHA256
+        self.projectInputManifestSHA256 = projectInputManifestSHA256
+        self.preparedInventorySHA256 = preparedInventorySHA256
+        self.runOrdinal = runOrdinal
+        self.attemptOrdinal = attemptOrdinal
+        self.productManifestSHA256 = productManifestSHA256
+        self.fullBuilds = fullBuilds
+        self.incrementalBuilds = incrementalBuilds
+        self.fallbackBuilds = fallbackBuilds
+        self.sourceBearingBytesScrubbed = sourceBearingBytesScrubbed
+        self.childGroupsQuiescent = childGroupsQuiescent
+    }
+
+    init(from decoder: Decoder) throws {
+        let dynamic = try decoder.container(keyedBy: CacheEvidenceCodingKey.self)
+        let expected = Set(CodingKeys.allCases.map(\.rawValue))
+        guard Set(dynamic.allKeys.map(\.stringValue)) == expected else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "Cache evidence keys are invalid"))
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        invocationNonce = try container.decode(String.self, forKey: .invocationNonce)
+        operation = try container.decode(String.self, forKey: .operation)
+        outcome = try container.decode(String.self, forKey: .outcome)
+        compatibilitySHA256 = try container.decode(String.self, forKey: .compatibilitySHA256)
+        projectInputManifestSHA256 = try container.decode(String.self, forKey: .projectInputManifestSHA256)
+        preparedInventorySHA256 =
+            try container.decodeNil(forKey: .preparedInventorySHA256)
+            ? nil : container.decode(String.self, forKey: .preparedInventorySHA256)
+        runOrdinal =
+            try container.decodeNil(forKey: .runOrdinal)
+            ? nil : container.decode(Int.self, forKey: .runOrdinal)
+        attemptOrdinal =
+            try container.decodeNil(forKey: .attemptOrdinal)
+            ? nil : container.decode(Int.self, forKey: .attemptOrdinal)
+        productManifestSHA256 =
+            try container.decodeNil(forKey: .productManifestSHA256)
+            ? nil : container.decode(String.self, forKey: .productManifestSHA256)
+        fullBuilds = try container.decode(Int.self, forKey: .fullBuilds)
+        incrementalBuilds = try container.decode(Int.self, forKey: .incrementalBuilds)
+        fallbackBuilds = try container.decode(Int.self, forKey: .fallbackBuilds)
+        sourceBearingBytesScrubbed = try container.decode(Bool.self, forKey: .sourceBearingBytesScrubbed)
+        childGroupsQuiescent = try container.decode(Bool.self, forKey: .childGroupsQuiescent)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(invocationNonce, forKey: .invocationNonce)
+        try container.encode(operation, forKey: .operation)
+        try container.encode(outcome, forKey: .outcome)
+        try container.encode(compatibilitySHA256, forKey: .compatibilitySHA256)
+        try container.encode(projectInputManifestSHA256, forKey: .projectInputManifestSHA256)
+        if let preparedInventorySHA256 {
+            try container.encode(preparedInventorySHA256, forKey: .preparedInventorySHA256)
+        } else {
+            try container.encodeNil(forKey: .preparedInventorySHA256)
+        }
+        if let runOrdinal {
+            try container.encode(runOrdinal, forKey: .runOrdinal)
+        } else {
+            try container.encodeNil(forKey: .runOrdinal)
+        }
+        if let attemptOrdinal {
+            try container.encode(attemptOrdinal, forKey: .attemptOrdinal)
+        } else {
+            try container.encodeNil(forKey: .attemptOrdinal)
+        }
+        if let productManifestSHA256 {
+            try container.encode(productManifestSHA256, forKey: .productManifestSHA256)
+        } else {
+            try container.encodeNil(forKey: .productManifestSHA256)
+        }
+        try container.encode(fullBuilds, forKey: .fullBuilds)
+        try container.encode(incrementalBuilds, forKey: .incrementalBuilds)
+        try container.encode(fallbackBuilds, forKey: .fallbackBuilds)
+        try container.encode(sourceBearingBytesScrubbed, forKey: .sourceBearingBytesScrubbed)
+        try container.encode(childGroupsQuiescent, forKey: .childGroupsQuiescent)
+    }
 }
 
 enum CacheEvidenceWriter {
