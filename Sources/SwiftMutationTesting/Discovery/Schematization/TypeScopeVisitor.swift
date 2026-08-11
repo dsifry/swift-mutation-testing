@@ -28,14 +28,53 @@ final class TypeScopeVisitor: SyntaxVisitor {
         return .visitChildren
     }
 
+    override func visit(_ node: AccessorBlockSyntax) -> SyntaxVisitorContinueKind {
+        if case .getter(let statements) = node.accessors {
+            record(
+                bodyStartOffset: node.position.utf8Offset,
+                bodyEndOffset: node.endPosition.utf8Offset,
+                statementsStartOffset: statements.position.utf8Offset,
+                statementsEndOffset: statements.endPosition.utf8Offset
+            )
+        }
+        return .visitChildren
+    }
+
+    override func visit(_ node: ClosureExprSyntax) -> SyntaxVisitorContinueKind {
+        let offset = node.position.utf8Offset
+        if node.signature == nil, !isSchematizable(utf8Offset: offset) {
+            record(
+                bodyStartOffset: offset,
+                bodyEndOffset: node.endPosition.utf8Offset,
+                statementsStartOffset: node.statements.position.utf8Offset,
+                statementsEndOffset: node.statements.endPosition.utf8Offset
+            )
+        }
+        return .visitChildren
+    }
+
     private func record(body: CodeBlockSyntax?) {
         guard let body else { return }
+        record(
+            bodyStartOffset: body.position.utf8Offset,
+            bodyEndOffset: body.endPosition.utf8Offset,
+            statementsStartOffset: body.statements.position.utf8Offset,
+            statementsEndOffset: body.statements.endPosition.utf8Offset
+        )
+    }
+
+    private func record(
+        bodyStartOffset: Int,
+        bodyEndOffset: Int,
+        statementsStartOffset: Int,
+        statementsEndOffset: Int
+    ) {
         scopes.append(
             FunctionBodyScope(
-                bodyStartOffset: body.position.utf8Offset,
-                bodyEndOffset: body.endPosition.utf8Offset,
-                statementsStartOffset: body.statements.position.utf8Offset,
-                statementsEndOffset: body.statements.endPosition.utf8Offset
+                bodyStartOffset: bodyStartOffset,
+                bodyEndOffset: bodyEndOffset,
+                statementsStartOffset: statementsStartOffset,
+                statementsEndOffset: statementsEndOffset
             )
         )
     }

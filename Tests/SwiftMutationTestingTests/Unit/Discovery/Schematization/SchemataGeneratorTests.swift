@@ -90,4 +90,22 @@ struct SchemataGeneratorTests {
         let result = generator.generate(source: source, mutations: mutations)
         #expect(!Parser.parse(source: result).hasError)
     }
+
+    @Test("Given an implicit getter mutation, when generated, then the getter contains a parseable schema")
+    func implicitGetterProducesParseableSchema() {
+        let source = makeParsedSource("struct S { var enabled: Bool { true || false } }")
+        let result = generator.generate(source: source, mutations: mutationsWithIndices(source))
+
+        #expect(result.contains("case \"swift-mutation-testing_0\""))
+        #expect(!Parser.parse(source: result).hasError)
+    }
+
+    @Test("Given a file-scope closure mutation, when generated, then the closure contains a parseable schema")
+    func fileScopeClosureProducesParseableSchema() {
+        let source = makeParsedSource("let enabled = { true || false }")
+        let result = generator.generate(source: source, mutations: mutationsWithIndices(source))
+
+        #expect(result.contains("case \"swift-mutation-testing_0\""))
+        #expect(!Parser.parse(source: result).hasError)
+    }
 }
