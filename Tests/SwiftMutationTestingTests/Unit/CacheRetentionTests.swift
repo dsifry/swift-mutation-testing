@@ -69,6 +69,108 @@ struct CacheRetentionTests {
         }
     }
 
+    @Test("Retention never evicts an identity whose custody is ineligible")
+    func liveCustodyUnsatisfied() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let now = Date(timeIntervalSince1970: 3_500_000)
+        let victim = try fixture.identity("f", bytes: 1, lastUsed: now.addingTimeInterval(-1_000))
+        let registry = victim.appendingPathComponent("process-custody.json")
+        let group = CustodiedProcessGroup(pid: 71, processGroupID: 71, birthIdentity: "birth-71")
+        let writer = ProcessCustody(
+            registrationURL: registry,
+            verifyIdentity: { _ in true },
+            terminateGroup: { _ in },
+            waitForGroup: nil
+        )
+        try writer.register(group)
+        let retention = CacheRetention(
+            collectionRoot: fixture.root,
+            policy: .init(maximumIdentityCount: 0, maximumTotalBytes: 0, maximumInactiveAge: 1),
+            requireCustodyEligible: { _ in throw PreparedCacheError.lockBusy }
+        )
+
+        #expect(throws: PreparedCacheError.retentionUnsatisfied) {
+            try retention.enforce(now: now)
+        }
+        #expect(FileManager.default.fileExists(atPath: victim.path))
+        let preserved = try ProcessCustody.system(
+            registrationURL: registry,
+            identityStatus: { _ in .matching },
+            signal: { _, _ in 0 },
+            sleep: { _ in }
+        )
+        #expect(!preserved.isQuiescent)
+    }
+
+    @Test("Retention allows an exact empty custody registry")
+    func emptyCustodyAllowsEviction() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let now = Date(timeIntervalSince1970: 3_600_000)
+        let victim = try fixture.identity("f", bytes: 1, lastUsed: now.addingTimeInterval(-1_000))
+        let registry = victim.appendingPathComponent("process-custody.json")
+        try Data("[]".utf8).write(to: registry)
+        chmod(registry.path, 0o600)
+
+        let removed = try CacheRetention(
+            collectionRoot: fixture.root,
+            policy: .init(maximumIdentityCount: 0, maximumTotalBytes: 0, maximumInactiveAge: 1)
+        ).enforce(now: now)
+
+        #expect(removed.map(\.path) == [victim.path])
+        #expect(!FileManager.default.fileExists(atPath: victim.path))
+    }
+
+    @Test("Any nonempty victim custody makes that identity ineligible without signalling")
+    func nonemptyCustodyMakesVictimIneligible() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let now = Date(timeIntervalSince1970: 3_650_000)
+        let victim = try fixture.identity("f", bytes: 1, lastUsed: now.addingTimeInterval(-1_000))
+        let registry = victim.appendingPathComponent("process-custody.json")
+        let group = CustodiedProcessGroup(
+            pid: Int32.max, processGroupID: Int32.max, birthIdentity: "recorded-child")
+        try ProcessCustody(
+            registrationURL: registry,
+            verifyIdentity: { _ in true },
+            terminateGroup: { _ in },
+            waitForGroup: nil
+        ).register(group)
+
+        #expect(throws: PreparedCacheError.retentionUnsatisfied) {
+            try CacheRetention(
+                collectionRoot: fixture.root,
+                policy: .init(maximumIdentityCount: 0, maximumTotalBytes: 0, maximumInactiveAge: 1)
+            ).enforce(now: now)
+        }
+        #expect(FileManager.default.fileExists(atPath: victim.path))
+        #expect(try ProcessCustody.readRegisteredGroups(from: registry) == [group])
+    }
+
+    @Test("Retention treats a dangling custody registry as present and preserves its victim")
+    func danglingCustodyRegistryFailsClosed() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let now = Date(timeIntervalSince1970: 3_700_000)
+        let victim = try fixture.identity("f", bytes: 1, lastUsed: now.addingTimeInterval(-1_000))
+        try FileManager.default.createSymbolicLink(
+            at: victim.appendingPathComponent("process-custody.json"),
+            withDestinationURL: fixture.root.appendingPathComponent("missing-registry")
+        )
+        #expect(
+            try CacheDeleteTree.entryExists(
+                victim.appendingPathComponent("process-custody.json"), containedIn: victim))
+
+        #expect(throws: PreparedCacheError.retentionUnsatisfied) {
+            try CacheRetention(
+                collectionRoot: fixture.root,
+                policy: .init(maximumIdentityCount: 0, maximumTotalBytes: 0, maximumInactiveAge: 1)
+            ).enforce(now: now)
+        }
+        #expect(FileManager.default.fileExists(atPath: victim.path))
+    }
+
     @Test("An unsafe candidate is never deleted")
     func unsafeCandidateFailsClosed() throws {
         let fixture = try RetentionFixture()
@@ -150,6 +252,26 @@ struct CacheRetentionTests {
         #expect(FileManager.default.fileExists(atPath: try #require(observation.replacement).path))
     }
 
+    @Test("Retention rejects a victim replacement inside the rename boundary")
+    func preRenameReplacementFailsClosed() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let now = Date(timeIntervalSince1970: 4_625_000)
+        let victim = try fixture.identity("f", bytes: 1, lastUsed: now.addingTimeInterval(-1_000))
+        let saved = fixture.root.appendingPathComponent("saved-original")
+        let retention = CacheRetention(
+            collectionRoot: fixture.root,
+            policy: .init(maximumIdentityCount: 0, maximumTotalBytes: 0, maximumInactiveAge: 1),
+            renameIdentity: { source, destination in
+                try! FileManager.default.moveItem(atPath: source, toPath: saved.path)
+                _ = try! fixture.identity("f", bytes: 1, lastUsed: now)
+                return rename(source, destination)
+            })
+
+        #expect(throws: PreparedCacheError.unsafeCachePath) { try retention.enforce(now: now) }
+        #expect(FileManager.default.fileExists(atPath: saved.path))
+    }
+
     @Test("Retention never deletes a directory substituted for its authenticated tombstone")
     func tombstoneReplacementFailsClosed() throws {
         let fixture = try RetentionFixture()
@@ -194,6 +316,120 @@ struct CacheRetentionTests {
         #expect(!FileManager.default.fileExists(atPath: tombstone.path))
     }
 
+    @Test("Abandoned tombstone live custody is never signalled or deleted")
+    func abandonedTombstoneLiveCustodyIsPreserved() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let victim = try fixture.identity("f", bytes: 1, lastUsed: Date())
+        let tombstone = fixture.root.appendingPathComponent(
+            ".evicting-\(victim.lastPathComponent)-00000000-0000-0000-0000-000000000000"
+        )
+        try FileManager.default.moveItem(at: victim, to: tombstone)
+
+        var attributes: posix_spawnattr_t?
+        #expect(posix_spawnattr_init(&attributes) == 0)
+        defer { posix_spawnattr_destroy(&attributes) }
+        #expect(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP)) == 0)
+        #expect(posix_spawnattr_setpgroup(&attributes, 0) == 0)
+        var pid: pid_t = 0
+        let executable = strdup("/bin/sleep")!
+        let duration = strdup("30")!
+        var arguments: [UnsafeMutablePointer<CChar>?] = [executable, duration, nil]
+        defer {
+            free(executable)
+            free(duration)
+            _ = kill(pid, SIGKILL)
+            _ = waitpid(pid, nil, 0)
+        }
+        let spawnResult = arguments.withUnsafeMutableBufferPointer { buffer in
+            posix_spawn(&pid, "/bin/sleep", nil, &attributes, buffer.baseAddress!, environ)
+        }
+        #expect(spawnResult == 0)
+        let group = try SystemProcessIdentity.group(for: pid)
+        let registry = tombstone.appendingPathComponent("process-custody.json")
+        try ProcessCustody.system(registrationURL: registry).register(group)
+        #expect(throws: PreparedCacheError.retentionUnsatisfied) {
+            try CacheRetention(collectionRoot: fixture.root).enforce(now: Date())
+        }
+
+        #expect(kill(-group.processGroupID, 0) == 0)
+        #expect(SystemProcessIdentity.matchesOrIsAbsent(group))
+        #expect(FileManager.default.fileExists(atPath: tombstone.path))
+        #expect(try ProcessCustody.readRegisteredGroups(from: registry) == [group])
+    }
+
+    @Test("Unverifiable abandoned tombstone custody is preserved fail closed")
+    func unverifiableAbandonedTombstoneCustodyIsPreserved() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let victim = try fixture.identity("f", bytes: 1, lastUsed: Date())
+        let tombstone = fixture.root.appendingPathComponent(
+            ".evicting-\(victim.lastPathComponent)-00000000-0000-0000-0000-000000000000"
+        )
+        try FileManager.default.moveItem(at: victim, to: tombstone)
+        let registry = tombstone.appendingPathComponent("process-custody.json")
+        let group = CustodiedProcessGroup(
+            pid: getpid(), processGroupID: getpgrp(), birthIdentity: "wrong-birth-identity")
+        try ProcessCustody(
+            registrationURL: registry,
+            verifyIdentity: { _ in true },
+            terminateGroup: { _ in },
+            waitForGroup: nil
+        ).register(group)
+
+        #expect(throws: PreparedCacheError.retentionUnsatisfied) {
+            try CacheRetention(collectionRoot: fixture.root).enforce(now: Date())
+        }
+
+        #expect(FileManager.default.fileExists(atPath: tombstone.path))
+        #expect(try ProcessCustody.readRegisteredGroups(from: registry) == [group])
+    }
+
+    @Test("Unresolved tombstones participate in count and byte limits")
+    func unresolvedTombstonesParticipateInLimits() throws {
+        let countFixture = try RetentionFixture()
+        defer { countFixture.cleanup() }
+        let countIdentity = try countFixture.identity("f", bytes: 1, lastUsed: Date())
+        let countTombstone = countFixture.root.appendingPathComponent(
+            ".evicting-\(countIdentity.lastPathComponent)-00000000-0000-0000-0000-000000000000"
+        )
+        try FileManager.default.moveItem(at: countIdentity, to: countTombstone)
+        let countRegistry = countTombstone.appendingPathComponent("process-custody.json")
+        try Data("not-json".utf8).write(to: countRegistry)
+        chmod(countRegistry.path, 0o600)
+
+        #expect(throws: PreparedCacheError.retentionUnsatisfied) {
+            try CacheRetention(
+                collectionRoot: countFixture.root,
+                policy: .init(
+                    maximumIdentityCount: 0, maximumTotalBytes: .max,
+                    maximumInactiveAge: .greatestFiniteMagnitude)
+            ).enforce()
+        }
+        #expect(FileManager.default.fileExists(atPath: countTombstone.path))
+
+        let bytesFixture = try RetentionFixture()
+        defer { bytesFixture.cleanup() }
+        let bytesIdentity = try bytesFixture.identity("e", bytes: 1, lastUsed: Date())
+        let bytesTombstone = bytesFixture.root.appendingPathComponent(
+            ".evicting-\(bytesIdentity.lastPathComponent)-00000000-0000-0000-0000-000000000000"
+        )
+        try FileManager.default.moveItem(at: bytesIdentity, to: bytesTombstone)
+        let bytesRegistry = bytesTombstone.appendingPathComponent("process-custody.json")
+        try Data("not-json".utf8).write(to: bytesRegistry)
+        chmod(bytesRegistry.path, 0o600)
+
+        #expect(throws: PreparedCacheError.retentionUnsatisfied) {
+            try CacheRetention(
+                collectionRoot: bytesFixture.root,
+                policy: .init(
+                    maximumIdentityCount: 1, maximumTotalBytes: 0,
+                    maximumInactiveAge: .greatestFiniteMagnitude)
+            ).enforce()
+        }
+        #expect(FileManager.default.fileExists(atPath: bytesTombstone.path))
+    }
+
     @Test("Retention unlinks package symlink leaves after tombstoning without following targets")
     func retentionUnlinksPackageSymlinkLeaves() throws {
         let fixture = try RetentionFixture()
@@ -221,8 +457,8 @@ struct CacheRetentionTests {
         #expect(try String(contentsOf: marker, encoding: .utf8) == "external bytes")
     }
 
-    @Test("An invalid abandoned tombstone cannot block retention of valid identities")
-    func invalidAbandonedTombstoneIsSkipped() throws {
+    @Test("An invalid abandoned tombstone blocks retention fail closed")
+    func invalidAbandonedTombstoneFailsClosed() throws {
         let fixture = try RetentionFixture()
         defer { fixture.cleanup() }
         let now = Date(timeIntervalSince1970: 4_750_000)
@@ -242,14 +478,71 @@ struct CacheRetentionTests {
         let validIdentity = try fixture.identity(
             "e", bytes: 1, lastUsed: now.addingTimeInterval(-1_000))
 
-        let removed = try CacheRetention(
-            collectionRoot: fixture.root,
-            policy: .init(maximumIdentityCount: 0, maximumTotalBytes: 0, maximumInactiveAge: 1)
-        ).enforce(now: now)
+        #expect(throws: PreparedCacheError.retentionUnsatisfied) {
+            try CacheRetention(
+                collectionRoot: fixture.root,
+                policy: .init(maximumIdentityCount: 0, maximumTotalBytes: 0, maximumInactiveAge: 1)
+            ).enforce(now: now)
+        }
 
-        #expect(removed.map(\.path) == [validIdentity.path])
+        #expect(FileManager.default.fileExists(atPath: validIdentity.path))
         #expect(FileManager.default.fileExists(atPath: invalidTombstone.path))
         #expect(FileManager.default.fileExists(atPath: invalidDirectoryTombstone.path))
+    }
+
+    @Test("An unsafe abandoned tombstone root fails retention closed")
+    func unsafeAbandonedTombstoneRootFailsClosed() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let tombstone = fixture.root.appendingPathComponent(
+            ".evicting-\(String(repeating: "d", count: 64))-00000000-0000-0000-0000-000000000000"
+        )
+        try FileManager.default.createSymbolicLink(at: tombstone, withDestinationURL: fixture.root)
+
+        #expect(throws: PreparedCacheError.retentionUnsatisfied) {
+            try CacheRetention(collectionRoot: fixture.root).enforce()
+        }
+        #expect(try #require(CachePathGuard.metadata(at: tombstone)).st_mode & S_IFMT == S_IFLNK)
+    }
+
+    @Test("Retention rejects entries that disappear after directory validation")
+    func metadataDisappearanceFailsClosed() throws {
+        let candidateFixture = try RetentionFixture()
+        defer { candidateFixture.cleanup() }
+        let candidate = try candidateFixture.identity("a", bytes: 1, lastUsed: Date())
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheRetention(
+                collectionRoot: candidateFixture.root,
+                metadataOf: { url in url.path == candidate.path ? nil : CachePathGuard.metadata(at: url) }
+            ).enforce()
+        }
+
+        let tombstoneFixture = try RetentionFixture()
+        defer { tombstoneFixture.cleanup() }
+        let identity = try tombstoneFixture.identity("b", bytes: 1, lastUsed: Date())
+        let tombstone = tombstoneFixture.root.appendingPathComponent(
+            ".evicting-\(identity.lastPathComponent)-00000000-0000-0000-0000-000000000000")
+        try FileManager.default.moveItem(at: identity, to: tombstone)
+        #expect(throws: PreparedCacheError.retentionUnsatisfied) {
+            try CacheRetention(
+                collectionRoot: tombstoneFixture.root,
+                metadataOf: { url in url.path == tombstone.path ? nil : CachePathGuard.metadata(at: url) }
+            ).enforce()
+        }
+    }
+
+    @Test("Malformed tombstone prefixes make retention unsatisfied")
+    func malformedTombstoneNameFailsClosed() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let malformed = fixture.root.appendingPathComponent(".evicting-not-an-identity")
+        try FileManager.default.createDirectory(at: malformed, withIntermediateDirectories: false)
+        chmod(malformed.path, 0o700)
+
+        #expect(throws: PreparedCacheError.retentionUnsatisfied) {
+            try CacheRetention(collectionRoot: fixture.root).enforce()
+        }
+        #expect(FileManager.default.fileExists(atPath: malformed.path))
     }
 
     @Test("Retention fails closed for rename, tombstone-lock, and durability failures")
@@ -292,12 +585,10 @@ struct CacheRetentionTests {
         try FileManager.default.moveItem(at: identity, to: tombstone)
         let tombstoneLock = try CacheLock(identityDirectory: tombstone)
         defer { try? tombstoneLock.release() }
-        let ignored = tombstoneFixture.root.appendingPathComponent(".evicting-short")
-        try FileManager.default.createDirectory(at: ignored, withIntermediateDirectories: false)
-        chmod(ignored.path, 0o700)
-        _ = try CacheRetention(collectionRoot: tombstoneFixture.root).enforce(now: now)
+        #expect(throws: PreparedCacheError.retentionUnsatisfied) {
+            try CacheRetention(collectionRoot: tombstoneFixture.root).enforce(now: now)
+        }
         #expect(FileManager.default.fileExists(atPath: tombstone.path))
-        #expect(FileManager.default.fileExists(atPath: ignored.path))
     }
 
     @Test("Retention tie breaking, expired locks, safe symlink leaves, and hardlinks are deterministic")

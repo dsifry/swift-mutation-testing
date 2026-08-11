@@ -210,6 +210,10 @@ struct CacheEntryIdentity {
         device == metadata.st_dev && inode == metadata.st_ino && uid == metadata.st_uid
             && kind == metadata.st_mode & S_IFMT
     }
+
+    func matches(_ other: CacheEntryIdentity) -> Bool {
+        device == other.device && inode == other.inode && uid == other.uid && kind == other.kind
+    }
 }
 
 enum CacheDeleteTree {
@@ -454,39 +458,153 @@ enum ExactJSON {
 
 final class CacheLock: @unchecked Sendable {
     let url: URL
-    private let descriptor: Int32
+    private let directory: URL
+    private let directoryIdentity: CacheEntryIdentity
+    private var directoryDescriptor: Int32 = -1
+    private var descriptor: Int32 = -1
     private let closeLock: (Int32) -> Int32
+    private let closeDirectory: (Int32) -> Int32
+    private let metadataAt: (Int32, String) -> stat?
+    private let metadataOf: (Int32) -> stat?
     private var released = false
     private let mutex = NSLock()
 
     init(
         identityDirectory: URL,
-        openLock: (String) -> Int32 = { open($0, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600) },
+        expectedDirectoryIdentity: CacheEntryIdentity? = nil,
+        lockName: String = "engine.lock",
+        openDirectory: (String) -> Int32 = {
+            open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        },
+        openLockAt: (Int32, String) -> Int32 = {
+            openat($0, $1, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        },
+        openLock: ((String) -> Int32)? = nil,
+        metadataAt: @escaping (Int32, String) -> stat? = { descriptor, name in
+            var value = stat()
+            return fstatat(descriptor, name, &value, AT_SYMLINK_NOFOLLOW) == 0 ? value : nil
+        },
+        metadataOf: @escaping (Int32) -> stat? = { descriptor in
+            var value = stat()
+            return fstat(descriptor, &value) == 0 ? value : nil
+        },
         acquireLock: (Int32) -> Int32 = { flock($0, LOCK_EX | LOCK_NB) },
-        closeLock: @escaping (Int32) -> Int32 = { close($0) }
+        closeLock: @escaping (Int32) -> Int32 = { close($0) },
+        closeDirectory: @escaping (Int32) -> Int32 = { close($0) },
+        pathMetadata: (URL) -> stat? = { CachePathGuard.metadata(at: $0) },
+        afterDirectoryValidation: () -> Void = {},
+        afterLockOpened: (URL) -> Void = { _ in }
     ) throws {
         try CachePathGuard.validateDirectory(identityDirectory, containedIn: identityDirectory)
-        url = identityDirectory.appendingPathComponent("engine.lock")
-        descriptor = openLock(url.path)
-        self.closeLock = closeLock
-        guard descriptor >= 0 else {
+        guard let pathMetadata = pathMetadata(identityDirectory) else {
             throw PreparedCacheError.unsafeCachePath
         }
+        let claimedIdentity = expectedDirectoryIdentity ?? CacheEntryIdentity(pathMetadata)
+        guard claimedIdentity.matches(pathMetadata) else { throw PreparedCacheError.unsafeCachePath }
+        directory = identityDirectory
+        directoryIdentity = claimedIdentity
+        url = identityDirectory.appendingPathComponent(lockName)
+        self.closeLock = closeLock
+        self.closeDirectory = closeDirectory
+        self.metadataAt = metadataAt
+        self.metadataOf = metadataOf
+        afterDirectoryValidation()
+        directoryDescriptor = openDirectory(identityDirectory.path)
+        guard directoryDescriptor >= 0 else { throw PreparedCacheError.unsafeCachePath }
         do {
-            try CachePathGuard.validateRegularFile(url, containedIn: identityDirectory)
-            var value = stat()
-            guard fstat(descriptor, &value) == 0, value.st_uid == getuid(),
-                value.st_mode & S_IFMT == S_IFREG, value.st_mode & 0o777 == 0o600,
-                value.st_nlink == 1
+            guard let openedDirectory = metadataOf(directoryDescriptor), claimedIdentity.matches(openedDirectory)
             else { throw PreparedCacheError.unsafeCachePath }
+            descriptor = openLock?(url.path) ?? openLockAt(directoryDescriptor, lockName)
+            guard descriptor >= 0 else { throw PreparedCacheError.unsafeCachePath }
+            guard let openedLock = metadataOf(descriptor),
+                let linkedLock = metadataAt(directoryDescriptor, lockName),
+                CacheEntryIdentity(openedLock).matches(linkedLock),
+                Self.isSafeLockMetadata(openedLock)
+            else { throw PreparedCacheError.unsafeCachePath }
+            afterLockOpened(url)
+            try validateDirectoryIdentity()
             guard acquireLock(descriptor) == 0 else {
                 if errno == EWOULDBLOCK || errno == EAGAIN { throw PreparedCacheError.lockBusy }
                 throw PreparedCacheError.unsafeCachePath
             }
+            try validateDirectoryIdentity()
         } catch {
-            _ = closeLock(descriptor)
+            if descriptor >= 0 {
+                _ = closeLock(descriptor)
+                descriptor = -1
+            }
+            _ = closeDirectory(directoryDescriptor)
+            directoryDescriptor = -1
             throw error
         }
+    }
+
+    static func collection(collectionRoot: URL) throws -> CacheLock {
+        try CacheLock(identityDirectory: collectionRoot, lockName: "collection.lock")
+    }
+
+    func identityDirectory(
+        named name: String,
+        createIfMissing: Bool,
+        createDirectoryAt: (Int32, String, mode_t) -> Int32 = { mkdirat($0, $1, $2) },
+        metadataAtChild: (Int32, String) -> stat? = { descriptor, child in
+            var value = stat()
+            return fstatat(descriptor, child, &value, AT_SYMLINK_NOFOLLOW) == 0 ? value : nil
+        },
+        lastError: () -> Int32 = { errno },
+        openChild: (Int32, String) -> Int32 = {
+            openat($0, $1, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        },
+        metadataOfChild: (Int32) -> stat? = { descriptor in
+            var value = stat()
+            return fstat(descriptor, &value) == 0 ? value : nil
+        },
+        closeChild: (Int32) -> Int32 = { close($0) }
+    ) throws -> CacheEntryIdentity? {
+        guard CachePathGuard.isLowercaseHexDigest(name) else {
+            throw PreparedCacheError.unsafeCachePath
+        }
+        try validateDirectoryIdentity()
+        if createIfMissing, createDirectoryAt(directoryDescriptor, name, 0o700) != 0,
+            lastError() != EEXIST
+        {
+            throw PreparedCacheError.unsafeCachePath
+        }
+        guard let linked = metadataAtChild(directoryDescriptor, name) else {
+            if !createIfMissing, lastError() == ENOENT { return nil }
+            throw PreparedCacheError.unsafeCachePath
+        }
+        guard linked.st_uid == getuid(), linked.st_mode & S_IFMT == S_IFDIR,
+            linked.st_mode & 0o777 == 0o700
+        else { throw PreparedCacheError.unsafeCachePath }
+        let childDescriptor = openChild(directoryDescriptor, name)
+        guard childDescriptor >= 0 else { throw PreparedCacheError.unsafeCachePath }
+        guard let opened = metadataOfChild(childDescriptor), CacheEntryIdentity(linked).matches(opened)
+        else {
+            _ = closeChild(childDescriptor)
+            throw PreparedCacheError.unsafeCachePath
+        }
+        guard closeChild(childDescriptor) == 0 else { throw PreparedCacheError.unsafeCachePath }
+        try validateDirectoryIdentity()
+        return CacheEntryIdentity(opened)
+    }
+
+    func validateDirectoryIdentity() throws {
+        try CachePathGuard.validateDirectory(directory, containedIn: directory)
+        guard let pathMetadata = CachePathGuard.metadata(at: directory),
+            directoryIdentity.matches(pathMetadata),
+            let openedDirectory = metadataOf(directoryDescriptor),
+            directoryIdentity.matches(openedDirectory),
+            let openedLock = metadataOf(descriptor),
+            let linkedLock = metadataAt(directoryDescriptor, url.lastPathComponent),
+            CacheEntryIdentity(openedLock).matches(linkedLock),
+            Self.isSafeLockMetadata(openedLock), Self.isSafeLockMetadata(linkedLock)
+        else { throw PreparedCacheError.unsafeCachePath }
+    }
+
+    private static func isSafeLockMetadata(_ metadata: stat) -> Bool {
+        metadata.st_uid == getuid() && metadata.st_mode & S_IFMT == S_IFREG
+            && metadata.st_mode & 0o777 == 0o600 && metadata.st_nlink == 1
     }
 
     func release() throws {
@@ -494,14 +612,19 @@ final class CacheLock: @unchecked Sendable {
         defer { mutex.unlock() }
         guard !released else { return }
         released = true
-        guard closeLock(descriptor) == 0 else {
+        let lockClose = closeLock(descriptor)
+        descriptor = -1
+        let directoryClose = closeDirectory(directoryDescriptor)
+        directoryDescriptor = -1
+        guard lockClose == 0, directoryClose == 0 else {
             throw PreparedCacheError.unsafeCachePath
         }
     }
 
     deinit {
-        if descriptor >= 0 && !released {
-            _ = closeLock(descriptor)
+        if !released {
+            if descriptor >= 0 { _ = closeLock(descriptor) }
+            if directoryDescriptor >= 0 { _ = closeDirectory(directoryDescriptor) }
         }
     }
 }

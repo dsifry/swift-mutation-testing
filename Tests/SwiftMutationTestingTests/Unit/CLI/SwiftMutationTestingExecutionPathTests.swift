@@ -64,7 +64,7 @@ struct SwiftMutationTestingExecutionPathTests {
         let selection = MutantSelectionManifest(
             schemaVersion: 1,
             projectInputManifestSHA256: ProjectInputManifest.sha256(try Data(contentsOf: manifestURL)),
-            preparedInventorySHA256: try state.inventory.sha256,
+            preparedInventorySHA256: state.preparedInventorySHA256,
             selector: "AppTests/Empty",
             runOrdinal: 0,
             attemptOrdinal: 0,

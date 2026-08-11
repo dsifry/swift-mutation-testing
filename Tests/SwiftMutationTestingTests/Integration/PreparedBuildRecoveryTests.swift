@@ -89,6 +89,267 @@ struct PreparedBuildRecoveryTests {
         }
     }
 
+    @Test("Prepared target rejects identity replacement before any path-based phase")
+    func targetRejectsPostLockIdentityReplacement() async throws {
+        let fixture = try RecoveryFixture()
+        defer { fixture.cleanup() }
+        try fixture.makeIdentity(fixture.identityA)
+        let moved = fixture.root.appendingPathComponent("moved-selected-identity")
+        let coordinator = PreparedBuildCoordinator(
+            configuration: makeRunnerConfiguration(
+                projectType: .xcode(scheme: "App", destination: "platform=macOS"),
+                testTarget: "AppTests"
+            ),
+            options: .init(
+                mode: .target,
+                buildCacheRoot: fixture.root.path,
+                compatibilityID: fixture.identityA.lastPathComponent,
+                projectInputManifest: fixture.root.appendingPathComponent("unused-manifest").path,
+                mutantSelectionManifest: fixture.root.appendingPathComponent("unused-selection").path
+            ),
+            launcher: PreparedCoordinatorLauncher(),
+            afterIdentityLockAcquired: { identity in
+                try! FileManager.default.moveItem(at: identity, to: moved)
+                try! fixture.makeIdentity(identity)
+            }
+        )
+
+        await #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try await coordinator.target(makeRunnerInput(mutants: []))
+        }
+        #expect(FileManager.default.fileExists(atPath: moved.path))
+    }
+
+    @Test("Prepared target rejects collection replacement before resolving the identity")
+    func targetRejectsPostLockCollectionReplacement() async throws {
+        let fixture = try RecoveryFixture()
+        let moved = fixture.root.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
+        defer {
+            fixture.cleanup()
+            try? FileManager.default.removeItem(at: moved)
+        }
+        try fixture.makeIdentity(fixture.identityA)
+        let replacementIdentity = fixture.root.appendingPathComponent(fixture.identityA.lastPathComponent)
+        let canary = replacementIdentity.appendingPathComponent("replacement-canary")
+        let coordinator = PreparedBuildCoordinator(
+            configuration: makeRunnerConfiguration(
+                projectType: .xcode(scheme: "App", destination: "platform=macOS"),
+                testTarget: "AppTests"
+            ),
+            options: .init(
+                mode: .target,
+                buildCacheRoot: fixture.root.path,
+                compatibilityID: fixture.identityA.lastPathComponent,
+                projectInputManifest: fixture.root.appendingPathComponent("unused-manifest").path,
+                mutantSelectionManifest: fixture.root.appendingPathComponent("unused-selection").path
+            ),
+            launcher: PreparedCoordinatorLauncher(),
+            afterCollectionLockAcquired: { root in
+                try! FileManager.default.moveItem(at: root, to: moved)
+                try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+                chmod(root.path, 0o700)
+                try! FileManager.default.createDirectory(
+                    at: replacementIdentity, withIntermediateDirectories: false)
+                chmod(replacementIdentity.path, 0o700)
+                try! Data("replacement".utf8).write(to: canary)
+            }
+        )
+
+        await #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try await coordinator.target(makeRunnerInput(mutants: []))
+        }
+        #expect(try Data(contentsOf: canary) == Data("replacement".utf8))
+        #expect(!FileManager.default.fileExists(atPath: replacementIdentity.appendingPathComponent("engine.lock").path))
+    }
+
+    @Test("Recover-only enforces retention while its selected identity lock protects the warm cache")
+    func recoverOnlyEnforcesRetentionAndProtectsSelectedIdentity() throws {
+        let fixture = try RecoveryFixture()
+        defer { fixture.cleanup() }
+        let identityC = fixture.root.appendingPathComponent(String(repeating: "3", count: 64))
+        for identity in [fixture.identityA, fixture.identityB, identityC] {
+            try fixture.makeIdentity(identity)
+            let payload = identity.appendingPathComponent("DerivedData/payload")
+            try FileManager.default.createDirectory(
+                at: payload.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("product".utf8).write(to: payload)
+        }
+        let now = Date()
+        let currentRecovery = CacheRecovery(
+            identityDirectory: fixture.identityA, collectionRoot: fixture.root)
+        try currentRecovery.markDirty()
+        try currentRecovery.writeRetentionMetadata(lastUsedAt: now.addingTimeInterval(-(8 * 86_400)))
+        try CacheRecovery(identityDirectory: fixture.identityB, collectionRoot: fixture.root)
+            .writeRetentionMetadata(lastUsedAt: now.addingTimeInterval(-200))
+        try CacheRecovery(identityDirectory: identityC, collectionRoot: fixture.root)
+            .writeRetentionMetadata(lastUsedAt: now.addingTimeInterval(-100))
+        let manifest = fixture.root.appendingPathComponent("manifest.json")
+        try Data("manifest".utf8).write(to: manifest)
+        let evidence = fixture.root.appendingPathComponent("retention-recovery-evidence.json")
+
+        try PreparedBuildCoordinator.recover(
+            options: .init(
+                mode: .recover,
+                buildCacheRoot: fixture.root.path,
+                compatibilityID: fixture.identityA.lastPathComponent,
+                projectInputManifest: manifest.path,
+                evidenceOutput: evidence.path,
+                invocationNonce: "abcdefghijklmnopqrstuv"
+            ), enableCustody: false)
+
+        #expect(FileManager.default.fileExists(atPath: fixture.identityA.path))
+        #expect(!FileManager.default.fileExists(atPath: fixture.identityB.path))
+        #expect(FileManager.default.fileExists(atPath: identityC.path))
+        let receipt = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: evidence)) as? [String: Any])
+        #expect(receipt["operation"] as? String == "recover")
+        #expect(receipt["outcome"] as? String == "recovered")
+    }
+
+    @Test("Recover-only enforces retention when the selected identity is absent")
+    func recoverOnlyEnforcesRetentionForAbsentSelectedIdentity() throws {
+        let fixture = try RecoveryFixture()
+        defer { fixture.cleanup() }
+        let identities = ["1", "2", "3"].map {
+            fixture.root.appendingPathComponent(String(repeating: $0, count: 64))
+        }
+        let now = Date()
+        for (index, identity) in identities.enumerated() {
+            try fixture.makeIdentity(identity)
+            let payload = identity.appendingPathComponent("DerivedData/payload")
+            try FileManager.default.createDirectory(
+                at: payload.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("product".utf8).write(to: payload)
+            try CacheRecovery(identityDirectory: identity, collectionRoot: fixture.root)
+                .writeRetentionMetadata(lastUsedAt: now.addingTimeInterval(Double(index - 3)))
+        }
+        let manifest = fixture.root.appendingPathComponent("absent-retention-manifest.json")
+        try Data("manifest".utf8).write(to: manifest)
+        let evidence = fixture.root.appendingPathComponent("absent-retention-evidence.json")
+        let absentCompatibilityID = String(repeating: "f", count: 64)
+
+        try PreparedBuildCoordinator.recover(
+            options: .init(
+                mode: .recover,
+                buildCacheRoot: fixture.root.path,
+                compatibilityID: absentCompatibilityID,
+                projectInputManifest: manifest.path,
+                evidenceOutput: evidence.path,
+                invocationNonce: "abcdefghijklmnopqrstuv"
+            ), enableCustody: false)
+
+        #expect(!FileManager.default.fileExists(atPath: identities[0].path))
+        #expect(FileManager.default.fileExists(atPath: identities[1].path))
+        #expect(FileManager.default.fileExists(atPath: identities[2].path))
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: fixture.root.appendingPathComponent(absentCompatibilityID).path))
+        let receipt = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: evidence)) as? [String: Any])
+        #expect(receipt["outcome"] as? String == "absent")
+    }
+
+    @Test("Absent recover holds the collection claim lock and leaves no identity")
+    func absentRecoverSerializesWithoutPlaceholderIdentity() throws {
+        let fixture = try RecoveryFixture()
+        defer { fixture.cleanup() }
+        let manifest = fixture.root.appendingPathComponent("claim-manifest.json")
+        try Data("manifest".utf8).write(to: manifest)
+        let evidence = fixture.root.appendingPathComponent("claim-evidence.json")
+        let selected = fixture.root.appendingPathComponent(String(repeating: "e", count: 64))
+        let blockedClaims = LockedCounter()
+
+        try PreparedBuildCoordinator.recover(
+            options: .init(
+                mode: .recover,
+                buildCacheRoot: fixture.root.path,
+                compatibilityID: selected.lastPathComponent,
+                projectInputManifest: manifest.path,
+                evidenceOutput: evidence.path,
+                invocationNonce: "abcdefghijklmnopqrstuv"
+            ),
+            enableCustody: false,
+            afterCollectionLockAcquired: { root in
+                let completed = DispatchSemaphore(value: 0)
+                Thread {
+                    do {
+                        let competing = try CacheLock.collection(collectionRoot: root)
+                        try? competing.release()
+                    } catch PreparedCacheError.lockBusy {
+                        blockedClaims.increment()
+                    } catch {}
+                    completed.signal()
+                }.start()
+                #expect(completed.wait(timeout: .now() + 1) == .success)
+            }
+        )
+
+        #expect(blockedClaims.value == 1)
+        #expect(!FileManager.default.fileExists(atPath: selected.path))
+        #expect(
+            FileManager.default.fileExists(
+                atPath: fixture.root.appendingPathComponent("collection.lock").path))
+        let receipt = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: evidence)) as? [String: Any])
+        #expect(receipt["outcome"] as? String == "absent")
+        #expect(receipt["sourceBearingBytesScrubbed"] as? Bool == false)
+    }
+
+    @Test("Absent recovery rechecks absence immediately before evidence")
+    func absentRecoverRejectsLateIdentityCreation() throws {
+        let fixture = try RecoveryFixture()
+        defer { fixture.cleanup() }
+        let selected = fixture.root.appendingPathComponent(String(repeating: "f", count: 64))
+        let manifest = fixture.root.appendingPathComponent("late-claim-manifest.json")
+        let evidence = fixture.root.appendingPathComponent("late-claim-evidence.json")
+        try Data("manifest".utf8).write(to: manifest)
+
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try PreparedBuildCoordinator.recover(
+                options: .init(
+                    mode: .recover, buildCacheRoot: fixture.root.path,
+                    compatibilityID: selected.lastPathComponent,
+                    projectInputManifest: manifest.path, evidenceOutput: evidence.path,
+                    invocationNonce: "abcdefghijklmnopqrstuv"),
+                enableCustody: false,
+                beforeAbsentEvidence: {
+                    try! fixture.makeIdentity(selected)
+                })
+        }
+        #expect(!FileManager.default.fileExists(atPath: evidence.path))
+    }
+
+    @Test("Recover-only fails closed when the protected selected identity alone exceeds policy")
+    func recoverOnlyFailsWhenProtectedIdentityMakesRetentionUnsatisfiable() throws {
+        let fixture = try RecoveryFixture()
+        defer { fixture.cleanup() }
+        try fixture.makeIdentity(fixture.identityA)
+        let recovery = CacheRecovery(
+            identityDirectory: fixture.identityA, collectionRoot: fixture.root)
+        try recovery.markDirty()
+        try recovery.writeRetentionMetadata(lastUsedAt: .distantPast)
+
+        let evidence = fixture.root.appendingPathComponent("unsatisfied-recovery-evidence.json")
+        #expect(throws: PreparedCacheError.retentionUnsatisfied) {
+            try PreparedBuildCoordinator.recover(
+                options: .init(
+                    mode: .recover,
+                    buildCacheRoot: fixture.root.path,
+                    compatibilityID: fixture.identityA.lastPathComponent,
+                    evidenceOutput: evidence.path
+                ),
+                enableCustody: false,
+                retentionPolicy: CacheRetentionPolicy(
+                    maximumIdentityCount: 0,
+                    maximumTotalBytes: 20 * 1024 * 1024 * 1024,
+                    maximumInactiveAge: 7 * 86_400
+                )
+            )
+        }
+        #expect(FileManager.default.fileExists(atPath: fixture.identityA.path))
+        #expect(!FileManager.default.fileExists(atPath: evidence.path))
+    }
+
     @Test("Coordinator records conservative builds, recovers cold, and reuses an empty target")
     func coordinatorPrepareIncrementalAndEmptyTarget() async throws {
         let fixture = try RecoveryFixture()
@@ -142,7 +403,23 @@ struct PreparedBuildRecoveryTests {
         )
         let input = makeRunnerInput(projectPath: project.path, mutants: [mutant])
 
-        for (index, expectedFull, expectedIncremental) in [(0, 1, 0), (1, 1, 0)] {
+        await #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try await PreparedBuildCoordinator(
+                configuration: configuration,
+                options: .init(
+                    mode: .prepare,
+                    buildCacheRoot: fixture.root.path,
+                    compatibilityID: compatibilityID,
+                    projectInputManifest: manifestURL.path,
+                    testEnumerationOutput: fixture.root.appendingPathComponent("unclaimed-tests.json").path,
+                    mutantInventoryOutput: fixture.root.appendingPathComponent("unclaimed-inventory.json").path
+                ),
+                launcher: launcher,
+                claimIdentityDirectory: { _, _, _ in nil }
+            ).prepare(input)
+        }
+
+        for (index, expectedFull, expectedIncremental) in [(0, 1, 0), (1, 0, 1)] {
             let evidence = fixture.root.appendingPathComponent("prepare-evidence-\(index).json")
             let coordinator = PreparedBuildCoordinator(
                 configuration: configuration,
@@ -176,8 +453,10 @@ struct PreparedBuildRecoveryTests {
         #expect(
             Set(stateObject.keys) == [
                 "schemaVersion", "sandboxPath", "derivedDataPath", "xctestrunPath",
-                "productManifestSHA256", "inventory",
+                "productManifestSHA256", "projectInputManifestSHA256",
+                "preparedInventorySHA256",
             ])
+        #expect(stateObject["inventory"] == nil)
         let recordedXCTestRun = try #require(stateObject["xctestrunPath"] as? String)
         #expect(FileManager.default.fileExists(atPath: recordedXCTestRun))
         let decodedState = try JSONDecoder().decode(PreparedBuildState.self, from: rawState)
@@ -212,7 +491,7 @@ struct PreparedBuildRecoveryTests {
         let selection = MutantSelectionManifest(
             schemaVersion: 1,
             projectInputManifestSHA256: manifestDigest,
-            preparedInventorySHA256: try state.inventory.sha256,
+            preparedInventorySHA256: state.preparedInventorySHA256,
             selector: "AppTests/Empty",
             runOrdinal: 0,
             attemptOrdinal: 0,
@@ -304,6 +583,18 @@ struct PreparedBuildRecoveryTests {
             ).target(input)
         }
 
+        var digestOnlyState = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: preparedStore.stateURL)) as? [String: Any])
+        digestOnlyState["preparedInventorySHA256"] = String(repeating: "c", count: 64)
+        try JSONSerialization.data(withJSONObject: digestOnlyState).write(to: preparedStore.stateURL)
+        chmod(preparedStore.stateURL.path, 0o600)
+        await #expect(throws: PreparedBuildError.inventoryMismatch) {
+            try await PreparedBuildCoordinator(
+                configuration: configuration, options: targetOptions(), launcher: launcher
+            ).target(input)
+        }
+        try preparedStore.save(state)
+
         let invalidSelection = fixture.root.appendingPathComponent("invalid-selection.json")
         try Data("invalid".utf8).write(to: invalidSelection)
         await #expect(throws: (any Error).self) {
@@ -318,7 +609,7 @@ struct PreparedBuildRecoveryTests {
             MutantSelectionManifest(
                 schemaVersion: 1,
                 projectInputManifestSHA256: String(repeating: "0", count: 64),
-                preparedInventorySHA256: try state.inventory.sha256,
+                preparedInventorySHA256: state.preparedInventorySHA256,
                 selector: selection.selector,
                 runOrdinal: 0,
                 attemptOrdinal: 0,
@@ -337,7 +628,7 @@ struct PreparedBuildRecoveryTests {
             MutantSelectionManifest(
                 schemaVersion: 1,
                 projectInputManifestSHA256: manifestDigest,
-                preparedInventorySHA256: try state.inventory.sha256,
+                preparedInventorySHA256: state.preparedInventorySHA256,
                 selector: "OtherTests",
                 runOrdinal: 0,
                 attemptOrdinal: 0,
@@ -388,7 +679,7 @@ struct PreparedBuildRecoveryTests {
         let nonemptySelection = MutantSelectionManifest(
             schemaVersion: 1,
             projectInputManifestSHA256: manifestDigest,
-            preparedInventorySHA256: try state.inventory.sha256,
+            preparedInventorySHA256: state.preparedInventorySHA256,
             selector: "AppTests/Empty",
             runOrdinal: 1,
             attemptOrdinal: 0,
@@ -424,7 +715,8 @@ struct PreparedBuildRecoveryTests {
                 derivedDataPath: state.derivedDataPath,
                 xctestrunPath: state.xctestrunPath,
                 productManifestSHA256: invalidProductDigest,
-                inventory: state.inventory
+                projectInputManifestSHA256: state.projectInputManifestSHA256,
+                preparedInventorySHA256: state.preparedInventorySHA256
             ))
         try CacheRecovery(identityDirectory: storeForInvalidPlist.directory, collectionRoot: fixture.root)
             .markReady(productManifestSHA256: invalidProductDigest)
@@ -487,8 +779,8 @@ struct PreparedBuildRecoveryTests {
         let failed = try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: failedEvidence)) as? [String: Any])
         #expect(failed["outcome"] as? String == "failed")
-        #expect(failed["fullBuilds"] as? Int == 1)
-        #expect(failed["incrementalBuilds"] as? Int == 0)
+        #expect(failed["fullBuilds"] as? Int == 0)
+        #expect(failed["incrementalBuilds"] as? Int == 1)
 
         let recoveredEvidence = fixture.root.appendingPathComponent("recovered-evidence.json")
         let recoveryOptions = ParsedArguments.CacheOptions(
@@ -1260,6 +1552,197 @@ struct PreparedBuildRecoveryTests {
                     return -1
                 })
         }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheLock(identityDirectory: fixture.identityA, pathMetadata: { _ in nil })
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheLock(identityDirectory: fixture.identityA, openDirectory: { _ in -1 })
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheLock(identityDirectory: fixture.identityA, openDirectory: { _ in 123_456 })
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheLock(
+                identityDirectory: fixture.identityA,
+                openLockAt: { _, _ in open("/dev/null", O_RDONLY) })
+        }
+    }
+
+    @Test("Descriptor-anchored locks reject directory and lock inode replacement races")
+    func engineLockRejectsInodeReplacementRaces() throws {
+        func fixtureAndClaim() throws -> (RecoveryFixture, PreparedBuildStore, CacheEntryIdentity) {
+            let fixture = try RecoveryFixture()
+            let store = PreparedBuildStore(
+                root: fixture.root.path,
+                compatibilityID: fixture.identityA.lastPathComponent)
+            return (fixture, store, try store.prepareDirectory())
+        }
+
+        let mkdirRace = try fixtureAndClaim()
+        defer { mkdirRace.0.cleanup() }
+        let movedAfterMkdir = mkdirRace.0.root.appendingPathComponent("moved-after-mkdir")
+        try FileManager.default.moveItem(at: mkdirRace.1.directory, to: movedAfterMkdir)
+        try mkdirRace.0.makeIdentity(mkdirRace.1.directory)
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheLock(
+                identityDirectory: mkdirRace.1.directory,
+                expectedDirectoryIdentity: mkdirRace.2)
+        }
+
+        let validationRace = try fixtureAndClaim()
+        defer { validationRace.0.cleanup() }
+        let movedAfterValidation = validationRace.0.root.appendingPathComponent("moved-after-validation")
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheLock(
+                identityDirectory: validationRace.1.directory,
+                expectedDirectoryIdentity: validationRace.2,
+                afterDirectoryValidation: {
+                    try! FileManager.default.moveItem(
+                        at: validationRace.1.directory, to: movedAfterValidation)
+                    try! validationRace.0.makeIdentity(validationRace.1.directory)
+                })
+        }
+
+        let lockRace = try fixtureAndClaim()
+        defer { lockRace.0.cleanup() }
+        let movedLock = lockRace.1.directory.appendingPathComponent("moved-engine.lock")
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheLock(
+                identityDirectory: lockRace.1.directory,
+                expectedDirectoryIdentity: lockRace.2,
+                afterLockOpened: { lockURL in
+                    try! FileManager.default.moveItem(at: lockURL, to: movedLock)
+                    #expect(
+                        FileManager.default.createFile(
+                            atPath: lockURL.path, contents: Data(),
+                            attributes: [.posixPermissions: 0o600]))
+                })
+        }
+
+        let missingLockMetadata = try fixtureAndClaim()
+        defer { missingLockMetadata.0.cleanup() }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheLock(
+                identityDirectory: missingLockMetadata.1.directory,
+                expectedDirectoryIdentity: missingLockMetadata.2,
+                openLockAt: { _, _ in open("/dev/null", O_RDONLY) })
+        }
+
+        let metadataRace = try fixtureAndClaim()
+        defer { metadataRace.0.cleanup() }
+        var corruptMetadata = false
+        let metadataLock = try CacheLock(
+            identityDirectory: metadataRace.1.directory,
+            expectedDirectoryIdentity: metadataRace.2,
+            metadataOf: { descriptor in
+                var value = stat()
+                guard fstat(descriptor, &value) == 0 else { return nil }
+                if corruptMetadata { value.st_nlink = 2 }
+                return value
+            })
+        corruptMetadata = true
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try metadataLock.validateDirectoryIdentity()
+        }
+        try metadataLock.release()
+
+        let collectionFixture = try RecoveryFixture()
+        defer { collectionFixture.cleanup() }
+        let collectionLock = try CacheLock.collection(collectionRoot: collectionFixture.root)
+        defer { try? collectionLock.release() }
+        let claimedName = String(repeating: "c", count: 64)
+        let claimedURL = collectionFixture.root.appendingPathComponent(claimedName)
+        let claimedResult = try collectionLock.identityDirectory(
+            named: claimedName, createIfMissing: true)
+        let claimed = try #require(claimedResult)
+        #expect(claimed.kind == S_IFDIR)
+        #expect(
+            try collectionLock.identityDirectory(
+                named: String(repeating: "d", count: 64), createIfMissing: false) == nil)
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try collectionLock.identityDirectory(named: "../unsafe", createIfMissing: false)
+        }
+
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try collectionLock.identityDirectory(
+                named: String(repeating: "e", count: 64),
+                createIfMissing: true,
+                createDirectoryAt: { _, _, _ in
+                    errno = EIO
+                    return -1
+                })
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try collectionLock.identityDirectory(
+                named: String(repeating: "f", count: 64),
+                createIfMissing: true,
+                metadataAtChild: { _, _ in nil },
+                lastError: { ENOENT })
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try collectionLock.identityDirectory(
+                named: claimedName,
+                createIfMissing: false,
+                metadataAtChild: { descriptor, name in
+                    var value = stat()
+                    guard fstatat(descriptor, name, &value, AT_SYMLINK_NOFOLLOW) == 0 else {
+                        return nil
+                    }
+                    value.st_mode = S_IFREG | 0o600
+                    return value
+                })
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try collectionLock.identityDirectory(
+                named: claimedName, createIfMissing: false, openChild: { _, _ in -1 })
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try collectionLock.identityDirectory(
+                named: claimedName,
+                createIfMissing: false,
+                openChild: { descriptor, name in
+                    let child = openat(
+                        descriptor, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+                    if child >= 0 { _ = close(child) }
+                    return child
+                })
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try collectionLock.identityDirectory(
+                named: claimedName,
+                createIfMissing: false,
+                metadataOfChild: { _ in nil })
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try collectionLock.identityDirectory(
+                named: claimedName,
+                createIfMissing: false,
+                closeChild: { descriptor in
+                    _ = close(descriptor)
+                    return -1
+                })
+        }
+
+        let movedClaim = collectionFixture.root.appendingPathComponent("moved-claimed")
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try collectionLock.identityDirectory(
+                named: claimedName,
+                createIfMissing: false,
+                metadataAtChild: { descriptor, name in
+                    var value = stat()
+                    guard fstatat(descriptor, name, &value, AT_SYMLINK_NOFOLLOW) == 0 else {
+                        return nil
+                    }
+                    try! FileManager.default.moveItem(at: claimedURL, to: movedClaim)
+                    try! FileManager.default.createDirectory(
+                        at: claimedURL, withIntermediateDirectories: false)
+                    chmod(claimedURL.path, 0o700)
+                    return value
+                })
+        }
+        #expect(
+            !FileManager.default.fileExists(
+                atPath: claimedURL.appendingPathComponent("engine.lock").path))
     }
 
     @Test("Cold, warm, incremental, and incompatible identities preserve only verified products")
@@ -1895,6 +2378,34 @@ struct PreparedBuildRecoveryTests {
         #expect(registeredWhilePolling)
         #expect(!custody.isQuiescent)
         #expect(try ProcessCustody.readRegisteredGroups(from: registry) == [second])
+    }
+
+    @Test("Custody persists a sorted set and rejects unsorted or duplicate groups")
+    func custodyRegistryIsCanonicalSortedSet() throws {
+        let fixture = try RecoveryFixture()
+        defer { fixture.cleanup() }
+        try fixture.makeIdentity(fixture.identityA)
+        let registry = fixture.identityA.appendingPathComponent("sorted-custody.json")
+        let later = CustodiedProcessGroup(pid: 9, processGroupID: 90, birthIdentity: "later")
+        let earlier = CustodiedProcessGroup(pid: 8, processGroupID: 80, birthIdentity: "earlier")
+        let custody = ProcessCustody(
+            registrationURL: registry, verifyIdentity: { _ in true },
+            terminateGroup: { _ in }, waitForGroup: nil)
+        try custody.register(later)
+        try custody.register(earlier)
+        #expect(try ProcessCustody.readRegisteredGroups(from: registry) == [earlier, later])
+
+        for invalid in [
+            [later, earlier],
+            [earlier, .init(pid: 10, processGroupID: earlier.processGroupID, birthIdentity: "duplicate")],
+        ] {
+            let url = fixture.identityA.appendingPathComponent("noncanonical-\(UUID().uuidString).json")
+            try JSONEncoder().encode(invalid).write(to: url)
+            chmod(url.path, 0o600)
+            #expect(throws: PreparedCacheError.invalidCacheState) {
+                try ProcessCustody.readRegisteredGroups(from: url)
+            }
+        }
     }
 
     @Test("Custody quiescence reconciles but does not erase a concurrent new group")

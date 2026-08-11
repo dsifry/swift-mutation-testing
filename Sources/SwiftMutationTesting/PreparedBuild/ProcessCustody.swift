@@ -91,8 +91,9 @@ final class ProcessCustody: @unchecked Sendable {
             status = { SystemProcessIdentity.status(of: $0) }
         }
         let registered =
-            FileManager.default.fileExists(atPath: registrationURL.path)
-            ? try readRegisteredGroups(from: registrationURL) : []
+            try CacheDeleteTree.entryExists(
+                registrationURL, containedIn: registrationURL.deletingLastPathComponent())
+            ? readRegisteredGroups(from: registrationURL) : []
         return ProcessCustody(
             registrationURL: registrationURL,
             registeredGroups: registered,
@@ -158,6 +159,7 @@ final class ProcessCustody: @unchecked Sendable {
                 })
             else { throw PreparedCacheError.unverifiableProcessIdentity }
             groups.append(group)
+            groups = Self.canonicalGroups(groups)
             try persistRegistry()
         }
     }
@@ -227,9 +229,19 @@ final class ProcessCustody: @unchecked Sendable {
         let groups = try JSONDecoder().decode([CustodiedProcessGroup].self, from: data)
         guard groups.count <= maximumTrackedProcessGroups,
             groups.allSatisfy({ $0.pid > 0 && $0.processGroupID > 0 && !$0.birthIdentity.isEmpty }),
-            Set(groups.map(\.pid)).count == groups.count
+            Set(groups.map(\.pid)).count == groups.count,
+            Set(groups.map(\.processGroupID)).count == groups.count,
+            groups == canonicalGroups(groups)
         else { throw PreparedCacheError.invalidCacheState }
         return groups
+    }
+
+    private static func canonicalGroups(
+        _ groups: [CustodiedProcessGroup]
+    ) -> [CustodiedProcessGroup] {
+        groups.sorted { left, right in
+            left.processGroupID < right.processGroupID
+        }
     }
 
     private func persistRegistry() throws {

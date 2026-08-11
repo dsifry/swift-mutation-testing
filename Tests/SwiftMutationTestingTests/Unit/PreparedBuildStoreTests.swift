@@ -270,6 +270,65 @@ struct PreparedBuildStoreTests {
         try CacheFailureEvidenceRecorder.record(options: options(.prepare, output: cleanEvidence))
         let clean = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: cleanEvidence)) as? [String: Any])
         #expect(clean["childGroupsQuiescent"] as? Bool == true)
+
+        let raceStore = PreparedBuildStore(
+            root: root.path, compatibilityID: String(repeating: "5", count: 64))
+        _ = try raceStore.prepareDirectory()
+        try FileManager.default.createDirectory(
+            at: raceStore.sandboxURL, withIntermediateDirectories: false)
+        try Data("source".utf8).write(to: raceStore.sandboxURL.appendingPathComponent("marker"))
+        let moved = root.appendingPathComponent("moved-failure-identity")
+        let raceEvidence = root.appendingPathComponent("race-failure.json")
+        try CacheFailureEvidenceRecorder.record(
+            options: .init(
+                mode: .prepare, buildCacheRoot: root.path,
+                compatibilityID: String(repeating: "5", count: 64),
+                projectInputManifest: manifest.path, evidenceOutput: raceEvidence.path,
+                invocationNonce: "abcdefghijklmnopqrstuv"),
+            afterIdentityClaimed: { directory in
+                try! FileManager.default.moveItem(at: directory, to: moved)
+                try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+                chmod(directory.path, 0o700)
+            })
+        let race = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: raceEvidence)) as? [String: Any])
+        #expect(race["sourceBearingBytesScrubbed"] as? Bool == false)
+        #expect(FileManager.default.fileExists(atPath: moved.path))
+
+        let unsafeStore = PreparedBuildStore(
+            root: root.path, compatibilityID: String(repeating: "4", count: 64))
+        _ = try unsafeStore.prepareDirectory()
+        chmod(unsafeStore.directory.path, 0o755)
+        let unsafeEvidence = root.appendingPathComponent("unsafe-failure.json")
+        try CacheFailureEvidenceRecorder.record(
+            options: .init(
+                mode: .prepare, buildCacheRoot: root.path,
+                compatibilityID: String(repeating: "4", count: 64),
+                projectInputManifest: manifest.path, evidenceOutput: unsafeEvidence.path,
+                invocationNonce: "abcdefghijklmnopqrstuv"))
+        let unsafe = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: unsafeEvidence)) as? [String: Any])
+        #expect(unsafe["sourceBearingBytesScrubbed"] as? Bool == false)
+
+        let postLockStore = PreparedBuildStore(
+            root: root.path, compatibilityID: String(repeating: "3", count: 64))
+        _ = try postLockStore.prepareDirectory()
+        let movedPostLock = root.appendingPathComponent("moved-post-lock-failure")
+        let postLockEvidence = root.appendingPathComponent("post-lock-failure.json")
+        try CacheFailureEvidenceRecorder.record(
+            options: .init(
+                mode: .prepare, buildCacheRoot: root.path,
+                compatibilityID: String(repeating: "3", count: 64),
+                projectInputManifest: manifest.path, evidenceOutput: postLockEvidence.path,
+                invocationNonce: "abcdefghijklmnopqrstuv"),
+            afterCleanupLockAcquired: { directory in
+                try! FileManager.default.moveItem(at: directory, to: movedPostLock)
+                try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+                chmod(directory.path, 0o700)
+            })
+        let postLock = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: postLockEvidence)) as? [String: Any])
+        #expect(postLock["sourceBearingBytesScrubbed"] as? Bool == false)
     }
 
     @Test("Prepared test enumeration runs the retained product without building")
@@ -340,6 +399,49 @@ struct PreparedBuildStoreTests {
         #expect(FileManager.default.fileExists(atPath: product.path))
     }
 
+    @Test("Atomic identity creation accepts a concurrently created private directory")
+    func prepareDirectoryHandlesAtomicClaimRace() throws {
+        let root = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        chmod(root.path, 0o700)
+        let store = PreparedBuildStore(
+            root: root.path, compatibilityID: String(repeating: "a", count: 64))
+
+        try store.prepareDirectory(createDirectory: { path, _ in
+            try! FileManager.default.createDirectory(
+                at: URL(fileURLWithPath: path), withIntermediateDirectories: false)
+            chmod(path, 0o700)
+            errno = EEXIST
+            return -1
+        })
+
+        try CachePathGuard.validateDirectory(store.directory, containedIn: root)
+
+        let failedStore = PreparedBuildStore(
+            root: root.path, compatibilityID: String(repeating: "b", count: 64))
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try failedStore.prepareDirectory(createDirectory: { _, _ in
+                errno = EIO
+                return -1
+            })
+        }
+
+        let missingAfterCreate = PreparedBuildStore(
+            root: root.path, compatibilityID: String(repeating: "c", count: 64))
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try missingAfterCreate.prepareDirectory(metadataOf: { _ in nil })
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try store.prepareDirectory(metadataOf: { _ in nil })
+        }
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try store.directoryIdentity(metadataOf: { _ in nil })
+        }
+        #expect(try store.directoryIdentity().kind == S_IFDIR)
+    }
+
     @Test("Prepared identity and state use private filesystem modes")
     func privateFilesystemModes() throws {
         let root = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(
@@ -362,7 +464,8 @@ struct PreparedBuildStoreTests {
                 derivedDataPath: store.derivedDataURL.path,
                 xctestrunPath: store.directory.appendingPathComponent("tests.xctestrun").path,
                 productManifestSHA256: String(repeating: "b", count: 64),
-                inventory: inventory
+                projectInputManifestSHA256: inventory.projectInputManifestSHA256,
+                preparedInventorySHA256: try inventory.sha256
             )
         )
 
@@ -410,9 +513,11 @@ struct PreparedBuildStoreTests {
             derivedDataPath: store.derivedDataURL.path,
             xctestrunPath: store.derivedDataURL.appendingPathComponent("tests.xctestrun").path,
             productManifestSHA256: String(repeating: "b", count: 64),
-            inventory: inventory
+            projectInputManifestSHA256: inventory.projectInputManifestSHA256,
+            preparedInventorySHA256: try inventory.sha256
         )
 
+        _ = try store.prepareDirectory()
         try store.save(state)
 
         let product = store.derivedDataURL.appendingPathComponent("Build/Products/App")
@@ -427,37 +532,26 @@ struct PreparedBuildStoreTests {
 
         var object = try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: store.stateURL)) as? [String: Any])
-        var inventoryObject = try #require(object["inventory"] as? [String: Any])
-        inventoryObject["unknown"] = true
-        object["inventory"] = inventoryObject
+        #expect(object["inventory"] == nil)
+        #expect(
+            Set(object.keys) == [
+                "schemaVersion", "sandboxPath", "derivedDataPath", "xctestrunPath",
+                "productManifestSHA256", "projectInputManifestSHA256", "preparedInventorySHA256",
+            ])
+        object["preparedInventorySHA256"] = "not-a-digest"
         try JSONSerialization.data(withJSONObject: object).write(to: store.stateURL)
         chmod(store.stateURL.path, 0o600)
         #expect(throws: PreparedBuildError.preparedBuildMissing) { try store.load() }
 
         try store.save(state)
         object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: store.stateURL)) as? [String: Any])
-        inventoryObject = try #require(object["inventory"] as? [String: Any])
-        var rows = try #require(inventoryObject["mutants"] as? [[String: Any]])
-        rows[0]["unknown"] = true
-        inventoryObject["mutants"] = rows
-        object["inventory"] = inventoryObject
-        try JSONSerialization.data(withJSONObject: object).write(to: store.stateURL)
-        chmod(store.stateURL.path, 0o600)
-        #expect(throws: PreparedBuildError.preparedBuildMissing) { try store.load() }
-
-        try store.save(state)
-        object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: store.stateURL)) as? [String: Any])
-        inventoryObject = try #require(object["inventory"] as? [String: Any])
-        rows = try #require(inventoryObject["mutants"] as? [[String: Any]])
-        rows[0]["sourceUTF8Offset"] = -1
-        inventoryObject["mutants"] = rows
-        object["inventory"] = inventoryObject
+        object["projectInputManifestSHA256"] = "not-a-digest"
         try JSONSerialization.data(withJSONObject: object).write(to: store.stateURL)
         chmod(store.stateURL.path, 0o600)
         #expect(throws: PreparedBuildError.preparedBuildMissing) { try store.load() }
 
         #expect(throws: PreparedBuildError.inventoryMismatch) {
-            try state.inventory.validate(
+            try inventory.validate(
                 mutants: [makeMutantDescriptor(id: "different", filePath: "/repo/Sources/A.swift")],
                 projectRoot: "/repo"
             )

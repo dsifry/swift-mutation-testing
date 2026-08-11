@@ -92,16 +92,25 @@ final class ProcessEscalationController: @unchecked Sendable {
 final class ObservedBuildCountingLauncher: @unchecked Sendable, ProcessLaunching {
     private let base: any ProcessLaunching
     private let countAsFallback: Bool
+    private let countBuildForTestingAsIncremental: Bool
     private let lock = NSLock()
     private var buildAttempts = 0
+    private var incrementalAttempts = 0
     private var fallbackAttempts = 0
 
-    init(base: any ProcessLaunching, countAsFallback: Bool = false) {
+    init(
+        base: any ProcessLaunching,
+        countAsFallback: Bool = false,
+        countBuildForTestingAsIncremental: Bool = false
+    ) {
         self.base = base
         self.countAsFallback = countAsFallback
+        self.countBuildForTestingAsIncremental = countBuildForTestingAsIncremental
     }
 
-    var buildForTestingAttempts: Int { lock.withLock { buildAttempts } }
+    var buildForTestingAttempts: Int { lock.withLock { buildAttempts + incrementalAttempts } }
+    var fullBuildAttempts: Int { lock.withLock { buildAttempts } }
+    var incrementalBuildAttempts: Int { lock.withLock { incrementalAttempts } }
     var fallbackBuildAttempts: Int { lock.withLock { fallbackAttempts } }
 
     func launch(
@@ -122,7 +131,13 @@ final class ObservedBuildCountingLauncher: @unchecked Sendable, ProcessLaunching
     private func record(executableURL: URL, arguments: [String]) {
         guard executableURL.path == "/usr/bin/xcodebuild", let operation = arguments.first else { return }
         lock.withLock {
-            if operation == "build-for-testing" { buildAttempts += 1 }
+            if operation == "build-for-testing" {
+                if countBuildForTestingAsIncremental {
+                    incrementalAttempts += 1
+                } else {
+                    buildAttempts += 1
+                }
+            }
             if countAsFallback, operation == "test" { fallbackAttempts += 1 }
         }
     }

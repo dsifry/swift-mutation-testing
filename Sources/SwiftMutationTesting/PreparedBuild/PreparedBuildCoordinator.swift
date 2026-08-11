@@ -204,7 +204,12 @@ enum CacheEvidenceWriter {
 }
 
 enum CacheFailureEvidenceRecorder {
-    static func record(options: ParsedArguments.CacheOptions) throws {
+    static func record(
+        options: ParsedArguments.CacheOptions,
+        afterCollectionLockAcquired: (URL) -> Void = { _ in },
+        afterIdentityClaimed: (URL) -> Void = { _ in },
+        afterCleanupLockAcquired: (URL) -> Void = { _ in }
+    ) throws {
         guard let output = options.evidenceOutput,
             let root = options.buildCacheRoot,
             let compatibilityID = options.compatibilityID,
@@ -214,8 +219,16 @@ enum CacheFailureEvidenceRecorder {
         let outputURL = URL(fileURLWithPath: output)
         guard !FileManager.default.fileExists(atPath: outputURL.path) else { return }
         let store = PreparedBuildStore(root: root, compatibilityID: compatibilityID)
-        let state = try? store.load()
-        let cleanup = cleanup(store: store, collectionRoot: URL(fileURLWithPath: root, isDirectory: true))
+        let collectionRoot = URL(fileURLWithPath: root, isDirectory: true)
+        let collectionLock = try CacheLock.collection(collectionRoot: collectionRoot)
+        defer { try? collectionLock.release() }
+        afterCollectionLockAcquired(collectionRoot)
+        try collectionLock.validateDirectoryIdentity()
+        let cleanup = cleanup(
+            store: store, collectionRoot: collectionRoot, collectionLock: collectionLock,
+            afterIdentityClaimed: afterIdentityClaimed,
+            afterCleanupLockAcquired: afterCleanupLockAcquired)
+        let state = cleanup.state
         let manifestDigest =
             (try? Data(contentsOf: URL(fileURLWithPath: manifestPath)))
             .map(ProjectInputManifest.sha256) ?? String(repeating: "0", count: 64)
@@ -235,7 +248,7 @@ enum CacheFailureEvidenceRecorder {
                 outcome: "failed",
                 compatibilitySHA256: compatibilityID,
                 projectInputManifestSHA256: manifestDigest,
-                preparedInventorySHA256: try state?.inventory.sha256,
+                preparedInventorySHA256: state?.preparedInventorySHA256,
                 runOrdinal: selection?.runOrdinal,
                 attemptOrdinal: selection?.attemptOrdinal,
                 productManifestSHA256: state?.productManifestSHA256,
@@ -247,13 +260,33 @@ enum CacheFailureEvidenceRecorder {
             ), to: outputURL)
     }
 
-    private static func cleanup(store: PreparedBuildStore, collectionRoot: URL) -> (scrubbed: Bool, quiescent: Bool) {
-        guard FileManager.default.fileExists(atPath: store.directory.path) else { return (true, true) }
-        guard let lock = try? CacheLock(identityDirectory: store.directory) else { return (false, false) }
+    private static func cleanup(
+        store: PreparedBuildStore,
+        collectionRoot: URL,
+        collectionLock: CacheLock,
+        afterIdentityClaimed: (URL) -> Void,
+        afterCleanupLockAcquired: (URL) -> Void
+    ) -> (state: PreparedBuildState?, scrubbed: Bool, quiescent: Bool) {
+        let claimed: CacheEntryIdentity?
+        do {
+            claimed = try collectionLock.identityDirectory(
+                named: store.directory.lastPathComponent, createIfMissing: false)
+        } catch {
+            return (nil, false, false)
+        }
+        guard let identity = claimed else { return (nil, true, true) }
+        afterIdentityClaimed(store.directory)
+        guard
+            let lock = try? CacheLock(
+                identityDirectory: store.directory, expectedDirectoryIdentity: identity)
+        else { return (nil, false, false) }
         defer { try? lock.release() }
+        afterCleanupLockAcquired(store.directory)
+        guard (try? lock.validateDirectoryIdentity()) != nil else { return (nil, false, false) }
+        let state = try? store.load()
         var quiescent = true
         let registry = store.directory.appendingPathComponent("process-custody.json")
-        if FileManager.default.fileExists(atPath: registry.path) {
+        if (try? CacheDeleteTree.entryExists(registry, containedIn: store.directory)) == true {
             do {
                 let custody = try ProcessCustody.system(registrationURL: registry)
                 try custody.handleEngineTermination()
@@ -263,11 +296,12 @@ enum CacheFailureEvidenceRecorder {
             }
         }
         let scrubbed =
-            (try? CacheRecovery(
+            ((try? lock.validateDirectoryIdentity()) != nil)
+            && (try? CacheRecovery(
                 identityDirectory: store.directory,
                 collectionRoot: collectionRoot
             ).scrubAfterCommand()) != nil
-        return (scrubbed, quiescent)
+        return (state, scrubbed, quiescent)
     }
 }
 
@@ -275,6 +309,11 @@ struct PreparedBuildCoordinator: Sendable {
     let configuration: RunnerConfiguration
     let options: ParsedArguments.CacheOptions
     let launcher: any ProcessLaunching
+    var afterCollectionLockAcquired: @Sendable (URL) -> Void = { _ in }
+    var afterIdentityLockAcquired: @Sendable (URL) -> Void = { _ in }
+    var claimIdentityDirectory: @Sendable (CacheLock, String, Bool) throws -> CacheEntryIdentity? = {
+        try $0.identityDirectory(named: $1, createIfMissing: $2)
+    }
 
     func prepare(_ input: RunnerInput) async throws {
         guard case .xcode(let scheme, let destination) = configuration.build.projectType,
@@ -293,31 +332,49 @@ struct PreparedBuildCoordinator: Sendable {
         )
         let inventoryHash = try inventory.sha256
         let store = PreparedBuildStore(root: root, compatibilityID: compatibilityID)
-        try store.prepareDirectory()
-        let lock = try CacheLock(identityDirectory: store.directory)
+        let collectionRoot = URL(fileURLWithPath: root, isDirectory: true)
+        let collectionLock = try CacheLock.collection(collectionRoot: collectionRoot)
+        defer { try? collectionLock.release() }
+        afterCollectionLockAcquired(collectionRoot)
+        try collectionLock.validateDirectoryIdentity()
+        guard let identity = try claimIdentityDirectory(collectionLock, compatibilityID, true)
+        else { throw PreparedCacheError.unsafeCachePath }
+        let lock = try CacheLock(
+            identityDirectory: store.directory, expectedDirectoryIdentity: identity)
         defer { try? lock.release() }
+        afterIdentityLockAcquired(store.directory)
+        try lock.validateDirectoryIdentity()
         let custodyRuntime = try makeCustodyRuntime(store: store)
         defer { custodyRuntime?.monitor.cancel() }
-        let observedLauncher = ObservedBuildCountingLauncher(
-            base: commandLauncher(custodyRuntime: custodyRuntime)
-        )
-        let commandLauncher: any ProcessLaunching = observedLauncher
         let recovery = CacheRecovery(
             identityDirectory: store.directory,
-            collectionRoot: URL(fileURLWithPath: root, isDirectory: true)
+            collectionRoot: collectionRoot
         )
+        try lock.validateDirectoryIdentity()
         var previousProduct = try? store.load().productManifestSHA256
         if let currentProduct = previousProduct {
             do {
-                _ = try recovery.recover(expectedProductManifestSHA256: currentProduct)
+                try lock.validateDirectoryIdentity()
+                guard try recovery.recover(expectedProductManifestSHA256: currentProduct) == .ready,
+                    try RetainedProductManifest.sha256(derivedDataURL: store.derivedDataURL) == currentProduct
+                else { throw PreparedCacheError.productManifestMismatch }
             } catch PreparedCacheError.productManifestMismatch {
+                try lock.validateDirectoryIdentity()
                 try recovery.invalidateDivergentPreparedBuild()
                 previousProduct = nil
             }
         }
+        try lock.validateDirectoryIdentity()
         try recovery.writeRetentionMetadata(lastUsedAt: Date())
-        _ = try CacheRetention(collectionRoot: URL(fileURLWithPath: root, isDirectory: true)).enforce()
+        _ = try CacheRetention(collectionRoot: collectionRoot).enforce()
+        try collectionLock.validateDirectoryIdentity()
+        try lock.validateDirectoryIdentity()
         try recovery.markDirty(previousReadyProductManifestSHA256: previousProduct)
+        let observedLauncher = ObservedBuildCountingLauncher(
+            base: commandLauncher(custodyRuntime: custodyRuntime),
+            countBuildForTestingAsIncremental: previousProduct != nil
+        )
+        let commandLauncher: any ProcessLaunching = observedLauncher
         var evidenceWritten = false
         defer {
             let scrubbed = (try? recovery.scrubAfterCommand()) != nil
@@ -335,8 +392,8 @@ struct PreparedBuildCoordinator: Sendable {
                         runOrdinal: nil,
                         attemptOrdinal: nil,
                         productManifestSHA256: previousProduct,
-                        fullBuilds: observedLauncher.buildForTestingAttempts,
-                        incrementalBuilds: 0,
+                        fullBuilds: observedLauncher.fullBuildAttempts,
+                        incrementalBuilds: observedLauncher.incrementalBuildAttempts,
                         fallbackBuilds: 0,
                         sourceBearingBytesScrubbed: scrubbed,
                         childGroupsQuiescent: quiescent
@@ -345,6 +402,7 @@ struct PreparedBuildCoordinator: Sendable {
         }
 
         do {
+            try lock.validateDirectoryIdentity()
             let sourceRoot = try Self.canonicalSourceRoot(configuration.projectPath)
             let projectURL = try ProjectInputMaterializer(
                 sourceRoot: sourceRoot,
@@ -356,6 +414,7 @@ struct PreparedBuildCoordinator: Sendable {
                 supportFileContent: input.supportFileContent
             )
             let sandbox = Sandbox(rootURL: projectURL)
+            try lock.validateDirectoryIdentity()
             let artifact = try await BuildStage(launcher: commandLauncher).build(
                 sandbox: sandbox,
                 scheme: scheme,
@@ -370,21 +429,30 @@ struct PreparedBuildCoordinator: Sendable {
                 timeout: configuration.build.timeout,
                 outputURL: URL(fileURLWithPath: enumerationOutput)
             )
+            try lock.validateDirectoryIdentity()
             let productManifestSHA256 = try RetainedProductManifest.sha256(derivedDataURL: store.derivedDataURL)
+            try collectionLock.validateDirectoryIdentity()
+            try lock.validateDirectoryIdentity()
             try store.save(
                 PreparedBuildState(
                     sandboxPath: sandbox.rootURL.path,
                     derivedDataPath: artifact.derivedDataPath,
                     xctestrunPath: xctestrunURL.path,
                     productManifestSHA256: productManifestSHA256,
-                    inventory: inventory
+                    projectInputManifestSHA256: manifestHash,
+                    preparedInventorySHA256: inventoryHash
                 )
             )
             try writeJSON(inventory, to: inventoryOutput)
+            try collectionLock.validateDirectoryIdentity()
+            try lock.validateDirectoryIdentity()
             try recovery.markReady(productManifestSHA256: productManifestSHA256)
+            try lock.validateDirectoryIdentity()
             try recovery.writeRetentionMetadata(lastUsedAt: Date())
             try custodyRuntime?.monitor.checkFailure()
             try Self.requireCustodyQuiescence(custodyRuntime)
+            try collectionLock.validateDirectoryIdentity()
+            try lock.validateDirectoryIdentity()
             try writeEvidence(
                 CacheEvidence(
                     schemaVersion: 1,
@@ -397,8 +465,8 @@ struct PreparedBuildCoordinator: Sendable {
                     runOrdinal: nil,
                     attemptOrdinal: nil,
                     productManifestSHA256: productManifestSHA256,
-                    fullBuilds: observedLauncher.buildForTestingAttempts,
-                    incrementalBuilds: 0,
+                    fullBuilds: observedLauncher.fullBuildAttempts,
+                    incrementalBuilds: observedLauncher.incrementalBuildAttempts,
                     fallbackBuilds: 0,
                     sourceBearingBytesScrubbed: true,
                     childGroupsQuiescent: Self.custodyIsQuiescent(custodyRuntime)
@@ -427,28 +495,48 @@ struct PreparedBuildCoordinator: Sendable {
         else { throw UsageError(message: "prepared targets currently require an Xcode project and selector") }
 
         let store = PreparedBuildStore(root: root, compatibilityID: compatibilityID)
-        let lock = try CacheLock(identityDirectory: store.directory)
+        let collectionRoot = URL(fileURLWithPath: root, isDirectory: true)
+        let collectionLock = try CacheLock.collection(collectionRoot: collectionRoot)
+        defer { try? collectionLock.release() }
+        afterCollectionLockAcquired(collectionRoot)
+        try collectionLock.validateDirectoryIdentity()
+        guard let identity = try claimIdentityDirectory(collectionLock, compatibilityID, false)
+        else { throw PreparedBuildError.preparedBuildMissing }
+        let lock = try CacheLock(
+            identityDirectory: store.directory, expectedDirectoryIdentity: identity)
         defer { try? lock.release() }
+        afterIdentityLockAcquired(store.directory)
+        try collectionLock.validateDirectoryIdentity()
+        try lock.validateDirectoryIdentity()
         let custodyRuntime = try makeCustodyRuntime(store: store)
         defer { custodyRuntime?.monitor.cancel() }
         let observedLauncher = ObservedBuildCountingLauncher(
             base: commandLauncher(custodyRuntime: custodyRuntime), countAsFallback: true
         )
         let commandLauncher: any ProcessLaunching = observedLauncher
+        try lock.validateDirectoryIdentity()
         let state = try store.load()
         let recovery = CacheRecovery(
             identityDirectory: store.directory,
-            collectionRoot: URL(fileURLWithPath: root, isDirectory: true)
+            collectionRoot: collectionRoot
         )
+        try lock.validateDirectoryIdentity()
         guard try recovery.recover(expectedProductManifestSHA256: state.productManifestSHA256) == .ready,
             try RetainedProductManifest.sha256(derivedDataURL: store.derivedDataURL) == state.productManifestSHA256
         else { throw PreparedCacheError.productManifestMismatch }
         let currentManifestHash = try sha256(at: manifestPath)
-        guard currentManifestHash == state.inventory.projectInputManifestSHA256 else {
+        guard currentManifestHash == state.projectInputManifestSHA256 else {
             throw PreparedBuildError.inventoryMismatch
         }
-        try state.inventory.validate(mutants: input.mutants, projectRoot: configuration.projectPath)
-        let inventoryHash = try state.inventory.sha256
+        let inventory = try PreparedMutantInventory(
+            projectRoot: configuration.projectPath,
+            projectInputManifestSHA256: currentManifestHash,
+            mutants: input.mutants
+        )
+        let inventoryHash = try inventory.sha256
+        guard inventoryHash == state.preparedInventorySHA256 else {
+            throw PreparedBuildError.inventoryMismatch
+        }
         let selection = try MutantSelectionManifest.load(from: selectionPath)
         guard selection.projectInputManifestSHA256 == currentManifestHash else {
             throw PreparedBuildError.selectionMismatch
@@ -456,9 +544,9 @@ struct PreparedBuildCoordinator: Sendable {
         let paths = try selection.validatedSourcePaths(
             selector: selector,
             inventorySHA256: inventoryHash,
-            inventorySourcePaths: state.inventory.mutants.map(\.sourcePath)
+            inventorySourcePaths: inventory.mutants.map(\.sourcePath)
         )
-        let selected = state.inventory.selectValidated(
+        let selected = inventory.selectValidated(
             mutants: input.mutants,
             ownedSourcePaths: paths
         )
@@ -488,8 +576,12 @@ struct PreparedBuildCoordinator: Sendable {
             }
         }
         if selected.isEmpty {
+            try collectionLock.validateDirectoryIdentity()
+            try lock.validateDirectoryIdentity()
             try recovery.writeRetentionMetadata(lastUsedAt: Date())
             try Self.requireCustodyQuiescence(custodyRuntime)
+            try collectionLock.validateDirectoryIdentity()
+            try lock.validateDirectoryIdentity()
             try writeEvidence(
                 targetEvidence(
                     compatibilityID: compatibilityID,
@@ -504,6 +596,7 @@ struct PreparedBuildCoordinator: Sendable {
             evidenceWritten = true
             return []
         }
+        try lock.validateDirectoryIdentity()
         let sourceRoot = try Self.canonicalSourceRoot(configuration.projectPath)
         let projectURL = try ProjectInputMaterializer(
             sourceRoot: sourceRoot,
@@ -516,6 +609,7 @@ struct PreparedBuildCoordinator: Sendable {
         )
         var scrubbed = false
         defer { if !scrubbed { try? recovery.recordMutationOrTestFailure() } }
+        try lock.validateDirectoryIdentity()
         let xctestrunURL = URL(fileURLWithPath: state.xctestrunPath)
         guard let plist = XCTestRunPlist(try Data(contentsOf: xctestrunURL)) else {
             throw PreparedBuildError.preparedBuildMissing
@@ -530,6 +624,8 @@ struct PreparedBuildCoordinator: Sendable {
             supportFileContent: input.supportFileContent,
             mutants: selected
         )
+        try collectionLock.validateDirectoryIdentity()
+        try lock.validateDirectoryIdentity()
         let results = try await MutantExecutor(configuration: configuration, launcher: commandLauncher).executePrepared(
             selectedInput,
             sandbox: Sandbox(rootURL: projectURL),
@@ -539,11 +635,16 @@ struct PreparedBuildCoordinator: Sendable {
                 plist: plist
             )
         )
+        try collectionLock.validateDirectoryIdentity()
+        try lock.validateDirectoryIdentity()
         try recovery.recordMutationOrTestFailure()
         scrubbed = true
+        try lock.validateDirectoryIdentity()
         try recovery.writeRetentionMetadata(lastUsedAt: Date())
         try custodyRuntime?.monitor.checkFailure()
         try Self.requireCustodyQuiescence(custodyRuntime)
+        try collectionLock.validateDirectoryIdentity()
+        try lock.validateDirectoryIdentity()
         try writeEvidence(
             targetEvidence(
                 compatibilityID: compatibilityID,
@@ -559,17 +660,40 @@ struct PreparedBuildCoordinator: Sendable {
         return results
     }
 
-    static func recover(options: ParsedArguments.CacheOptions, enableCustody: Bool = true) throws {
+    static func recover(
+        options: ParsedArguments.CacheOptions,
+        enableCustody: Bool = true,
+        retentionPolicy: CacheRetentionPolicy = CacheRetentionPolicy(),
+        afterCollectionLockAcquired: @Sendable (URL) -> Void = { _ in },
+        beforeAbsentEvidence: @Sendable () -> Void = {}
+    ) throws {
         guard let root = options.buildCacheRoot, let compatibilityID = options.compatibilityID else {
             throw UsageError(message: "cache recovery requires a root and compatibility ID")
         }
         let store = PreparedBuildStore(root: root, compatibilityID: compatibilityID)
-        guard FileManager.default.fileExists(atPath: store.directory.path) else {
+        let collectionRoot = URL(fileURLWithPath: root, isDirectory: true)
+        let collectionLock = try CacheLock.collection(collectionRoot: collectionRoot)
+        defer { try? collectionLock.release() }
+        afterCollectionLockAcquired(collectionRoot)
+        try collectionLock.validateDirectoryIdentity()
+        guard
+            let identity = try collectionLock.identityDirectory(
+                named: compatibilityID, createIfMissing: false)
+        else {
+            _ = try CacheRetention(collectionRoot: collectionRoot, policy: retentionPolicy).enforce()
+            try collectionLock.validateDirectoryIdentity()
+            beforeAbsentEvidence()
+            try collectionLock.validateDirectoryIdentity()
+            guard try !CacheDeleteTree.entryExists(store.directory, containedIn: collectionRoot) else {
+                throw PreparedCacheError.unsafeCachePath
+            }
             try writeRecoveryEvidence(options: options, outcome: "absent", state: nil)
             return
         }
-        let lock = try CacheLock(identityDirectory: store.directory)
+        let lock = try CacheLock(
+            identityDirectory: store.directory, expectedDirectoryIdentity: identity)
         defer { try? lock.release() }
+        try lock.validateDirectoryIdentity()
         let registry = store.directory.appendingPathComponent("process-custody.json")
         let custody = enableCustody ? try ProcessCustody.system(registrationURL: registry) : nil
         let monitor = try custody.flatMap { custody in
@@ -578,13 +702,25 @@ struct PreparedBuildCoordinator: Sendable {
         defer { monitor?.cancel() }
         let recovery = CacheRecovery(
             identityDirectory: store.directory,
-            collectionRoot: URL(fileURLWithPath: root, isDirectory: true)
+            collectionRoot: collectionRoot
         )
         try custody?.handleEngineTermination()
+        try collectionLock.validateDirectoryIdentity()
+        try lock.validateDirectoryIdentity()
         let expected = (try? store.load().productManifestSHA256) ?? String(repeating: "0", count: 64)
+        try collectionLock.validateDirectoryIdentity()
+        try lock.validateDirectoryIdentity()
         let outcome = try recovery.recover(expectedProductManifestSHA256: expected)
-        if outcome == .ready { try recovery.writeRetentionMetadata(lastUsedAt: Date()) }
+        try collectionLock.validateDirectoryIdentity()
+        try lock.validateDirectoryIdentity()
+        try recovery.writeRetentionMetadata(lastUsedAt: Date())
+        _ = try CacheRetention(
+            collectionRoot: collectionRoot,
+            policy: retentionPolicy
+        ).enforce()
         try monitor?.checkFailure()
+        try collectionLock.validateDirectoryIdentity()
+        try lock.validateDirectoryIdentity()
         try writeRecoveryEvidence(
             options: options,
             outcome: String(describing: outcome),
@@ -670,7 +806,7 @@ struct PreparedBuildCoordinator: Sendable {
                 outcome: outcome,
                 compatibilitySHA256: compatibilityID,
                 projectInputManifestSHA256: projectDigest,
-                preparedInventorySHA256: try state?.inventory.sha256,
+                preparedInventorySHA256: state?.preparedInventorySHA256,
                 runOrdinal: nil,
                 attemptOrdinal: nil,
                 productManifestSHA256: state?.productManifestSHA256,
