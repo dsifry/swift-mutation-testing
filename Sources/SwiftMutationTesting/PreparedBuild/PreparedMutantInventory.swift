@@ -9,8 +9,8 @@ enum PreparedBuildError: Error, Equatable {
     case preparedBuildMissing
 }
 
-struct PreparedMutantInventory: Codable, Equatable, Sendable {
-    struct Row: Codable, Equatable, Sendable {
+struct PreparedMutantInventory: Encodable, Equatable, Sendable {
+    struct Row: Encodable, Equatable, Sendable {
         let id: String
         let sourcePath: String
         let sourceUTF8Offset: Int
@@ -44,20 +44,6 @@ struct PreparedMutantInventory: Codable, Equatable, Sendable {
         guard try Self.rows(projectRoot: projectRoot, mutants: current) == mutants else {
             throw PreparedBuildError.inventoryMismatch
         }
-    }
-
-    func validatePersisted() throws {
-        guard schemaVersion == 1,
-            CachePathGuard.isLowercaseHexDigest(projectInputManifestSHA256),
-            Set(mutants.map(\.id)).count == mutants.count,
-            mutants.allSatisfy({ row in
-                !row.id.isEmpty && !row.sourcePath.isEmpty
-                    && row.sourcePath == CachePathGuard.normalizeRelativePath(row.sourcePath)
-                    && !row.sourcePath.split(separator: "/").contains("..")
-                    && row.sourceUTF8Offset >= 0 && !row.operatorIdentifier.isEmpty
-                    && CachePathGuard.isLowercaseHexDigest(row.replacementBytesSHA256)
-            })
-        else { throw PreparedBuildError.inventoryMismatch }
     }
 
     func select(

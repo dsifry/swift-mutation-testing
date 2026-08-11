@@ -2,6 +2,12 @@ import Darwin
 import Foundation
 
 struct ProcessRunner: Sendable {
+    private static let launchGateChildDescriptor: Int32 = 3
+
+    private struct SpawnedProcess: Sendable {
+        let pid: Int32
+        let launchGateDescriptor: Int32?
+    }
     typealias SpawnInitializer =
         @Sendable (
             UnsafeMutablePointer<posix_spawn_file_actions_t?>,
@@ -14,6 +20,16 @@ struct ProcessRunner: Sendable {
             Int32,
             String
         ) -> Bool
+    typealias LaunchGateCreator =
+        @Sendable (UnsafeMutablePointer<posix_spawn_file_actions_t?>) -> (read: Int32, write: Int32)?
+    typealias ProcessSpawner =
+        @Sendable (
+            UnsafeMutablePointer<pid_t>, String,
+            UnsafePointer<posix_spawn_file_actions_t?>,
+            UnsafePointer<posix_spawnattr_t?>,
+            UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>,
+            UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+        ) -> Int32
 
     var processDidStart: (@Sendable (Int32) throws -> Void)?
     var postTerminationCleanup: (@Sendable (Int32) throws -> Void)?
@@ -32,6 +48,10 @@ struct ProcessRunner: Sendable {
     var captureRoot: URL?
     var initializeSpawn: SpawnInitializer
     var configureSpawn: SpawnConfigurator
+    var createLaunchGate: LaunchGateCreator
+    var spawnProcess: ProcessSpawner
+    /// The injected operation owns and closes the supplied descriptor on every result.
+    var releaseLaunchGate: @Sendable (Int32) -> Bool
 
     init(
         processDidStart: (@Sendable (Int32) throws -> Void)? = nil,
@@ -52,7 +72,13 @@ struct ProcessRunner: Sendable {
             configureSpawnResources(
                 actions: actions, attributes: attributes, output: output, directory: directory
             )
-        }
+        },
+        createLaunchGate: @escaping LaunchGateCreator = { makeLaunchGate(actions: $0) },
+        // swiftlint:disable:next closure_parameter_position
+        spawnProcess: @escaping ProcessSpawner = { pid, path, actions, attributes, arguments, environment in
+            posix_spawn(pid, path, actions, attributes, arguments, environment)
+        },
+        releaseLaunchGate: @escaping @Sendable (Int32) -> Bool = { releaseLaunchGateDescriptor($0) }
     ) {
         self.processDidStart = processDidStart
         self.postTerminationCleanup = postTerminationCleanup
@@ -65,6 +91,9 @@ struct ProcessRunner: Sendable {
         self.captureRoot = captureRoot
         self.initializeSpawn = initializeSpawn
         self.configureSpawn = configureSpawn
+        self.createLaunchGate = createLaunchGate
+        self.spawnProcess = spawnProcess
+        self.releaseLaunchGate = releaseLaunchGate
     }
 
     final class KilledByUsFlag: @unchecked Sendable {
@@ -84,14 +113,14 @@ struct ProcessRunner: Sendable {
         let nullDescriptor = openNullDescriptor()
         guard nullDescriptor >= 0 else { throw PreparedCacheError.unverifiableProcessIdentity }
         defer { close(nullDescriptor) }
-        let pid = try spawn(
+        let process = try spawn(
             executableURL: executableURL,
             arguments: arguments,
             environment: nil,
             workingDirectoryURL: workingDirectoryURL,
             outputDescriptor: nullDescriptor
         )
-        return try await supervise(pid: pid, timeout: timeout) { status in status }
+        return try await supervise(process: process, timeout: timeout) { status in status }
     }
 
     func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
@@ -120,14 +149,14 @@ struct ProcessRunner: Sendable {
                 for (key, value) in request.additionalEnvironment { merged[key] = value }
                 environment = merged
             }
-            let pid = try spawn(
+            let process = try spawn(
                 executableURL: request.executableURL,
                 arguments: request.arguments,
                 environment: environment,
                 workingDirectoryURL: request.workingDirectoryURL,
                 outputDescriptor: captureDescriptor
             )
-            let exitCode = try await supervise(pid: pid, timeout: request.timeout) { status in status }
+            let exitCode = try await supervise(process: process, timeout: request.timeout) { status in status }
             guard let output = readCaptureDescriptor(captureDescriptor) else {
                 throw PreparedCacheError.unsafeCachePath
             }
@@ -151,11 +180,18 @@ struct ProcessRunner: Sendable {
     }
 
     private func supervise<T: Sendable>(
-        pid: Int32,
+        process: SpawnedProcess,
         timeout: Double,
         transform: @escaping @Sendable (Int32) -> T
     ) async throws -> T {
+        let pid = process.pid
+        var launchGateDescriptor = process.launchGateDescriptor
+        defer {
+            if let descriptor = launchGateDescriptor { _ = close(descriptor) }
+        }
         guard establishProcessGroup(pid) else {
+            if let descriptor = launchGateDescriptor { _ = close(descriptor) }
+            launchGateDescriptor = nil
             terminateDirectProcess(pid)
             _ = waitForExit(pid)
             throw PreparedCacheError.unverifiableProcessIdentity
@@ -163,9 +199,20 @@ struct ProcessRunner: Sendable {
         do {
             try processDidStart?(pid)
         } catch {
+            if let descriptor = launchGateDescriptor { _ = close(descriptor) }
+            launchGateDescriptor = nil
             _ = kill(-pid, SIGKILL)
             _ = waitForExit(pid)
             throw error
+        }
+        if let descriptor = launchGateDescriptor {
+            guard releaseLaunchGate(descriptor) else {
+                launchGateDescriptor = nil
+                _ = kill(-pid, SIGKILL)
+                _ = waitForExit(pid)
+                throw PreparedCacheError.unverifiableProcessIdentity
+            }
+            launchGateDescriptor = nil
         }
         let killedByUs = KilledByUsFlag()
         return try await withTaskCancellationHandler {
@@ -199,7 +246,7 @@ struct ProcessRunner: Sendable {
         environment: [String: String]?,
         workingDirectoryURL: URL,
         outputDescriptor: Int32
-    ) throws -> Int32 {
+    ) throws -> SpawnedProcess {
         var actions: posix_spawn_file_actions_t?
         var attributes: posix_spawnattr_t?
         guard initializeSpawn(&actions, &attributes) else {
@@ -213,7 +260,31 @@ struct ProcessRunner: Sendable {
             throw PreparedCacheError.unverifiableProcessIdentity
         }
 
-        let argv = ([executableURL.path] + arguments).map { strdup($0) } + [nil]
+        var gateDescriptors: [Int32] = [-1, -1]
+        let usesLaunchGate = processDidStart != nil
+        if usesLaunchGate {
+            guard access(executableURL.path, X_OK) == 0 else {
+                throw CocoaError(.executableNotLoadable)
+            }
+            guard let descriptors = createLaunchGate(&actions) else {
+                throw PreparedCacheError.unverifiableProcessIdentity
+            }
+            gateDescriptors = [descriptors.read, descriptors.write]
+        }
+        defer {
+            if gateDescriptors[0] >= 0 { _ = close(gateDescriptors[0]) }
+        }
+
+        let launchExecutable = usesLaunchGate ? URL(fileURLWithPath: "/bin/sh") : executableURL
+        let launchArguments =
+            usesLaunchGate
+            ? [
+                "-c", "IFS= read -r _ <&3 || exit 125; exec 3<&-; exec \"$@\"",
+                "custody-launch", executableURL.path,
+            ]
+                + arguments
+            : arguments
+        let argv = ([launchExecutable.path] + launchArguments).map { strdup($0) } + [nil]
         let environmentValues = (environment ?? ProcessInfo.processInfo.environment)
             .map { "\($0.key)=\($0.value)" }
             .sorted()
@@ -225,9 +296,9 @@ struct ProcessRunner: Sendable {
         var pid: pid_t = 0
         let result = argv.withUnsafeBufferPointer { argvBuffer in
             envp.withUnsafeBufferPointer { envBuffer in
-                posix_spawn(
+                spawnProcess(
                     &pid,
-                    executableURL.path,
+                    launchExecutable.path,
                     &actions,
                     &attributes,
                     UnsafeMutablePointer(mutating: argvBuffer.baseAddress!),
@@ -236,10 +307,13 @@ struct ProcessRunner: Sendable {
             }
         }
         guard result == 0, pid > 0 else {
+            if gateDescriptors[1] >= 0 { _ = close(gateDescriptors[1]) }
             errno = result
             throw CocoaError(.executableNotLoadable)
         }
-        return pid
+        return SpawnedProcess(
+            pid: pid,
+            launchGateDescriptor: usesLaunchGate ? gateDescriptors[1] : nil)
     }
 
     static func openPrivateCaptureFile(
@@ -267,6 +341,44 @@ struct ProcessRunner: Sendable {
             return -1
         }
         return descriptor
+    }
+
+    static func makeLaunchGate(
+        actions: UnsafeMutablePointer<posix_spawn_file_actions_t?>,
+        createPipe: (UnsafeMutablePointer<Int32>) -> Int32 = { pipe($0) },
+        setCloseOnExec: (Int32) -> Int32 = { fcntl($0, F_SETFD, FD_CLOEXEC) },
+        addDuplicate: (UnsafeMutablePointer<posix_spawn_file_actions_t?>, Int32, Int32) -> Int32 = {
+            posix_spawn_file_actions_adddup2($0, $1, $2)
+        },
+        closeFile: (Int32) -> Void = { _ = close($0) }
+    ) -> (read: Int32, write: Int32)? {
+        var descriptors: [Int32] = [-1, -1]
+        guard descriptors.withUnsafeMutableBufferPointer({ createPipe($0.baseAddress!) }) == 0 else {
+            return nil
+        }
+        func abort() -> (read: Int32, write: Int32)? {
+            closeFile(descriptors[0])
+            closeFile(descriptors[1])
+            return nil
+        }
+        guard setCloseOnExec(descriptors[0]) == 0 else { return abort() }
+        guard setCloseOnExec(descriptors[1]) == 0 else { return abort() }
+        guard addDuplicate(actions, descriptors[0], launchGateChildDescriptor) == 0 else { return abort() }
+        return (descriptors[0], descriptors[1])
+    }
+
+    static func releaseLaunchGateDescriptor(
+        _ descriptor: Int32,
+        writeByte: (Int32, UnsafeRawPointer, Int) -> Int = { Darwin.write($0, $1, $2) },
+        closeFile: (Int32) -> Int32 = { close($0) }
+    ) -> Bool {
+        var start: UInt8 = 0x0A
+        var writeResult: Int
+        repeat {
+            writeResult = writeByte(descriptor, &start, 1)
+        } while writeResult == -1 && errno == EINTR
+        let closeResult = closeFile(descriptor)
+        return writeResult == 1 && closeResult == 0
     }
 
     static func captureDirectory(

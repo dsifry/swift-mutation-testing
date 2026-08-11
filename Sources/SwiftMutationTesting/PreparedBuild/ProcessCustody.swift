@@ -91,9 +91,10 @@ final class ProcessCustody: @unchecked Sendable {
             status = { SystemProcessIdentity.status(of: $0) }
         }
         let registered =
-            FileManager.default.fileExists(atPath: registrationURL.path)
-            ? try readRegisteredGroups(from: registrationURL) : []
-        return ProcessCustody(
+            try CacheDeleteTree.entryExists(
+                registrationURL, containedIn: registrationURL.deletingLastPathComponent())
+            ? readRegisteredGroups(from: registrationURL) : []
+        let custody = ProcessCustody(
             registrationURL: registrationURL,
             registeredGroups: registered,
             verifyIdentity: { status($0) == .matching },
@@ -138,6 +139,11 @@ final class ProcessCustody: @unchecked Sendable {
                 return false
             }
         )
+        if registered != canonicalGroups(registered) {
+            custody.groups = canonicalGroups(registered)
+            try custody.persistRegistry()
+        }
+        return custody
     }
 
     var isQuiescent: Bool {
@@ -158,6 +164,7 @@ final class ProcessCustody: @unchecked Sendable {
                 })
             else { throw PreparedCacheError.unverifiableProcessIdentity }
             groups.append(group)
+            groups = Self.canonicalGroups(groups)
             try persistRegistry()
         }
     }
@@ -227,9 +234,18 @@ final class ProcessCustody: @unchecked Sendable {
         let groups = try JSONDecoder().decode([CustodiedProcessGroup].self, from: data)
         guard groups.count <= maximumTrackedProcessGroups,
             groups.allSatisfy({ $0.pid > 0 && $0.processGroupID > 0 && !$0.birthIdentity.isEmpty }),
-            Set(groups.map(\.pid)).count == groups.count
+            Set(groups.map(\.pid)).count == groups.count,
+            Set(groups.map(\.processGroupID)).count == groups.count
         else { throw PreparedCacheError.invalidCacheState }
         return groups
+    }
+
+    private static func canonicalGroups(
+        _ groups: [CustodiedProcessGroup]
+    ) -> [CustodiedProcessGroup] {
+        groups.sorted { left, right in
+            left.processGroupID < right.processGroupID
+        }
     }
 
     private func persistRegistry() throws {
