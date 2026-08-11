@@ -343,15 +343,12 @@ struct CacheRetentionTests {
         _ = try CacheRetention(collectionRoot: fixture.root).enforce(now: now)
     }
 
-    @Test("Descriptor-relative deletion fails closed on syscall failures and entry replacement")
-    func descriptorDeletionFailureTable() throws {
+    @Test("Descriptor syscall adapters report failures without following paths")
+    func descriptorSystemOperationFailures() throws {
         let fixture = try RetentionFixture()
         defer { fixture.cleanup() }
         let directory = try fixture.identity("d", bytes: 1, lastUsed: Date())
         let file = directory.appendingPathComponent("retention.json")
-        let emptyDirectory = fixture.root.appendingPathComponent("empty")
-        try FileManager.default.createDirectory(at: emptyDirectory, withIntermediateDirectories: false)
-        chmod(emptyDirectory.path, 0o700)
 
         #expect(CacheDeleteTreeOperations.system.metadataAt(-1, "missing") == nil)
         #expect(CacheDeleteTreeOperations.system.metadataOf(-1) == nil)
@@ -384,6 +381,14 @@ struct CacheRetentionTests {
                 closeDirectory: { _ in -1 }
             ) == nil
         )
+    }
+
+    @Test("Descriptor validation fails closed on missing metadata and child access")
+    func descriptorValidationFailures() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let directory = try fixture.identity("d", bytes: 1, lastUsed: Date())
+        let file = directory.appendingPathComponent("retention.json")
 
         var operations = CacheDeleteTreeOperations.system
         operations.openParent = { _ in -1 }
@@ -456,8 +461,20 @@ struct CacheRetentionTests {
         #expect(throws: PreparedCacheError.unsafeCachePath) {
             try CacheDeleteTree.byteSize(directory, containedIn: fixture.root, operations: operations)
         }
+    }
 
-        operations = .system
+    @Test("Descriptor deletion rejects unlink failures and entry replacement")
+    func descriptorRemovalRaceFailures() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let directory = try fixture.identity("d", bytes: 1, lastUsed: Date())
+        let file = directory.appendingPathComponent("retention.json")
+        let emptyDirectory = fixture.root.appendingPathComponent("empty")
+        try FileManager.default.createDirectory(at: emptyDirectory, withIntermediateDirectories: false)
+        chmod(emptyDirectory.path, 0o700)
+
+        var operations = CacheDeleteTreeOperations.system
+        let systemMetadataAt = operations.metadataAt
         operations.unlinkEntry = { _, _, _ in -1 }
         #expect(throws: PreparedCacheError.unsafeCachePath) {
             try CacheDeleteTree.removeDirectory(

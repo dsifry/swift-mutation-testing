@@ -348,33 +348,60 @@ enum CacheDeleteTree {
         }
         let kind = before.st_mode & S_IFMT
         if kind == S_IFDIR {
-            let child = operations.openChild(parentDescriptor, name)
-            guard child >= 0 else { throw PreparedCacheError.unsafeCachePath }
-            defer { _ = operations.closeDescriptor(child) }
-            guard let opened = operations.metadataOf(child), sameIdentity(before, opened) else {
+            return try inspectDirectory(
+                parentDescriptor: parentDescriptor, name: name, before: before,
+                remove: remove, rejectHardlinks: rejectHardlinks, operations: operations)
+        }
+        return try inspectLeaf(
+            parentDescriptor: parentDescriptor, name: name, before: before, kind: kind,
+            remove: remove, rejectHardlinks: rejectHardlinks, operations: operations)
+    }
+
+    private static func inspectDirectory(
+        parentDescriptor: Int32,
+        name: String,
+        before: stat,
+        remove: Bool,
+        rejectHardlinks: Bool,
+        operations: CacheDeleteTreeOperations
+    ) throws -> Int64 {
+        let child = operations.openChild(parentDescriptor, name)
+        guard child >= 0 else { throw PreparedCacheError.unsafeCachePath }
+        defer { _ = operations.closeDescriptor(child) }
+        guard let opened = operations.metadataOf(child), sameIdentity(before, opened) else {
+            throw PreparedCacheError.unsafeCachePath
+        }
+        guard let names = operations.childNames(child) else { throw PreparedCacheError.unsafeCachePath }
+        var total: Int64 = 0
+        for entryName in names {
+            total += try inspectEntry(
+                parentDescriptor: child, name: entryName, remove: remove,
+                rejectHardlinks: rejectHardlinks, expectedIdentity: nil,
+                operations: operations)
+        }
+        if remove {
+            guard let current = operations.metadataAt(parentDescriptor, name) else {
                 throw PreparedCacheError.unsafeCachePath
             }
-            guard let names = operations.childNames(child) else { throw PreparedCacheError.unsafeCachePath }
-            var total: Int64 = 0
-            for entryName in names {
-                total += try inspectEntry(
-                    parentDescriptor: child, name: entryName, remove: remove,
-                    rejectHardlinks: rejectHardlinks, expectedIdentity: nil,
-                    operations: operations)
+            guard sameIdentity(before, current) else {
+                throw PreparedCacheError.unsafeCachePath
             }
-            if remove {
-                guard let current = operations.metadataAt(parentDescriptor, name) else {
-                    throw PreparedCacheError.unsafeCachePath
-                }
-                guard sameIdentity(before, current) else {
-                    throw PreparedCacheError.unsafeCachePath
-                }
-                guard operations.unlinkEntry(parentDescriptor, name, AT_REMOVEDIR) == 0 else {
-                    throw PreparedCacheError.unsafeCachePath
-                }
+            guard operations.unlinkEntry(parentDescriptor, name, AT_REMOVEDIR) == 0 else {
+                throw PreparedCacheError.unsafeCachePath
             }
-            return total
         }
+        return total
+    }
+
+    private static func inspectLeaf(
+        parentDescriptor: Int32,
+        name: String,
+        before: stat,
+        kind: mode_t,
+        remove: Bool,
+        rejectHardlinks: Bool,
+        operations: CacheDeleteTreeOperations
+    ) throws -> Int64 {
         guard kind == S_IFREG || kind == S_IFLNK,
             !rejectHardlinks || kind != S_IFREG || before.st_nlink == 1
         else { throw PreparedCacheError.unsafeCachePath }
