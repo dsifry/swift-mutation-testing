@@ -1,3 +1,4 @@
+import Darwin
 import SwiftMutationTesting
 
-await SwiftMutationTesting.main()
+exit(await SwiftMutationTesting.main())

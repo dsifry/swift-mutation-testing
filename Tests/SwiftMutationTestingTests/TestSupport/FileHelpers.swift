@@ -1,8 +1,11 @@
 import Foundation
 
+@testable import SwiftMutationTesting
+
 struct FileHelpers {
     static func makeTemporaryDirectory() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
+        let url = (CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)
+            ?? FileManager.default.temporaryDirectory)
             .appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url

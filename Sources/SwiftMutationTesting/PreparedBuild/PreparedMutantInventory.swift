@@ -1,0 +1,102 @@
+import CryptoKit
+import Foundation
+
+enum PreparedBuildError: Error, Equatable {
+    case inventoryMismatch
+    case invalidSourcePath
+    case emptySelection
+    case selectionMismatch
+    case preparedBuildMissing
+}
+
+struct PreparedMutantInventory: Codable, Equatable, Sendable {
+    struct Row: Codable, Equatable, Sendable {
+        let id: String
+        let sourcePath: String
+        let sourceUTF8Offset: Int
+        let operatorIdentifier: String
+        let replacementBytesSHA256: String
+    }
+
+    let schemaVersion: Int
+    let projectInputManifestSHA256: String
+    let mutants: [Row]
+
+    init(
+        projectRoot: String,
+        projectInputManifestSHA256: String,
+        mutants: [MutantDescriptor]
+    ) throws {
+        self.schemaVersion = 1
+        self.projectInputManifestSHA256 = projectInputManifestSHA256
+        self.mutants = try Self.rows(projectRoot: projectRoot, mutants: mutants)
+    }
+
+    var sha256: String {
+        get throws {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            return Self.sha256(try encoder.encode(self))
+        }
+    }
+
+    func validate(mutants current: [MutantDescriptor], projectRoot: String) throws {
+        guard try Self.rows(projectRoot: projectRoot, mutants: current) == mutants else {
+            throw PreparedBuildError.inventoryMismatch
+        }
+    }
+
+    func validatePersisted() throws {
+        guard schemaVersion == 1,
+            CachePathGuard.isLowercaseHexDigest(projectInputManifestSHA256),
+            Set(mutants.map(\.id)).count == mutants.count,
+            mutants.allSatisfy({ row in
+                !row.id.isEmpty && !row.sourcePath.isEmpty
+                    && row.sourcePath == CachePathGuard.normalizeRelativePath(row.sourcePath)
+                    && !row.sourcePath.split(separator: "/").contains("..")
+                    && row.sourceUTF8Offset >= 0 && !row.operatorIdentifier.isEmpty
+                    && CachePathGuard.isLowercaseHexDigest(row.replacementBytesSHA256)
+            })
+        else { throw PreparedBuildError.inventoryMismatch }
+    }
+
+    func select(
+        mutants current: [MutantDescriptor],
+        ownedSourcePaths: [String],
+        projectRoot: String
+    ) throws -> [MutantDescriptor] {
+        try validate(mutants: current, projectRoot: projectRoot)
+        return selectValidated(mutants: current, ownedSourcePaths: ownedSourcePaths)
+    }
+
+    func selectValidated(
+        mutants current: [MutantDescriptor],
+        ownedSourcePaths: [String]
+    ) -> [MutantDescriptor] {
+        let owned = Set(ownedSourcePaths.map(CachePathGuard.normalizeRelativePath))
+        let selected = zip(mutants, current).compactMap { row, descriptor in
+            owned.contains(row.sourcePath) ? descriptor : nil
+        }
+        return selected
+    }
+
+    private static func rows(projectRoot: String, mutants: [MutantDescriptor]) throws -> [Row] {
+        let root = URL(fileURLWithPath: projectRoot).standardizedFileURL.path
+        return try mutants.map { mutant in
+            let path = URL(fileURLWithPath: mutant.filePath).standardizedFileURL.path
+            guard path.hasPrefix(root + "/") else { throw PreparedBuildError.invalidSourcePath }
+            return Row(
+                id: mutant.id,
+                sourcePath: CachePathGuard.normalizeRelativePath(String(path.dropFirst(root.count + 1))),
+                sourceUTF8Offset: mutant.utf8Offset,
+                operatorIdentifier: mutant.operatorIdentifier,
+                replacementBytesSHA256: sha256(Data(mutant.mutatedText.utf8))
+            )
+        }
+    }
+
+    private static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+}

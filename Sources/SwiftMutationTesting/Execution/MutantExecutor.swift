@@ -28,6 +28,21 @@ struct MutantExecutor: Sendable {
     }
 
     func execute(_ input: RunnerInput) async throws -> [ExecutionResult] {
+        try await execute(input, prepared: nil)
+    }
+
+    func executePrepared(
+        _ input: RunnerInput,
+        sandbox: Sandbox,
+        artifact: BuildArtifact
+    ) async throws -> [ExecutionResult] {
+        try await execute(input, prepared: (sandbox, artifact))
+    }
+
+    private func execute(
+        _ input: RunnerInput,
+        prepared: (sandbox: Sandbox, artifact: BuildArtifact)?
+    ) async throws -> [ExecutionResult] {
         let reporter: any ProgressReporter =
             configuration.reporting.quiet
             ? SilentProgressReporter()
@@ -46,14 +61,22 @@ struct MutantExecutor: Sendable {
             input: input, hasher: hasher, cacheStore: cacheStore, reporter: reporter
         )
 
-        let sandbox = try await SandboxFactory().create(
-            projectPath: input.projectPath,
-            schematizedFiles: input.schematizedFiles,
-            supportFileContent: input.supportFileContent
-        )
-        SandboxCleaner.register(sandbox)
-
-        let (artifact, schemaBuildExcluded) = try await buildArtifact(sandbox: sandbox, input: input, deps: deps)
+        let sandbox: Sandbox
+        let artifact: BuildArtifact?
+        let schemaBuildExcluded: [MutantDescriptor]
+        if let prepared {
+            sandbox = prepared.sandbox
+            artifact = prepared.artifact
+            schemaBuildExcluded = []
+        } else {
+            sandbox = try await SandboxFactory().create(
+                projectPath: input.projectPath,
+                schematizedFiles: input.schematizedFiles,
+                supportFileContent: input.supportFileContent
+            )
+            SandboxCleaner.register(sandbox)
+            (artifact, schemaBuildExcluded) = try await buildArtifact(sandbox: sandbox, input: input, deps: deps)
+        }
         let pool = try await makePool(launcher: launcher)
         try await pool.setUp()
         await reporter.report(.simulatorPoolReady(size: pool.size))
@@ -72,14 +95,18 @@ struct MutantExecutor: Sendable {
             )
         } catch {
             await pool.tearDown()
-            try? sandbox.cleanup()
-            SandboxCleaner.deregister()
+            if prepared == nil {
+                try? sandbox.cleanup()
+                SandboxCleaner.deregister()
+            }
             throw error
         }
 
         await pool.tearDown()
-        try? sandbox.cleanup()
-        SandboxCleaner.deregister()
+        if prepared == nil {
+            try? sandbox.cleanup()
+            SandboxCleaner.deregister()
+        }
         try await cacheStore.persist()
         try await cacheStore.persistMetadata(metadata)
 
