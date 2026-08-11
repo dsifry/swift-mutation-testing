@@ -352,7 +352,7 @@ struct CommandLineParser: Sendable {
         var seen: [String: String] = [:]
         for (flag, path) in paths {
             guard let path else { continue }
-            let normalized = protocolPathIdentity(path)
+            let normalized = try protocolPathIdentity(path)
             if let previous = seen[normalized] {
                 throw UsageError(message: "\(flag) must not match \(previous)")
             }
@@ -360,10 +360,14 @@ struct CommandLineParser: Sendable {
         }
     }
 
-    private func protocolPathIdentity(_ path: String) -> String {
+    private func protocolPathIdentity(_ path: String) throws -> String {
         var metadata = stat()
         if stat(path, &metadata) == 0 {
             return "inode:\(metadata.st_dev):\(metadata.st_ino)"
+        }
+        var leafMetadata = stat()
+        if lstat(path, &leafMetadata) == 0, leafMetadata.st_mode & S_IFMT == S_IFLNK {
+            throw UsageError(message: "cache protocol paths must not be dangling symbolic links")
         }
         let url = URL(fileURLWithPath: path).standardizedFileURL
         let canonicalParent = url.deletingLastPathComponent().resolvingSymlinksInPath()

@@ -196,6 +196,22 @@ struct CommandLineParserTests {
             ])
         }
 
+        let danglingAlias = root.appendingPathComponent("dangling-result.json")
+        try FileManager.default.createSymbolicLink(
+            at: danglingAlias, withDestinationURL: root.appendingPathComponent("future-result.json"))
+        #expect(throws: UsageError.self) {
+            try parser.parse([
+                "run", "--build-cache-root", root.appendingPathComponent("cache").path,
+                "--cache-compatibility-id", String(repeating: "b", count: 64),
+                "--project-input-manifest", root.appendingPathComponent("inputs.json").path,
+                "--target", "AppTests/test", "--mutant-selection-manifest",
+                root.appendingPathComponent("selection.json").path,
+                "--cache-evidence-output", root.appendingPathComponent("future-result.json").path,
+                "--output", danglingAlias.path,
+                "--no-cache", "--custody-fd", "8", "--invocation-nonce", "ABCDEFGHIJKLMNOPQRSTUV",
+            ])
+        }
+
         let firstExisting = root.appendingPathComponent("existing-result.json")
         let secondExisting = root.appendingPathComponent("hardlinked-result.json")
         try Data().write(to: firstExisting)
