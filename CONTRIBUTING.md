@@ -73,6 +73,9 @@ Unapproved structural changes may be closed without review.
 
 ## Testing
 
+For local build, test, fixture, and pre-commit setup, see
+[Building for Contributors](Docs/BUILDING.md).
+
 - Unit tests are mandatory for all new functionality
 - Use Swift Testing (`@Suite`, `@Test`) with Given/When/Then naming
 - Use a mock conforming to `ProcessLaunching` — never invoke real `xcodebuild`, `xcrun simctl`, or `xcresulttool` in unit tests

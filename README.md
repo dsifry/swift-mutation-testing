@@ -3,8 +3,8 @@
 [![Swift Package Index](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Fericodx%2Fswift-mutation-testing%2Fbadge%3Ftype%3Dswift-versions)](https://swiftpackageindex.com/ericodx/swift-mutation-testing)
 [![Swift Package Index](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Fericodx%2Fswift-mutation-testing%2Fbadge%3Ftype%3Dplatforms)](https://swiftpackageindex.com/ericodx/swift-mutation-testing)
 [![CI](https://img.shields.io/github/actions/workflow/status/ericodx/swift-mutation-testing/main-analysis.yml?branch=main&style=flat-square&logo=github&logoColor=white&label=CI&color=4CAF50)](https://github.com/ericodx/swift-mutation-testing/actions)
-[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=deploy-on-friday-swift-mutation-testing&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=deploy-on-friday-swift-mutation-testing)
-[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=deploy-on-friday-swift-mutation-testing&metric=coverage)](https://sonarcloud.io/summary/new_code?id=deploy-on-friday-swift-mutation-testing)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=ericodx-swift-mutation-testing&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=ericodx-swift-mutation-testing)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=ericodx-swift-mutation-testing&metric=coverage)](https://sonarcloud.io/summary/new_code?id=ericodx-swift-mutation-testing)
 
 **Measure and improve test effectiveness in Swift codebases using mutation testing.**
 
@@ -126,6 +126,7 @@ Full reference in the [Usage & Configuration Guide](Docs/USAGE.MD).
 
 | Document | Description |
 |---|---|
+| [Building](Docs/BUILDING.md) | Contributor build, test, fixture, and local hook workflow |
 | [Installation](Docs/INSTALLATION.MD) | Homebrew, pre-built binary, build from source |
 | [Usage & Configuration](Docs/USAGE.MD) | CLI options, YAML config, output formats, CI integration |
 | [Mutation Results](Docs/MUTATION-RESULTS.md) | What each result means and when it occurs; schematizable vs incompatible mutants |
