@@ -6,6 +6,72 @@ import Testing
 
 @Suite("Prepared build store")
 struct PreparedBuildStoreTests {
+    @Test("Cache evidence encodes explicit nulls for absent and failed non-target operations")
+    func cacheEvidenceExplicitNullContract() throws {
+        for (operation, outcome) in [("recover", "absent"), ("prepare", "failed")] {
+            let evidence = CacheEvidence(
+                schemaVersion: 1,
+                invocationNonce: "abcdefghijklmnopqrstuv",
+                operation: operation,
+                outcome: outcome,
+                compatibilitySHA256: String(repeating: "a", count: 64),
+                projectInputManifestSHA256: String(repeating: "b", count: 64),
+                preparedInventorySHA256: nil,
+                runOrdinal: nil,
+                attemptOrdinal: nil,
+                productManifestSHA256: nil,
+                fullBuilds: 0,
+                incrementalBuilds: 0,
+                fallbackBuilds: 0,
+                sourceBearingBytesScrubbed: operation == "prepare",
+                childGroupsQuiescent: true
+            )
+            let data = try JSONEncoder().encode(evidence)
+            let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            #expect(object.count == 15)
+            #expect(object["preparedInventorySHA256"] is NSNull)
+            #expect(object["runOrdinal"] is NSNull)
+            #expect(object["attemptOrdinal"] is NSNull)
+            #expect(object["productManifestSHA256"] is NSNull)
+            #expect(try JSONDecoder().decode(CacheEvidence.self, from: data) == evidence)
+        }
+    }
+
+    @Test("Cache evidence decoding rejects unknown missing and wrongly typed fields")
+    func cacheEvidenceStrictDecodeContract() throws {
+        #expect(CacheEvidenceCodingKey(stringValue: "field")?.intValue == nil)
+        #expect(CacheEvidenceCodingKey(intValue: 7)?.stringValue == "7")
+        let evidence = CacheEvidence(
+            schemaVersion: 1,
+            invocationNonce: "abcdefghijklmnopqrstuv",
+            operation: "recover",
+            outcome: "absent",
+            compatibilitySHA256: String(repeating: "a", count: 64),
+            projectInputManifestSHA256: String(repeating: "b", count: 64),
+            preparedInventorySHA256: nil,
+            runOrdinal: nil,
+            attemptOrdinal: nil,
+            productManifestSHA256: nil,
+            fullBuilds: 0,
+            incrementalBuilds: 0,
+            fallbackBuilds: 0,
+            sourceBearingBytesScrubbed: false,
+            childGroupsQuiescent: true
+        )
+        let original = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(evidence)) as? [String: Any])
+        for mutate in [
+            { (object: inout [String: Any]) in object["unknown"] = true },
+            { (object: inout [String: Any]) in object.removeValue(forKey: "runOrdinal") },
+            { (object: inout [String: Any]) in object["fullBuilds"] = "zero" },
+        ] {
+            var object = original
+            mutate(&object)
+            let data = try JSONSerialization.data(withJSONObject: object)
+            #expect(throws: Error.self) { try JSONDecoder().decode(CacheEvidence.self, from: data) }
+        }
+    }
+
     @Test("Cache evidence encodes the exact v1 contract")
     func cacheEvidenceContract() throws {
         let evidence = CacheEvidence(
@@ -25,7 +91,8 @@ struct PreparedBuildStoreTests {
             sourceBearingBytesScrubbed: true,
             childGroupsQuiescent: true
         )
-        let object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(evidence)) as? [String: Any])
+        let encoded = try JSONEncoder().encode(evidence)
+        let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         #expect(
             Set(object.keys) == [
                 "schemaVersion", "invocationNonce", "operation", "outcome", "compatibilitySHA256",
@@ -33,6 +100,7 @@ struct PreparedBuildStoreTests {
                 "productManifestSHA256", "fullBuilds", "incrementalBuilds", "fallbackBuilds",
                 "sourceBearingBytesScrubbed", "childGroupsQuiescent",
             ])
+        #expect(try JSONDecoder().decode(CacheEvidence.self, from: encoded) == evidence)
         let directory = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!.appendingPathComponent(
             UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
