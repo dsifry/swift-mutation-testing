@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "include": [
+    "Sources/SwiftMutationTesting/PreparedBuild/CacheLock.swift",
+    "Sources/SwiftMutationTesting/PreparedBuild/CacheRecovery.swift",
+    "Sources/SwiftMutationTesting/PreparedBuild/CacheRetention.swift",
+    "Sources/SwiftMutationTesting/PreparedBuild/ProcessCustody.swift",
+    "Sources/SwiftMutationTesting/PreparedBuild/ProjectInputMaterializer.swift",
+    "Sources/SwiftMutationTesting/PreparedBuild/PreparedMutantInventory.swift",
+    "Sources/SwiftMutationTesting/PreparedBuild/MutantSelectionManifest.swift",
+    "Sources/SwiftMutationTesting/PreparedBuild/PreparedBuildStore.swift",
+    "Sources/SwiftMutationTesting/PreparedBuild/PreparedBuildCoordinator.swift",
+    "Sources/SwiftMutationTesting/Infrastructure/ProcessRunner.swift",
+    "Sources/SwiftMutationTesting/Infrastructure/XcodeProcessLauncher.swift",
+    "Sources/SwiftMutationTesting/SwiftMutationTesting.swift"
+  ],
+  "exclude": [],
+  "thresholds": {
+    "lines": 100,
+    "functions": 100,
+    "regions": 100,
+    "conditionalOutcomes": 100
+  }
+}

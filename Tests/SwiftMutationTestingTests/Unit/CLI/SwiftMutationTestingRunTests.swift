@@ -5,6 +5,10 @@ import Testing
 
 @Suite("SwiftMutationTesting.run")
 struct SwiftMutationTestingRunTests {
+    @Test("Main bootstrap returns the command exit status")
+    func mainBootstrap() async {
+        #expect(await SwiftMutationTesting.main(args: ["--help"]) == 0)
+    }
     @Test("Given --help flag, when run called, then returns success")
     func helpFlagReturnsSuccess() async throws {
         let dir = try FileHelpers.makeTemporaryDirectory()
