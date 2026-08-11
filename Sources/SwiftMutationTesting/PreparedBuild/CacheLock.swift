@@ -67,7 +67,11 @@ enum CachePathGuard {
     }
 
     static func isLowercaseHexDigest(_ value: String) -> Bool {
-        value.count == 64 && value.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+        value.utf8.count == 64
+            && value.utf8.allSatisfy { byte in
+                (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(byte)
+                    || (UInt8(ascii: "a") ... UInt8(ascii: "f")).contains(byte)
+            }
     }
 
     static func normalizeRelativePath(_ path: String) -> String {

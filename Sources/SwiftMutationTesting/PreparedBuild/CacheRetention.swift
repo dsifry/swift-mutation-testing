@@ -138,7 +138,11 @@ struct CacheRetention: Sendable {
             at: collectionRoot, includingPropertiesForKeys: nil
         )
         for tombstone in entries where Self.isTombstoneName(tombstone.lastPathComponent) {
-            try CachePathGuard.validateDirectory(tombstone, containedIn: collectionRoot)
+            do {
+                try CachePathGuard.validateDirectory(tombstone, containedIn: collectionRoot)
+            } catch {
+                continue
+            }
             let lock: CacheLock
             do {
                 lock = try CacheLock(identityDirectory: tombstone)
@@ -146,7 +150,11 @@ struct CacheRetention: Sendable {
                 continue
             }
             defer { try? lock.release() }
-            try CachePathGuard.validateOwnedTree(tombstone, containedIn: collectionRoot)
+            do {
+                try CachePathGuard.validateOwnedTree(tombstone, containedIn: collectionRoot)
+            } catch {
+                continue
+            }
             try FileManager.default.removeItem(at: tombstone)
             try syncCollectionRoot()
         }

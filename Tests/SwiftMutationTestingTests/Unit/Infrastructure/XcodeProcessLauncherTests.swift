@@ -227,7 +227,10 @@ struct XcodeProcessLauncherTests {
         var captureCloseFailure = ProcessRunner(
             onTimeout: { _ in },
             createCaptureDescriptor: { ProcessRunner.openPrivateCaptureFile($0) },
-            configureSpawn: { _, _, _, _ in true }
+            configureSpawn: { actions, attributes, output, directory in
+                ProcessRunner.configureSpawnResources(
+                    actions: actions, attributes: attributes, output: output, directory: directory)
+            }
         )
         captureCloseFailure.closeCaptureDescriptor = { descriptor in
             captureCloseCalls.abort(descriptor)

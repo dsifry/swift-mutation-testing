@@ -6,6 +6,12 @@ import Testing
 
 @Suite("Prepared cache retention", .serialized)
 struct CacheRetentionTests {
+    @Test("Prepared cache digests accept only lowercase ASCII hexadecimal")
+    func digestAlphabetIsASCII() {
+        #expect(CachePathGuard.isLowercaseHexDigest(String(repeating: "f", count: 64)))
+        #expect(!CachePathGuard.isLowercaseHexDigest(String(repeating: "ｆ", count: 64)))
+    }
+
     @Test("LRU removes the oldest identity until count and bytes are satisfied")
     func lruCountAndBytes() throws {
         let fixture = try RetentionFixture()
@@ -141,6 +147,37 @@ struct CacheRetentionTests {
         _ = try CacheRetention(collectionRoot: fixture.root).enforce(now: now)
 
         #expect(!FileManager.default.fileExists(atPath: tombstone.path))
+    }
+
+    @Test("An invalid abandoned tombstone cannot block retention of valid identities")
+    func invalidAbandonedTombstoneIsSkipped() throws {
+        let fixture = try RetentionFixture()
+        defer { fixture.cleanup() }
+        let now = Date(timeIntervalSince1970: 4_750_000)
+        let invalidIdentity = try fixture.identity("f", bytes: 1, lastUsed: now)
+        let invalidTombstone = fixture.root.appendingPathComponent(
+            ".evicting-\(invalidIdentity.lastPathComponent)-00000000-0000-0000-0000-000000000000"
+        )
+        try FileManager.default.moveItem(at: invalidIdentity, to: invalidTombstone)
+        let invalidDirectoryTombstone = fixture.root.appendingPathComponent(
+            ".evicting-\(String(repeating: "d", count: 64))-00000000-0000-0000-0000-000000000000"
+        )
+        try FileManager.default.createSymbolicLink(
+            at: invalidDirectoryTombstone, withDestinationURL: fixture.root)
+        let payload = invalidTombstone.appendingPathComponent("DerivedData/payload")
+        let alias = invalidTombstone.appendingPathComponent("DerivedData/payload-alias")
+        #expect(linkat(AT_FDCWD, payload.path, AT_FDCWD, alias.path, 0) == 0)
+        let validIdentity = try fixture.identity(
+            "e", bytes: 1, lastUsed: now.addingTimeInterval(-1_000))
+
+        let removed = try CacheRetention(
+            collectionRoot: fixture.root,
+            policy: .init(maximumIdentityCount: 0, maximumTotalBytes: 0, maximumInactiveAge: 1)
+        ).enforce(now: now)
+
+        #expect(removed.map(\.path) == [validIdentity.path])
+        #expect(FileManager.default.fileExists(atPath: invalidTombstone.path))
+        #expect(FileManager.default.fileExists(atPath: invalidDirectoryTombstone.path))
     }
 
     @Test("Retention fails closed for rename, tombstone-lock, and durability failures")
