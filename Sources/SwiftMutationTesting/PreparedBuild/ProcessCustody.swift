@@ -177,23 +177,28 @@ final class ProcessCustody: @unchecked Sendable {
     private func quiesce() throws {
         let snapshot = mutex.withLock { groups }
         let startedAt = monotonicNow()
+        let (scaledBudget, budgetOverflowed) =
+            maximumQuiescenceNanoseconds
+            .multipliedReportingOverflow(by: UInt64(snapshot.count))
+        guard !budgetOverflowed else { throw PreparedCacheError.unverifiableProcessIdentity }
+        let quiescenceBudget = scaledBudget
         for group in snapshot {
-            try requireWithinQuiescenceDeadline(startedAt)
+            try requireWithinQuiescenceDeadline(startedAt, budget: quiescenceBudget)
             switch identityStatus(group) {
             case .absent:
                 try requireGroupAbsent(group)
-                try requireWithinQuiescenceDeadline(startedAt)
+                try requireWithinQuiescenceDeadline(startedAt, budget: quiescenceBudget)
                 continue
             case .mismatched: throw PreparedCacheError.unverifiableProcessIdentity
             case .matching: break
             }
             guard verifyIdentity(group) else { throw PreparedCacheError.unverifiableProcessIdentity }
             try terminateGroup(group.processGroupID)
-            try requireWithinQuiescenceDeadline(startedAt)
+            try requireWithinQuiescenceDeadline(startedAt, budget: quiescenceBudget)
             try waitForVerifiedGroup(group)
-            try requireWithinQuiescenceDeadline(startedAt)
+            try requireWithinQuiescenceDeadline(startedAt, budget: quiescenceBudget)
             try requireGroupAbsent(group)
-            try requireWithinQuiescenceDeadline(startedAt)
+            try requireWithinQuiescenceDeadline(startedAt, budget: quiescenceBudget)
         }
         let completed = Set(snapshot)
         try mutex.withLock {
@@ -202,9 +207,9 @@ final class ProcessCustody: @unchecked Sendable {
         }
     }
 
-    private func requireWithinQuiescenceDeadline(_ startedAt: UInt64) throws {
+    private func requireWithinQuiescenceDeadline(_ startedAt: UInt64, budget: UInt64) throws {
         let current = monotonicNow()
-        guard current >= startedAt, current - startedAt <= maximumQuiescenceNanoseconds else {
+        guard current >= startedAt, current - startedAt <= budget else {
             throw PreparedCacheError.unverifiableProcessIdentity
         }
     }

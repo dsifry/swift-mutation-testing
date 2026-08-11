@@ -226,16 +226,12 @@ struct XcodeProcessLauncherTests {
         let captureCloseCalls = ProcessLifecycleRecorder()
         var captureCloseFailure = ProcessRunner(
             onTimeout: { _ in },
-            createCaptureDescriptor: { path in
-                _ = FileManager.default.createFile(
-                    atPath: path, contents: nil, attributes: [.posixPermissions: 0o600]
-                )
-                return 101
-            },
+            createCaptureDescriptor: { ProcessRunner.openPrivateCaptureFile($0) },
             configureSpawn: { _, _, _, _ in true }
         )
         captureCloseFailure.closeCaptureDescriptor = { descriptor in
             captureCloseCalls.abort(descriptor)
+            _ = close(descriptor)
             return -1
         }
         await #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
@@ -246,7 +242,60 @@ struct XcodeProcessLauncherTests {
                     workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
                 ))
         }
-        #expect(captureCloseCalls.aborted == [101])
+        #expect(captureCloseCalls.aborted.count == 1)
+
+        let identityFailurePath = CapturePathRecorder()
+        var identityFailure = ProcessRunner(
+            onTimeout: { _ in },
+            createCaptureDescriptor: { path in
+                identityFailurePath.path = path
+                return ProcessRunner.openPrivateCaptureFile(path)
+            }
+        )
+        identityFailure.captureDescriptorIdentity = { _ in nil }
+        #expect(ProcessRunner(onTimeout: { _ in }).captureDescriptorIdentity(-1) == nil)
+        await #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try await identityFailure.launchCapturing(
+                .init(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [],
+                    environment: nil, additionalEnvironment: [:],
+                    workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
+                ))
+        }
+
+        let removalFailurePath = CapturePathRecorder()
+        var removalFailure = ProcessRunner(
+            onTimeout: { _ in },
+            createCaptureDescriptor: { path in
+                removalFailurePath.path = path
+                return ProcessRunner.openPrivateCaptureFile(path)
+            }
+        )
+        removalFailure.removeCaptureFile = { _, _ in false }
+        await #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try await removalFailure.launchCapturing(
+                .init(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [],
+                    environment: nil, additionalEnvironment: [:],
+                    workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
+                ))
+        }
+        if let path = removalFailurePath.path { try? FileManager.default.removeItem(atPath: path) }
+
+        let removalThrowURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        let removalThrowDescriptor = ProcessRunner.openPrivateCaptureFile(removalThrowURL.path)
+        var removalThrowIdentity = stat()
+        #expect(fstat(removalThrowDescriptor, &removalThrowIdentity) == 0)
+        #expect(close(removalThrowDescriptor) == 0)
+        #expect(
+            !ProcessRunner.removeCaptureIfOwned(
+                removalThrowURL,
+                identity: removalThrowIdentity,
+                remove: { _ in throw PreparedCacheError.unsafeCachePath }
+            ))
+        try? FileManager.default.removeItem(at: removalThrowURL)
+        #expect(!ProcessRunner.capturePathMatches(removalThrowURL, identity: removalThrowIdentity))
     }
 
     @Test("waitpid retries EINTR and returns the eventual child status")
@@ -284,6 +333,40 @@ struct XcodeProcessLauncherTests {
                 ))
         }
         #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+
+        let capturePath = CapturePathRecorder()
+        let swappedRunner = ProcessRunner(
+            onTimeout: { _ in },
+            createCaptureDescriptor: { path in
+                capturePath.path = path
+                return ProcessRunner.openPrivateCaptureFile(path)
+            },
+            captureRoot: root,
+            configureSpawn: { actions, attributes, output, directory in
+                guard let path = capturePath.path else { return false }
+                try? FileManager.default.removeItem(atPath: path)
+                guard
+                    FileManager.default.createFile(
+                        atPath: path,
+                        contents: Data("spoofed-output".utf8),
+                        attributes: [.posixPermissions: 0o600]
+                    )
+                else { return false }
+                return ProcessRunner.configureSpawnResources(
+                    actions: actions, attributes: attributes, output: output, directory: directory)
+            }
+        )
+        await #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try await swappedRunner.launchCapturing(
+                .init(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [],
+                    environment: nil, additionalEnvironment: [:], workingDirectoryURL: root, timeout: 10
+                ))
+        }
+        let replacement = try #require(capturePath.path)
+        #expect(FileManager.default.fileExists(atPath: replacement))
+        #expect(try String(contentsOfFile: replacement, encoding: .utf8) == "spoofed-output")
+        try FileManager.default.removeItem(atPath: replacement)
     }
 
     @Test("Escalation is identity-checked and lifecycle-cancellable")
@@ -684,6 +767,15 @@ private final class SpawnInputRecorder: @unchecked Sendable {
         self.descriptor = descriptor
         self.path = path
         self.flags = flags
+    }
+}
+
+private final class CapturePathRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedPath: String?
+    var path: String? {
+        get { lock.withLock { storedPath } }
+        set { lock.withLock { storedPath = newValue } }
     }
 }
 

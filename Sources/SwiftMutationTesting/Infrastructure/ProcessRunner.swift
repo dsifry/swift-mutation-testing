@@ -24,6 +24,13 @@ struct ProcessRunner: Sendable {
     var openNullDescriptor: @Sendable () -> Int32
     var createCaptureDescriptor: @Sendable (String) -> Int32
     var closeCaptureDescriptor: @Sendable (Int32) -> Int32 = { close($0) }
+    var captureDescriptorIdentity: @Sendable (Int32) -> stat? = { descriptor in
+        var identity = stat()
+        return fstat(descriptor, &identity) == 0 ? identity : nil
+    }
+    var removeCaptureFile: @Sendable (URL, stat) -> Bool = {
+        removeCaptureIfOwned($0, identity: $1)
+    }
     var captureRoot: URL?
     var initializeSpawn: SpawnInitializer
     var configureSpawn: SpawnConfigurator
@@ -108,6 +115,10 @@ struct ProcessRunner: Sendable {
             try? FileManager.default.removeItem(at: tempURL)
             throw error
         }
+        guard let captureIdentity = captureDescriptorIdentity(captureDescriptor) else {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw PreparedCacheError.unsafeCachePath
+        }
         do {
             var environment = request.environment
             if !request.additionalEnvironment.isEmpty {
@@ -130,12 +141,38 @@ struct ProcessRunner: Sendable {
                 throw PreparedCacheError.unverifiableProcessIdentity
             }
             let exitCode = try await supervise(pid: pid, timeout: request.timeout) { status in status }
+            guard Self.capturePathMatches(tempURL, identity: captureIdentity) else {
+                throw PreparedCacheError.unsafeCachePath
+            }
             let output = Self.readCapturedOutput(at: tempURL)
-            try? FileManager.default.removeItem(at: tempURL)
+            guard removeCaptureFile(tempURL, captureIdentity) else {
+                throw PreparedCacheError.unsafeCachePath
+            }
             return (exitCode, output)
         } catch {
-            try? FileManager.default.removeItem(at: tempURL)
+            _ = removeCaptureFile(tempURL, captureIdentity)
             throw error
+        }
+    }
+
+    static func capturePathMatches(_ url: URL, identity: stat) -> Bool {
+        guard let current = CachePathGuard.metadata(at: url) else { return false }
+        return current.st_dev == identity.st_dev && current.st_ino == identity.st_ino
+            && current.st_uid == getuid() && current.st_mode & S_IFMT == S_IFREG
+            && current.st_mode & 0o777 == 0o600 && current.st_nlink == 1
+    }
+
+    static func removeCaptureIfOwned(
+        _ url: URL,
+        identity: stat,
+        remove: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+    ) -> Bool {
+        guard capturePathMatches(url, identity: identity) else { return false }
+        do {
+            try remove(url)
+            return true
+        } catch {
+            return false
         }
     }
 

@@ -33,6 +33,7 @@ struct ProjectInputMaterializer: Sendable {
     }
     var outputFileExists: @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     var didPrepareOutputDirectory: @Sendable (URL) -> Void = { _ in }
+    var willMaterializeEntry: @Sendable (URL) -> Void = { _ in }
 
     func materialize(
         manifestAt manifestURL: URL,
@@ -63,9 +64,12 @@ struct ProjectInputMaterializer: Sendable {
                 let output = projectURL.appendingPathComponent(entry.path)
                 let outputDirectory = output.deletingLastPathComponent()
                 let relativeOutputDirectory = (entry.path as NSString).deletingLastPathComponent
+                willMaterializeEntry(output)
                 if preparedOutputDirectories.insert(relativeOutputDirectory).inserted {
                     try makePrivateDirectory(outputDirectory)
                     didPrepareOutputDirectory(outputDirectory)
+                } else {
+                    try CachePathGuard.validateDirectory(outputDirectory, containedIn: identityDirectory)
                 }
                 let materialized =
                     overrides.removeValue(forKey: entry.path)

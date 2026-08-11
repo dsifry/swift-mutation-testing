@@ -99,7 +99,8 @@ struct CacheRetention: Sendable {
             try CachePathGuard.validateNoSymlinkComponents(url, containedIn: root)
             guard let metadata = metadataProvider(url),
                 metadata.st_uid == getuid(),
-                metadata.st_mode & S_IFMT != S_IFLNK
+                metadata.st_mode & S_IFMT != S_IFLNK,
+                metadata.st_mode & S_IFMT != S_IFREG || metadata.st_nlink == 1
             else { throw PreparedCacheError.unsafeCachePath }
             if metadata.st_mode & S_IFMT == S_IFREG { total += Int64(metadata.st_size) }
         }

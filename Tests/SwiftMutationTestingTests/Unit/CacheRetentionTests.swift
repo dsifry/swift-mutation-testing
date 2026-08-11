@@ -225,6 +225,13 @@ struct CacheRetentionTests {
             try CacheRetention(collectionRoot: fixture.root).enforce(now: now)
         }
         try FileManager.default.removeItem(at: link)
+        let payload = laterName.appendingPathComponent("DerivedData/payload")
+        let hardlink = laterName.appendingPathComponent("DerivedData/payload-hardlink")
+        #expect(linkat(AT_FDCWD, payload.path, AT_FDCWD, hardlink.path, 0) == 0)
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try CacheRetention(collectionRoot: fixture.root).enforce(now: now)
+        }
+        try FileManager.default.removeItem(at: hardlink)
         #expect(throws: PreparedCacheError.unsafeCachePath) {
             try CacheRetention(
                 collectionRoot: fixture.root,

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct CommandLineParser: Sendable {
@@ -351,12 +352,22 @@ struct CommandLineParser: Sendable {
         var seen: [String: String] = [:]
         for (flag, path) in paths {
             guard let path else { continue }
-            let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+            let normalized = protocolPathIdentity(path)
             if let previous = seen[normalized] {
                 throw UsageError(message: "\(flag) must not match \(previous)")
             }
             seen[normalized] = flag
         }
+    }
+
+    private func protocolPathIdentity(_ path: String) -> String {
+        var metadata = stat()
+        if stat(path, &metadata) == 0 {
+            return "inode:\(metadata.st_dev):\(metadata.st_ino)"
+        }
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        let canonicalParent = url.deletingLastPathComponent().resolvingSymlinksInPath()
+        return "path:" + canonicalParent.appendingPathComponent(url.lastPathComponent).standardizedFileURL.path
     }
 
     private func validateCompatibilityID(_ value: String) throws {

@@ -1,3 +1,5 @@
+import Darwin
+import Foundation
 import Testing
 
 @testable import SwiftMutationTesting
@@ -168,6 +170,46 @@ struct CommandLineParserTests {
                 "--no-cache",
                 "--custody-fd", "8",
                 "--invocation-nonce", "ABCDEFGHIJKLMNOPQRSTUV",
+            ])
+        }
+
+    }
+
+    @Test("Given a symlinked output parent aliases another protocol path, parsing fails closed")
+    func rejectsSymlinkedParentProtocolAlias() throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let real = root.appendingPathComponent("real")
+        let alias = root.appendingPathComponent("alias")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: real)
+        #expect(throws: UsageError.self) {
+            try parser.parse([
+                "run", "--build-cache-root", root.appendingPathComponent("cache").path,
+                "--cache-compatibility-id", String(repeating: "b", count: 64),
+                "--project-input-manifest", root.appendingPathComponent("inputs.json").path,
+                "--target", "AppTests/test", "--mutant-selection-manifest",
+                root.appendingPathComponent("selection.json").path,
+                "--cache-evidence-output", real.appendingPathComponent("result.json").path,
+                "--output", alias.appendingPathComponent("result.json").path,
+                "--no-cache", "--custody-fd", "8", "--invocation-nonce", "ABCDEFGHIJKLMNOPQRSTUV",
+            ])
+        }
+
+        let firstExisting = root.appendingPathComponent("existing-result.json")
+        let secondExisting = root.appendingPathComponent("hardlinked-result.json")
+        try Data().write(to: firstExisting)
+        #expect(linkat(AT_FDCWD, firstExisting.path, AT_FDCWD, secondExisting.path, 0) == 0)
+        #expect(throws: UsageError.self) {
+            try parser.parse([
+                "run", "--build-cache-root", root.appendingPathComponent("cache").path,
+                "--cache-compatibility-id", String(repeating: "b", count: 64),
+                "--project-input-manifest", root.appendingPathComponent("inputs.json").path,
+                "--target", "AppTests/test", "--mutant-selection-manifest",
+                root.appendingPathComponent("selection.json").path,
+                "--cache-evidence-output", firstExisting.path,
+                "--output", secondExisting.path,
+                "--no-cache", "--custody-fd", "8", "--invocation-nonce", "ABCDEFGHIJKLMNOPQRSTUV",
             ])
         }
     }

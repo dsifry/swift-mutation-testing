@@ -1018,6 +1018,29 @@ struct PreparedBuildRecoveryTests {
         ])
         _ = try cachedDirectoryMaterializer.materialize(manifestAt: siblingManifest)
         #expect(directoryPreparations.value == 1)
+
+        let externalDirectory = fixture.root.appendingPathComponent("external-materialization")
+        try FileManager.default.createDirectory(at: externalDirectory, withIntermediateDirectories: false)
+        chmod(externalDirectory.path, 0o700)
+        let entryCounter = LockedCounter()
+        let swappedDirectoryMaterializer = ProjectInputMaterializer(
+            sourceRoot: source,
+            identityDirectory: fixture.identityA,
+            collectionRoot: fixture.root,
+            willMaterializeEntry: { _ in
+                entryCounter.increment()
+                guard entryCounter.value == 2 else { return }
+                let directory = fixture.identityA.appendingPathComponent("project/Sources")
+                try? FileManager.default.removeItem(at: directory)
+                try? FileManager.default.createSymbolicLink(
+                    at: directory, withDestinationURL: externalDirectory)
+            }
+        )
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try swappedDirectoryMaterializer.materialize(manifestAt: siblingManifest)
+        }
+        #expect(!FileManager.default.fileExists(atPath: externalDirectory.appendingPathComponent("B.swift").path))
+
         let override = SchematizedFile(
             originalPath: file.path, schematizedContent: String(decoding: bytes, as: UTF8.self))
         let project = try materializer.materialize(
@@ -2191,6 +2214,35 @@ struct PreparedBuildRecoveryTests {
         #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
             try deadlineCustody.handleEngineTermination()
         }
+
+        let firstBudgetedGroup = CustodiedProcessGroup(
+            pid: 92, processGroupID: 92, birthIdentity: "birth-92")
+        let secondBudgetedGroup = CustodiedProcessGroup(
+            pid: 93, processGroupID: 93, birthIdentity: "birth-93")
+        let multiGroupClock = MonotonicRecorder(values: [0, 1, 4, 8, 12, 13, 18, 23, 29])
+        let multiGroupCustody = ProcessCustody(
+            registeredGroups: [firstBudgetedGroup, secondBudgetedGroup],
+            verifyIdentity: { _ in true },
+            terminateGroup: { _ in },
+            waitForGroup: { _ in },
+            monotonicNow: { multiGroupClock.next() },
+            maximumQuiescenceNanoseconds: 15
+        )
+        try multiGroupCustody.handleEngineTermination()
+        #expect(multiGroupCustody.isQuiescent)
+
+        let overflowingBudgetCustody = ProcessCustody(
+            registeredGroups: [firstBudgetedGroup, secondBudgetedGroup],
+            verifyIdentity: { _ in true },
+            terminateGroup: { _ in },
+            waitForGroup: { _ in },
+            monotonicNow: { 0 },
+            maximumQuiescenceNanoseconds: UInt64.max
+        )
+        #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
+            try overflowingBudgetCustody.handleEngineTermination()
+        }
+
         #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
             try SystemProcessIdentity.group(for: Int32.max)
         }
