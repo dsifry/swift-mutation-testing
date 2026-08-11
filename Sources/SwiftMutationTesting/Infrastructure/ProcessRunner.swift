@@ -275,7 +275,10 @@ struct ProcessRunner: Sendable {
         let launchExecutable = usesLaunchGate ? URL(fileURLWithPath: "/bin/sh") : executableURL
         let launchArguments =
             usesLaunchGate
-            ? ["-c", "IFS= read -r _ <&3 || exit 125; exec \"$@\"", "custody-launch", executableURL.path]
+            ? [
+                "-c", "IFS= read -r _ <&3 || exit 125; exec 3<&-; exec \"$@\"",
+                "custody-launch", executableURL.path,
+            ]
                 + arguments
             : arguments
         let argv = ([launchExecutable.path] + launchArguments).map { strdup($0) } + [nil]

@@ -181,6 +181,31 @@ struct XcodeProcessLauncherTests {
         #expect(ProcessRunner.readCapturedOutput(from: -1) == nil)
     }
 
+    @Test("A gated child does not inherit the launch-gate descriptor after exec")
+    func gatedChildClosesLaunchGateDescriptor() async throws {
+        let runner = ProcessRunner(
+            processDidStart: { _ in },
+            postTerminationCleanup: { _ in },
+            onTimeout: { _ in }
+        )
+
+        let result = try await runner.launchCapturing(
+            .init(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: [
+                    "-c",
+                    "if [ -e /dev/fd/3 ]; then printf open; else printf closed; fi",
+                ],
+                environment: nil,
+                additionalEnvironment: [:],
+                workingDirectoryURL: URL(fileURLWithPath: "/tmp"),
+                timeout: 10
+            ))
+
+        #expect(result.exitCode == 0)
+        #expect(result.output == "closed")
+    }
+
     @Test("Process-group setup failure aborts only the direct child and never registers a caller group")
     func processGroupSetupFailureIsContained() async {
         let recorder = ProcessLifecycleRecorder()
