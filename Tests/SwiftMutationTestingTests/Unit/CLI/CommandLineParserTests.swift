@@ -6,6 +6,27 @@ import Testing
 struct CommandLineParserTests {
     private let parser = CommandLineParser()
 
+    @Test("Given help text, when read, then every cache protocol option is documented")
+    func documentsCacheProtocolOptions() {
+        let options = [
+            "--build-cache-root",
+            "--cache-compatibility-id",
+            "--project-input-manifest",
+            "--prepare-only",
+            "--test-enumeration-output",
+            "--mutant-inventory-output",
+            "--mutant-selection-manifest",
+            "--cache-evidence-output",
+            "--recover-only",
+            "--custody-fd",
+            "--invocation-nonce",
+        ]
+
+        for option in options {
+            #expect(HelpText.usage.contains(option))
+        }
+    }
+
     @Test(
         "Given run command with path and required flags, when parsed, then projectPath scheme and destination are set")
     func parsesRunWithPathAndFlags() throws {
@@ -76,6 +97,120 @@ struct CommandLineParserTests {
         #expect(result.reporting.output == "out.json")
         #expect(result.reporting.htmlOutput == "report.html")
         #expect(result.reporting.sonarOutput == "sonar.json")
+    }
+
+    @Test("Given legacy target without cache options, when parsed, then target remains unchanged")
+    func preservesLegacyTargetWithoutCacheOptions() throws {
+        let result = try parser.parse(["run", "--target", "AppTests/ExampleTests/testExample"])
+
+        #expect(result.build.testTarget == "AppTests/ExampleTests/testExample")
+    }
+
+    @Test("Given complete prepare cache options, when parsed, then prepare mode is accepted")
+    func parsesPrepareCacheMode() throws {
+        let result = try parser.parse([
+            "run",
+            "--build-cache-root", "/tmp/swift-mutation-cache",
+            "--cache-compatibility-id", String(repeating: "a", count: 64),
+            "--project-input-manifest", "/tmp/project-inputs.json",
+            "--prepare-only",
+            "--test-enumeration-output", "/tmp/tests.json",
+            "--mutant-inventory-output", "/tmp/mutants.json",
+            "--cache-evidence-output", "/tmp/evidence.json",
+            "--custody-fd", "7",
+            "--invocation-nonce", "abcdefghijklmnopqrstuv",
+        ])
+
+        #expect(result.cache.mode == .prepare)
+        #expect(result.cache.buildCacheRoot == "/tmp/swift-mutation-cache")
+        #expect(result.cache.compatibilityID == String(repeating: "a", count: 64))
+        #expect(result.cache.projectInputManifest == "/tmp/project-inputs.json")
+        #expect(result.cache.testEnumerationOutput == "/tmp/tests.json")
+        #expect(result.cache.mutantInventoryOutput == "/tmp/mutants.json")
+        #expect(result.cache.evidenceOutput == "/tmp/evidence.json")
+        #expect(result.cache.custodyFD == 7)
+        #expect(result.cache.invocationNonce == "abcdefghijklmnopqrstuv")
+    }
+
+    @Test("Given complete target cache options, when parsed, then target mode is accepted")
+    func parsesTargetCacheMode() throws {
+        let result = try parser.parse([
+            "run",
+            "--build-cache-root", "/tmp/swift-mutation-cache",
+            "--cache-compatibility-id", String(repeating: "b", count: 64),
+            "--project-input-manifest", "/tmp/project-inputs.json",
+            "--target", "AppTests/ExampleTests/testExample",
+            "--mutant-selection-manifest", "/tmp/selection.json",
+            "--cache-evidence-output", "/tmp/evidence.json",
+            "--output", "/tmp/report.json",
+            "--custody-fd", "8",
+            "--invocation-nonce", "ABCDEFGHIJKLMNOPQRSTUV",
+        ])
+
+        #expect(result.cache.mode == .target)
+        #expect(result.build.testTarget == "AppTests/ExampleTests/testExample")
+        #expect(result.cache.mutantSelectionManifest == "/tmp/selection.json")
+    }
+
+    @Test("Given complete recovery cache options, when parsed, then recovery mode is accepted")
+    func parsesRecoveryCacheMode() throws {
+        let result = try parser.parse([
+            "run",
+            "--build-cache-root", "/tmp/swift-mutation-cache",
+            "--cache-compatibility-id", String(repeating: "c", count: 64),
+            "--project-input-manifest", "/tmp/project-inputs.json",
+            "--recover-only",
+            "--cache-evidence-output", "/tmp/evidence.json",
+            "--custody-fd", "0",
+            "--invocation-nonce", "0123456789_-abcdefghij",
+        ])
+
+        #expect(result.cache.mode == .recover)
+        #expect(result.cache.custodyFD == 0)
+    }
+
+    @Test("Given one cache option without a complete mode, when parsed, then throws UsageError")
+    func rejectsIncompleteCacheMode() {
+        #expect(throws: UsageError.self) {
+            try parser.parse(["run", "--build-cache-root", "/tmp/cache"])
+        }
+    }
+
+    @Test("Given prepare and target cache options together, when parsed, then throws UsageError")
+    func rejectsMixedPrepareAndTargetModes() {
+        #expect(throws: UsageError.self) {
+            try parser.parse([
+                "run",
+                "--build-cache-root", "/tmp/cache",
+                "--cache-compatibility-id", String(repeating: "d", count: 64),
+                "--project-input-manifest", "/tmp/inputs.json",
+                "--prepare-only",
+                "--target", "AppTests/testExample",
+                "--test-enumeration-output", "/tmp/tests.json",
+                "--mutant-inventory-output", "/tmp/mutants.json",
+                "--mutant-selection-manifest", "/tmp/selection.json",
+                "--cache-evidence-output", "/tmp/evidence.json",
+                "--output", "/tmp/report.json",
+                "--custody-fd", "3",
+                "--invocation-nonce", "abcdefghijklmnopqrstuv",
+            ])
+        }
+    }
+
+    @Test("Given malformed cache identities, when parsed, then throws UsageError")
+    func rejectsMalformedCacheIdentities() {
+        #expect(throws: UsageError.self) {
+            try parser.parse([
+                "run",
+                "--build-cache-root", "/tmp/cache",
+                "--cache-compatibility-id", "ABC",
+                "--project-input-manifest", "/tmp/inputs.json",
+                "--recover-only",
+                "--cache-evidence-output", "/tmp/evidence.json",
+                "--custody-fd", "-1",
+                "--invocation-nonce", "short",
+            ])
+        }
     }
 
     @Test("Given --timeout and --concurrency flags, when parsed, then numeric values are set")

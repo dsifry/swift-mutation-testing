@@ -1,3 +1,5 @@
+import Foundation
+
 struct CommandLineParser: Sendable {
     private struct FlagValues {
         var scheme: String?
@@ -15,6 +17,17 @@ struct CommandLineParser: Sendable {
         var excludePatterns: [String] = []
         var operators: [String] = []
         var disabledMutators: [String] = []
+        var buildCacheRoot: String?
+        var cacheCompatibilityID: String?
+        var projectInputManifest: String?
+        var prepareOnly = false
+        var testEnumerationOutput: String?
+        var mutantInventoryOutput: String?
+        var mutantSelectionManifest: String?
+        var cacheEvidenceOutput: String?
+        var recoverOnly = false
+        var custodyFD: Int?
+        var invocationNonce: String?
     }
 
     func parse(_ arguments: [String]) throws -> ParsedArguments {
@@ -55,11 +68,12 @@ struct CommandLineParser: Sendable {
         }
 
         let flags = try parseFlags(remaining)
-        return parsedArguments(projectPath: projectPath, flags: flags)
+        return try parsedArguments(projectPath: projectPath, flags: flags)
     }
 
-    private func parsedArguments(projectPath: String, flags: FlagValues) -> ParsedArguments {
-        ParsedArguments(
+    private func parsedArguments(projectPath: String, flags: FlagValues) throws -> ParsedArguments {
+        let cache = try validatedCacheOptions(flags)
+        return ParsedArguments(
             projectPath: projectPath,
             build: .init(
                 scheme: flags.scheme,
@@ -81,7 +95,8 @@ struct CommandLineParser: Sendable {
                 excludePatterns: flags.excludePatterns,
                 operators: flags.operators,
                 disabledMutators: flags.disabledMutators
-            )
+            ),
+            cache: cache
         )
     }
 
@@ -150,6 +165,39 @@ struct CommandLineParser: Sendable {
         case "--disable-mutator":
             values.disabledMutators.append(try nextValue(for: flag, at: &index, in: arguments))
 
+        case "--build-cache-root":
+            values.buildCacheRoot = try nextValue(for: flag, at: &index, in: arguments)
+
+        case "--cache-compatibility-id":
+            values.cacheCompatibilityID = try nextValue(for: flag, at: &index, in: arguments)
+
+        case "--project-input-manifest":
+            values.projectInputManifest = try nextValue(for: flag, at: &index, in: arguments)
+
+        case "--prepare-only":
+            values.prepareOnly = true
+
+        case "--test-enumeration-output":
+            values.testEnumerationOutput = try nextValue(for: flag, at: &index, in: arguments)
+
+        case "--mutant-inventory-output":
+            values.mutantInventoryOutput = try nextValue(for: flag, at: &index, in: arguments)
+
+        case "--mutant-selection-manifest":
+            values.mutantSelectionManifest = try nextValue(for: flag, at: &index, in: arguments)
+
+        case "--cache-evidence-output":
+            values.cacheEvidenceOutput = try nextValue(for: flag, at: &index, in: arguments)
+
+        case "--recover-only":
+            values.recoverOnly = true
+
+        case "--custody-fd":
+            values.custodyFD = try nextNonnegativeInt(for: flag, at: &index, in: arguments)
+
+        case "--invocation-nonce":
+            values.invocationNonce = try nextValue(for: flag, at: &index, in: arguments)
+
         default:
             throw UsageError(message: "unknown option '\(flag)'")
         }
@@ -178,6 +226,127 @@ struct CommandLineParser: Sendable {
             throw UsageError(message: "\(flag) must be an integer")
         }
         return value
+    }
+
+    private func nextNonnegativeInt(for flag: String, at index: inout Int, in arguments: [String]) throws -> Int {
+        let value = try nextInt(for: flag, at: &index, in: arguments)
+        guard value >= 0 else {
+            throw UsageError(message: "\(flag) must be a nonnegative integer")
+        }
+        return value
+    }
+
+    private func validatedCacheOptions(_ flags: FlagValues) throws -> ParsedArguments.CacheOptions {
+        let hasCacheOption =
+            flags.buildCacheRoot != nil
+            || flags.cacheCompatibilityID != nil
+            || flags.projectInputManifest != nil
+            || flags.prepareOnly
+            || flags.testEnumerationOutput != nil
+            || flags.mutantInventoryOutput != nil
+            || flags.mutantSelectionManifest != nil
+            || flags.cacheEvidenceOutput != nil
+            || flags.recoverOnly
+            || flags.custodyFD != nil
+            || flags.invocationNonce != nil
+
+        guard hasCacheOption else { return .init() }
+
+        let requestedModes = [flags.prepareOnly, flags.mutantSelectionManifest != nil, flags.recoverOnly]
+            .filter { $0 }.count
+        guard requestedModes == 1 else {
+            throw UsageError(message: "cache options must select exactly one of prepare, target, or recover mode")
+        }
+
+        guard let root = flags.buildCacheRoot,
+            let compatibilityID = flags.cacheCompatibilityID,
+            let projectManifest = flags.projectInputManifest,
+            let evidenceOutput = flags.cacheEvidenceOutput,
+            let custodyFD = flags.custodyFD,
+            let invocationNonce = flags.invocationNonce
+        else {
+            throw UsageError(
+                message:
+                    "cache mode requires root, compatibility ID, project manifest, evidence output, custody fd, and invocation nonce"
+            )
+        }
+
+        try validateAbsolutePath(root, flag: "--build-cache-root")
+        try validateAbsolutePath(projectManifest, flag: "--project-input-manifest")
+        try validateAbsolutePath(evidenceOutput, flag: "--cache-evidence-output")
+        try validateCompatibilityID(compatibilityID)
+        try validateInvocationNonce(invocationNonce)
+
+        let mode: ParsedArguments.CacheOptions.Mode
+        if flags.prepareOnly {
+            guard flags.testTarget == nil,
+                flags.mutantSelectionManifest == nil,
+                flags.output == nil,
+                let enumerationOutput = flags.testEnumerationOutput,
+                let inventoryOutput = flags.mutantInventoryOutput
+            else {
+                throw UsageError(
+                    message: "prepare mode requires enumeration and inventory outputs and rejects target-only options")
+            }
+            try validateAbsolutePath(enumerationOutput, flag: "--test-enumeration-output")
+            try validateAbsolutePath(inventoryOutput, flag: "--mutant-inventory-output")
+            mode = .prepare
+        } else if flags.recoverOnly {
+            guard flags.testTarget == nil,
+                flags.mutantSelectionManifest == nil,
+                flags.testEnumerationOutput == nil,
+                flags.mutantInventoryOutput == nil,
+                flags.output == nil
+            else {
+                throw UsageError(message: "recover mode rejects prepare and target outputs")
+            }
+            mode = .recover
+        } else {
+            guard let target = flags.testTarget, !target.isEmpty,
+                let selectionManifest = flags.mutantSelectionManifest,
+                let output = flags.output,
+                flags.testEnumerationOutput == nil,
+                flags.mutantInventoryOutput == nil
+            else {
+                throw UsageError(message: "target cache mode requires one target, selection manifest, and JSON output")
+            }
+            try validateAbsolutePath(selectionManifest, flag: "--mutant-selection-manifest")
+            try validateAbsolutePath(output, flag: "--output")
+            mode = .target
+        }
+
+        return .init(
+            mode: mode,
+            buildCacheRoot: root,
+            compatibilityID: compatibilityID,
+            projectInputManifest: projectManifest,
+            testEnumerationOutput: flags.testEnumerationOutput,
+            mutantInventoryOutput: flags.mutantInventoryOutput,
+            mutantSelectionManifest: flags.mutantSelectionManifest,
+            evidenceOutput: evidenceOutput,
+            custodyFD: custodyFD,
+            invocationNonce: invocationNonce
+        )
+    }
+
+    private func validateAbsolutePath(_ path: String, flag: String) throws {
+        guard path.hasPrefix("/") else {
+            throw UsageError(message: "\(flag) requires an absolute path")
+        }
+    }
+
+    private func validateCompatibilityID(_ value: String) throws {
+        let lowercaseHex = CharacterSet(charactersIn: "0123456789abcdef")
+        guard value.utf8.count == 64, value.unicodeScalars.allSatisfy(lowercaseHex.contains) else {
+            throw UsageError(message: "--cache-compatibility-id must be 64 lowercase hexadecimal characters")
+        }
+    }
+
+    private func validateInvocationNonce(_ value: String) throws {
+        let base64URL = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+        guard value.utf8.count == 22, value.unicodeScalars.allSatisfy(base64URL.contains) else {
+            throw UsageError(message: "--invocation-nonce must be 22 unpadded base64url characters")
+        }
     }
 
 }

@@ -6,7 +6,8 @@ struct ParsedArguments: Sendable {
         showInit: Bool = false,
         build: BuildOptions = BuildOptions(),
         reporting: ReportingOptions = ReportingOptions(),
-        filter: FilterOptions = FilterOptions()
+        filter: FilterOptions = FilterOptions(),
+        cache: CacheOptions = CacheOptions()
     ) {
         self.projectPath = projectPath
         self.showVersion = showVersion
@@ -15,6 +16,7 @@ struct ParsedArguments: Sendable {
         self.build = build
         self.reporting = reporting
         self.filter = filter
+        self.cache = cache
     }
 
     var projectPath: String
@@ -24,6 +26,51 @@ struct ParsedArguments: Sendable {
     var build: BuildOptions
     var reporting: ReportingOptions
     var filter: FilterOptions
+    var cache: CacheOptions
+
+    struct CacheOptions: Sendable {
+        enum Mode: Sendable {
+            case legacy
+            case prepare
+            case target
+            case recover
+        }
+
+        init(
+            mode: Mode = .legacy,
+            buildCacheRoot: String? = nil,
+            compatibilityID: String? = nil,
+            projectInputManifest: String? = nil,
+            testEnumerationOutput: String? = nil,
+            mutantInventoryOutput: String? = nil,
+            mutantSelectionManifest: String? = nil,
+            evidenceOutput: String? = nil,
+            custodyFD: Int? = nil,
+            invocationNonce: String? = nil
+        ) {
+            self.mode = mode
+            self.buildCacheRoot = buildCacheRoot
+            self.compatibilityID = compatibilityID
+            self.projectInputManifest = projectInputManifest
+            self.testEnumerationOutput = testEnumerationOutput
+            self.mutantInventoryOutput = mutantInventoryOutput
+            self.mutantSelectionManifest = mutantSelectionManifest
+            self.evidenceOutput = evidenceOutput
+            self.custodyFD = custodyFD
+            self.invocationNonce = invocationNonce
+        }
+
+        var mode: Mode
+        var buildCacheRoot: String?
+        var compatibilityID: String?
+        var projectInputManifest: String?
+        var testEnumerationOutput: String?
+        var mutantInventoryOutput: String?
+        var mutantSelectionManifest: String?
+        var evidenceOutput: String?
+        var custodyFD: Int?
+        var invocationNonce: String?
+    }
 
     struct BuildOptions: Sendable {
         init(

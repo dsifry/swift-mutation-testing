@@ -25,6 +25,18 @@ enum HelpText {
           --exclude <pattern>           Exclude files matching pattern (repeatable)
           --operator <id>               Mutation operator to apply (repeatable, default: all)
           --disable-mutator <id>        Disable a specific mutation operator (repeatable)
+          --build-cache-root <path>     Absolute root for prepared Xcode build state
+          --cache-compatibility-id <id> 64-character lowercase hexadecimal compatibility ID
+          --project-input-manifest <p>  Absolute path to the authenticated project-input manifest
+          --prepare-only                Prepare the Xcode build and canonical mutant inventory, then exit
+          --test-enumeration-output <p> Absolute path for prepared test enumeration JSON
+          --mutant-inventory-output <p> Absolute path for the canonical mutant inventory JSON
+          --mutant-selection-manifest <p>
+                                        Absolute path to the target mutant-selection manifest
+          --cache-evidence-output <p>   Absolute path for cache-operation evidence JSON
+          --recover-only                Recover stale prepared-build state, then exit
+          --custody-fd <fd>             Nonnegative wrapper-custody file descriptor
+          --invocation-nonce <nonce>    22-character unpadded base64url invocation nonce
           --version                     Print version and exit
           --help                        Print this help and exit
         """
