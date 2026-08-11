@@ -61,4 +61,27 @@ struct PreparedMutantInventoryTests {
             try inventory.validate(mutants: changed, projectRoot: "/repo")
         }
     }
+
+    @Test("Given no owned sources, when selected, then the result is empty")
+    func emptyOwnedSourcesSelectNoMutants() throws {
+        let descriptors = [
+            makeMutantDescriptor(
+                id: "swift-mutation-testing_0",
+                filePath: "/repo/Sources/A.swift"
+            )
+        ]
+        let inventory = try PreparedMutantInventory(
+            projectRoot: "/repo",
+            projectInputManifestSHA256: String(repeating: "c", count: 64),
+            mutants: descriptors
+        )
+
+        #expect(
+            try inventory.select(
+                mutants: descriptors,
+                ownedSourcePaths: [],
+                projectRoot: "/repo"
+            ).isEmpty
+        )
+    }
 }

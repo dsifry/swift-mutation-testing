@@ -21,7 +21,6 @@ struct MutantSelectionManifest: Codable, Equatable, Sendable {
             preparedInventorySHA256 == inventorySHA256,
             runOrdinal >= 0,
             attemptOrdinal == 0 || attemptOrdinal == 1,
-            !normalized.isEmpty,
             normalized == normalized.sorted(),
             Set(normalized).count == normalized.count,
             normalized.allSatisfy(available.contains)

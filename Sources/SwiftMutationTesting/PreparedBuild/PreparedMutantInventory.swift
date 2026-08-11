@@ -56,7 +56,6 @@ struct PreparedMutantInventory: Codable, Equatable, Sendable {
         let selected = zip(mutants, current).compactMap { row, descriptor in
             owned.contains(row.sourcePath) ? descriptor : nil
         }
-        guard !selected.isEmpty else { throw PreparedBuildError.emptySelection }
         return selected
     }
 

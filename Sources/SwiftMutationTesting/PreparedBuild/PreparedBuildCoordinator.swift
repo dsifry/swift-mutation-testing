@@ -89,6 +89,10 @@ struct PreparedBuildCoordinator: Sendable {
             ownedSourcePaths: paths,
             projectRoot: configuration.projectPath
         )
+        if selected.isEmpty {
+            try writeEvidence(mode: "target", mutantCount: 0)
+            return []
+        }
         let xctestrunURL = URL(fileURLWithPath: state.xctestrunPath)
         guard let plist = XCTestRunPlist(try Data(contentsOf: xctestrunURL)) else {
             throw PreparedBuildError.preparedBuildMissing

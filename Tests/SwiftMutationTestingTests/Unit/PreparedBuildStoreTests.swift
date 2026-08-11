@@ -55,4 +55,26 @@ struct PreparedBuildStoreTests {
             )
         }
     }
+
+    @Test("Empty selection remains valid for a selector with no mutants for the active operator")
+    func emptySelectionIsValid() throws {
+        let digest = String(repeating: "e", count: 64)
+        let manifest = MutantSelectionManifest(
+            schemaVersion: 1,
+            projectInputManifestSHA256: String(repeating: "f", count: 64),
+            preparedInventorySHA256: digest,
+            selector: "TheGuideTests/NoLogicalMutantsTests",
+            runOrdinal: 0,
+            attemptOrdinal: 0,
+            ownedSourcePaths: []
+        )
+
+        #expect(
+            try manifest.validatedSourcePaths(
+                selector: manifest.selector,
+                inventorySHA256: digest,
+                inventorySourcePaths: []
+            ).isEmpty
+        )
+    }
 }
