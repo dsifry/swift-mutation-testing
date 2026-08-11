@@ -1321,6 +1321,86 @@ struct PreparedBuildRecoveryTests {
         #expect(!FileManager.default.fileExists(atPath: dirtyPreparedState.path))
     }
 
+    @Test("Dirty recovery unlinks Xcode package symlink leaves without following their targets")
+    func dirtyRecoveryUnlinksPackageSymlinkLeaves() throws {
+        let fixture = try RecoveryFixture()
+        defer { fixture.cleanup() }
+        try fixture.makeIdentity(fixture.identityA)
+        let recovery = CacheRecovery(identityDirectory: fixture.identityA, collectionRoot: fixture.root)
+        try recovery.markDirty()
+        let external = fixture.root.appendingPathComponent("external-package")
+        try FileManager.default.createDirectory(at: external, withIntermediateDirectories: false)
+        let marker = external.appendingPathComponent("marker.swift")
+        try Data("external bytes".utf8).write(to: marker)
+        let links = fixture.identityA.appendingPathComponent(
+            "DerivedData/SourcePackages/checkouts/xctest-dynamic-overlay/Sources/IssueReporting/Symbolic Links")
+        try FileManager.default.createDirectory(at: links, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: links.appendingPathComponent("IssueReportingPackageSupport"),
+            withDestinationURL: external
+        )
+
+        #expect(try recovery.recover(expectedProductManifestSHA256: fixture.productA) == .recovered)
+        #expect(!FileManager.default.fileExists(atPath: fixture.identityA.appendingPathComponent("DerivedData").path))
+        #expect(try String(contentsOf: marker, encoding: .utf8) == "external bytes")
+    }
+
+    @Test("Dirty recovery rejects dangling product roots and prepared-state root symlinks")
+    func dirtyRecoveryRejectsUnsafeRootLinks() throws {
+        let danglingFixture = try RecoveryFixture()
+        defer { danglingFixture.cleanup() }
+        try danglingFixture.makeIdentity(danglingFixture.identityA)
+        let danglingRecovery = CacheRecovery(
+            identityDirectory: danglingFixture.identityA,
+            collectionRoot: danglingFixture.root
+        )
+        try danglingRecovery.markDirty()
+        let danglingDerivedData = danglingFixture.identityA.appendingPathComponent("DerivedData")
+        try FileManager.default.createSymbolicLink(
+            at: danglingDerivedData,
+            withDestinationURL: danglingFixture.root.appendingPathComponent("missing-target")
+        )
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try danglingRecovery.recover(expectedProductManifestSHA256: danglingFixture.productA)
+        }
+        let danglingMetadata = try #require(CachePathGuard.metadata(at: danglingDerivedData))
+        #expect(danglingMetadata.st_mode & S_IFMT == S_IFLNK)
+
+        let stateFixture = try RecoveryFixture()
+        defer { stateFixture.cleanup() }
+        try stateFixture.makeIdentity(stateFixture.identityA)
+        let stateRecovery = CacheRecovery(
+            identityDirectory: stateFixture.identityA,
+            collectionRoot: stateFixture.root
+        )
+        try stateRecovery.markDirty()
+        let external = stateFixture.root.appendingPathComponent("external-state")
+        try Data("external bytes".utf8).write(to: external)
+        let stateLink = stateFixture.identityA.appendingPathComponent("prepared-build.json")
+        try FileManager.default.createSymbolicLink(at: stateLink, withDestinationURL: external)
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try stateRecovery.recover(expectedProductManifestSHA256: stateFixture.productA)
+        }
+        #expect(try String(contentsOf: external, encoding: .utf8) == "external bytes")
+
+        let hardlinkFixture = try RecoveryFixture()
+        defer { hardlinkFixture.cleanup() }
+        try hardlinkFixture.makeIdentity(hardlinkFixture.identityA)
+        let hardlinkRecovery = CacheRecovery(
+            identityDirectory: hardlinkFixture.identityA,
+            collectionRoot: hardlinkFixture.root
+        )
+        try hardlinkRecovery.markDirty()
+        let externalState = hardlinkFixture.root.appendingPathComponent("external-state")
+        try Data("external bytes".utf8).write(to: externalState)
+        let preparedHardlink = hardlinkFixture.identityA.appendingPathComponent("prepared-build.json")
+        #expect(linkat(AT_FDCWD, externalState.path, AT_FDCWD, preparedHardlink.path, 0) == 0)
+        #expect(throws: PreparedCacheError.unsafeCachePath) {
+            try hardlinkRecovery.recover(expectedProductManifestSHA256: hardlinkFixture.productA)
+        }
+        #expect(try String(contentsOf: externalState, encoding: .utf8) == "external bytes")
+    }
+
     @Test("Cache path validation rejects mode, uid, symlink, link count, and containment attacks")
     func pathAttacksFailClosed() throws {
         let fixture = try RecoveryFixture()
@@ -2478,16 +2558,9 @@ struct PreparedBuildRecoveryTests {
             .writeRetentionMetadata(lastUsedAt: .distantPast)
         try FileManager.default.removeItem(at: derived)
         try FileManager.default.createSymbolicLink(at: derived, withDestinationURL: outside)
-        let retentionEnumeration = LockedCounter()
-        var retention = CacheRetention(collectionRoot: fixture.root)
-        retention.makeEnumerator = { root in
-            retentionEnumeration.increment()
-            return FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)
-        }
         #expect(throws: PreparedCacheError.unsafeCachePath) {
-            try retention.enforce()
+            try CacheRetention(collectionRoot: fixture.root).enforce()
         }
-        #expect(retentionEnumeration.value == 0)
     }
 
     @Test("Persisted cache and custody JSON reject unknown keys")

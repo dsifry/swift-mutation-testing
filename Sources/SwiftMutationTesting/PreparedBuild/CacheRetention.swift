@@ -16,12 +16,8 @@ struct CacheRetention: Sendable {
 
     let collectionRoot: URL
     var policy = CacheRetentionPolicy()
-    var makeEnumerator: @Sendable (URL) -> FileManager.DirectoryEnumerator? = {
-        FileManager.default.enumerator(at: $0, includingPropertiesForKeys: nil)
-    }
     var beforeRemovalAttempt: @Sendable (URL) throws -> Void = { _ in }
     var beforeTombstoneRemoval: @Sendable (URL) throws -> Void = { _ in }
-    var metadataProvider: @Sendable (URL) -> stat? = { CachePathGuard.metadata(at: $0) }
     var renameIdentity: @Sendable (String, String) -> Int32 = { rename($0, $1) }
     var openCollectionDirectory: @Sendable (String) -> Int32 = {
         open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
@@ -86,25 +82,8 @@ struct CacheRetention: Sendable {
 
     private func derivedDataBytes(at identity: URL) throws -> Int64 {
         let root = identity.appendingPathComponent("DerivedData")
-        guard FileManager.default.fileExists(atPath: root.path) else { return 0 }
-        try CachePathGuard.validateNoSymlinkComponents(root, containedIn: identity)
-        guard let rootMetadata = metadataProvider(root), rootMetadata.st_uid == getuid(),
-            rootMetadata.st_mode & S_IFMT == S_IFDIR
-        else { throw PreparedCacheError.unsafeCachePath }
-        var total: Int64 = 0
-        guard let enumerator = makeEnumerator(root) else {
-            throw PreparedCacheError.unsafeCachePath
-        }
-        for case let url as URL in enumerator {
-            try CachePathGuard.validateNoSymlinkComponents(url, containedIn: root)
-            guard let metadata = metadataProvider(url),
-                metadata.st_uid == getuid(),
-                metadata.st_mode & S_IFMT != S_IFLNK,
-                metadata.st_mode & S_IFMT != S_IFREG || metadata.st_nlink == 1
-            else { throw PreparedCacheError.unsafeCachePath }
-            if metadata.st_mode & S_IFMT == S_IFREG { total += Int64(metadata.st_size) }
-        }
-        return total
+        guard try CacheDeleteTree.entryExists(root, containedIn: identity) else { return 0 }
+        return try CacheDeleteTree.byteSize(root, containedIn: identity)
     }
 
     private func remove(_ candidate: Candidate) throws {
@@ -118,7 +97,7 @@ struct CacheRetention: Sendable {
         defer { try? lock.release() }
         try CachePathGuard.validateDirectory(candidate.url, containedIn: collectionRoot)
         _ = try CacheRecovery(identityDirectory: candidate.url, collectionRoot: collectionRoot).retentionLastUsedAt()
-        try CachePathGuard.validateOwnedTree(candidate.url, containedIn: collectionRoot)
+        _ = try CacheDeleteTree.validateForRemoval(candidate.url, containedIn: collectionRoot)
         let tombstone = collectionRoot.appendingPathComponent(
             ".evicting-\(candidate.url.lastPathComponent)-\(UUID().uuidString)"
         )
@@ -127,9 +106,12 @@ struct CacheRetention: Sendable {
         }
         try syncCollectionRoot()
         try CachePathGuard.validateDirectory(tombstone, containedIn: collectionRoot)
+        let tombstoneIdentity = try CacheDeleteTree.validateForRemoval(
+            tombstone, containedIn: collectionRoot)
         try beforeTombstoneRemoval(tombstone)
-        try CachePathGuard.validateOwnedTree(tombstone, containedIn: collectionRoot)
-        try FileManager.default.removeItem(at: tombstone)
+        try CacheDeleteTree.remove(
+            tombstone, containedIn: collectionRoot, rejectHardlinks: true,
+            expectedIdentity: tombstoneIdentity)
         try syncCollectionRoot()
     }
 
@@ -151,11 +133,14 @@ struct CacheRetention: Sendable {
             }
             defer { try? lock.release() }
             do {
-                try CachePathGuard.validateOwnedTree(tombstone, containedIn: collectionRoot)
+                let tombstoneIdentity = try CacheDeleteTree.validateForRemoval(
+                    tombstone, containedIn: collectionRoot)
+                try CacheDeleteTree.remove(
+                    tombstone, containedIn: collectionRoot, rejectHardlinks: true,
+                    expectedIdentity: tombstoneIdentity)
             } catch {
                 continue
             }
-            try FileManager.default.removeItem(at: tombstone)
             try syncCollectionRoot()
         }
     }
