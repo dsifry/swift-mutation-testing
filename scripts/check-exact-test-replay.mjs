@@ -1,5 +1,7 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { realpath } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCallback);
@@ -35,12 +37,22 @@ function assertExactSet(expected, executed) {
   }
 }
 
-function executedCount(stdout, label) {
-  const matches = [...stdout.matchAll(/Test run with (\d+) tests? in \d+ suites? passed after /g)];
-  if (matches.length !== 1) fail(`${label} has no authenticated executed count`);
-  const count = Number(matches[0][1]);
-  if (!Number.isSafeInteger(count) || count < 1) fail(`${label} has an invalid executed count`);
-  return count;
+function parseXunit(bytes, expected, label) {
+  if (!Buffer.isBuffer(bytes)) fail(`${label} xUnit result is malformed`);
+  const source = bytes.toString('utf8');
+  const cases = [...source.matchAll(/<testcase\s+([^>]*?)(?:\/>|>[\s\S]*?<\/testcase>)/g)];
+  if (cases.length === 0) fail(`${label} has no xUnit testcases`);
+  const canonical = [];
+  for (const match of cases) {
+    const classname = /(?:^|\s)classname="([^"]+)"/.exec(match[1])?.[1];
+    const name = /(?:^|\s)name="([^"]+)"/.exec(match[1])?.[1];
+    if (!classname || !name || /[<&]/.test(classname) || /[<&]/.test(name)) fail(`${label} xUnit testcase identity is malformed`);
+    const candidates = [`${classname}/${name}`, `${classname}/${name}()`].filter((candidate) => expected.includes(candidate));
+    if (candidates.length !== 1) fail(`${label} xUnit testcase identity is unexpected`);
+    canonical.push(candidates[0]);
+  }
+  if (new Set(canonical).size !== canonical.length) fail(`${label} xUnit result contains a duplicate test`);
+  return canonical;
 }
 
 async function nativeRun(executable, argv, { timeoutMs }) {
@@ -57,7 +69,7 @@ async function nativeRun(executable, argv, { timeoutMs }) {
   }
 }
 
-export async function checkExactTestReplay({ packagePath, run = nativeRun, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function checkExactTestReplay({ packagePath, run = nativeRun, timeoutMs = DEFAULT_TIMEOUT_MS, makeXunitDirectory = () => mkdtemp(path.join(os.tmpdir(), 'exact-test-replay-')), readFile: readFileImpl = readFile, removeTree = (directory) => rm(directory, { recursive: true, force: true }) } = {}) {
   if (typeof packagePath !== 'string' || packagePath.length === 0) fail('package path is required');
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) fail('watchdog timeout must be a positive safe integer');
 
@@ -66,23 +78,31 @@ export async function checkExactTestReplay({ packagePath, run = nativeRun, timeo
   const expected = parseTestNames(expectedResult.stdout, 'swift test list');
   const suites = sorted([...new Set(expected.map((name) => TEST_IDENTIFIER.exec(name).groups.suite))]);
   const executed = [];
+  const xunitDirectory = await makeXunitDirectory();
 
-  for (const suite of suites) {
-    let result;
-    try {
-      result = await run('swift', ['test', '--package-path', packagePath, '--no-parallel', '--filter', suite], { timeoutMs });
-    } catch (error) {
-      if (error?.code === 'ETIMEDOUT') fail(`shard watchdog timeout: ${suite}`);
-      throw error;
+  try {
+    for (const [index, suite] of suites.entries()) {
+      const xunitPath = path.join(xunitDirectory, `shard-${index}.xml`);
+      let result;
+      try {
+        result = await run('swift', ['test', '--package-path', packagePath, '--no-parallel', '--filter', suite, '--xunit-output', xunitPath], { timeoutMs });
+      } catch (error) {
+        if (error?.code === 'ETIMEDOUT') fail(`shard watchdog timeout: ${suite}`);
+        throw error;
+      }
+      if (!result || result.exitCode !== 0) fail(`shard failed: ${suite}`);
+      let xunitBytes;
+      try {
+        xunitBytes = await readFileImpl(xunitPath);
+      } catch {
+        fail(`shard ${suite} xUnit result is absent`);
+      }
+      const shardExecuted = parseXunit(xunitBytes, expected, `shard ${suite}`);
+      if (shardExecuted.some((name) => TEST_IDENTIFIER.exec(name).groups.suite !== suite)) fail(`shard ${suite} xUnit result contains an unexpected suite`);
+      executed.push(...shardExecuted);
     }
-    if (!result || result.exitCode !== 0) fail(`shard failed: ${suite}`);
-    const selected = expected.filter((name) => TEST_IDENTIFIER.exec(name).groups.suite === suite);
-    const emitted = parseTestNames(result.stdout, `shard ${suite}`, { requireAtLeastOne: false });
-    if (emitted.length > 0 && JSON.stringify(sorted(emitted)) !== JSON.stringify(sorted(selected))) {
-      fail(`shard ${suite} output does not match its selected test set`);
-    }
-    if (executedCount(result.stdout, `shard ${suite}`) !== selected.length) fail(`shard ${suite} executed count does not match its selected test set`);
-    executed.push(...selected);
+  } finally {
+    await removeTree(xunitDirectory);
   }
 
   if (new Set(executed).size !== executed.length) fail('executed tests contain a duplicate test');

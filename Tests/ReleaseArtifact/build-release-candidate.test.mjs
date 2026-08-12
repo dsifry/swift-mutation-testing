@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,29 @@ import { runBuild } from '../../scripts/build-release-candidate.mjs';
 import * as releaseArtifact from '../../scripts/release-artifact.mjs';
 
 const commit = (character) => character.repeat(40);
+const digest = async (filePath) => createHash('sha256').update(await readFile(filePath)).digest('hex');
+
+async function ownedRead(filePath, root) {
+  const initial = await lstat(filePath);
+  const resolved = await realpath(filePath);
+  const canonicalRoot = await realpath(root);
+  assert.equal(initial.isFile() && initial.nlink === 1, true);
+  assert.equal(resolved.startsWith(`${canonicalRoot}${path.sep}`), true);
+  return readFile(resolved);
+}
+
+function realVerifierCommands(value) {
+  return {
+    tar: {
+      list: async () => [{ path: 'swift-mutation-testing', type: 'file', linkCount: 1, mode: '0755', size: 6 }],
+      extract: async (_archivePath, directory) => { await writeFile(path.join(directory, 'swift-mutation-testing'), 'binary'); await chmod(path.join(directory, 'swift-mutation-testing'), 0o755); },
+    },
+    codesign: { verify: async () => true },
+    file: { inspect: async () => ({ type: 'Mach-O 64-bit executable arm64' }) },
+    otool: { inspect: async () => ({ uuid: '12345678-1234-1234-1234-123456789abc', cpuType: 'arm64', deploymentTarget: '15.0' }) },
+    executable: { version: async () => 'swift-mutation-testing 1.3.1 [arm64-macos26]' },
+  };
+}
 
 async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'release-candidate-build-'));
@@ -111,6 +134,40 @@ test('verifies the produced candidate through the real root-bound release artifa
   assert.equal(value.calls.some(({ executable, argv }) => executable === 'tar' && argv[0] === '-xzf'), true);
 });
 
+test('preserves exact archive bytes through verifier staging and simulated upload download', async (t) => {
+  const value = await fixture();
+  t.after(() => rm(value.root, { recursive: true, force: true }));
+  const receipt = await runBuild(value.input, { runCommand: value.runCommand, loadArtifact: async () => releaseArtifact });
+  const archiveName = receipt.archive.filename;
+  const archivePath = path.join(value.outputRoot, archiveName);
+  const beforeVerifier = await digest(archivePath);
+  assert.equal(beforeVerifier, receipt.archive.sha256);
+
+  const downloadRoot = path.join(value.root, 'download');
+  await mkdir(downloadRoot);
+  const downloadedArchive = path.join(downloadRoot, archiveName);
+  const downloadedManifest = path.join(downloadRoot, 'release-candidate-v1.json');
+  await copyFile(archivePath, downloadedArchive);
+  await copyFile(path.join(value.outputRoot, 'release-candidate-v1.json'), downloadedManifest);
+  const afterDownload = await digest(downloadedArchive);
+  assert.equal(afterDownload, beforeVerifier);
+
+  const canonicalDownloadRoot = await realpath(downloadRoot);
+  await releaseArtifact.verifyCandidateBundle({
+    controlRoot: await realpath(value.controlRoot), sourceRoot: await realpath(value.sourceRoot), artifactRoot: canonicalDownloadRoot,
+    archivePath: path.join(canonicalDownloadRoot, archiveName), manifestPath: path.join(canonicalDownloadRoot, 'release-candidate-v1.json'), privateDirectory: path.join(canonicalDownloadRoot, 'verify-private'),
+    fs: {
+      readOwnedRegularFile: ownedRead,
+      mkdirFreshPrivate: async (directory, mode) => { await mkdir(directory, { mode }); await chmod(directory, mode); },
+      stageOwnedArchive: async (source, root, privateDirectory) => { const bytes = await ownedRead(source, root); const staged = path.join(privateDirectory, '.candidate-archive'); await writeFile(staged, bytes, { flag: 'wx', mode: 0o600 }); return { path: staged, bytes }; },
+    },
+    commands: realVerifierCommands(value),
+    git: { controlHead: async () => value.input.workflowCommit, sourceHead: async () => value.input.sourceCommit, isAncestor: async () => true },
+  });
+  const afterVerifier = await digest(downloadedArchive);
+  assert.equal(afterVerifier, beforeVerifier);
+});
+
 test('preserves a pre-existing source scratch path and uses a new owned scratch path', async (t) => {
   const value = await fixture();
   t.after(() => rm(value.root, { recursive: true, force: true }));
@@ -141,6 +198,21 @@ test('runs the control-owned focused gate against the source package path', asyn
   assert.deepEqual(focused.slice(1), ['--package-path', await (await import('node:fs/promises')).realpath(value.sourceRoot)]);
 });
 
+test('does not execute source-supplied control owners when source attempts replacement', async (t) => {
+  const value = await fixture();
+  t.after(() => rm(value.root, { recursive: true, force: true }));
+  await mkdir(path.join(value.sourceRoot, 'scripts'));
+  const poisonedOwner = path.join(value.sourceRoot, 'scripts', 'check-exact-test-replay.mjs');
+  await writeFile(poisonedOwner, 'throw new Error("source owner executed")');
+
+  await runBuild(value.input, {
+    runCommand: value.runCommand,
+    loadArtifact: async () => ({ sha256: (bytes) => createHash('sha256').update(bytes).digest('hex'), parseCandidateManifest: JSON.parse, verifyCandidateBundle: async () => ({}) }),
+  });
+
+  assert.equal(value.calls.some(({ executable, argv }) => executable === process.execPath && argv[0] === poisonedOwner), false);
+});
+
 test('rejects a pre-existing output root without deleting its contents', async (t) => {
   const value = await fixture();
   t.after(() => rm(value.root, { recursive: true, force: true }));
@@ -157,10 +229,14 @@ for (const [name, mutate, pattern] of [
   ['source nested under control', (value) => { value.input.sourceRoot = path.join(value.controlRoot, 'source'); }, /disjoint|source/i],
   ['unequal control head', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'git' && args[1].join(' ') === 'rev-parse HEAD' && path.basename(args[2].cwd) === 'control' ? { stdout: `${commit('c')}\n`, stderr: '', exitCode: 0 } : original(...args); }, /HEAD|workflow/i],
   ['multiple version placeholders', async (value) => { await writeFile(path.join(value.sourceRoot, 'Sources', 'SwiftMutationTesting', 'Version.swift'), '0.0.0-dev 0.0.0-dev'); }, /exactly one|version/i],
+  ['zero version placeholders', async (value) => { await writeFile(path.join(value.sourceRoot, 'Sources', 'SwiftMutationTesting', 'Version.swift'), 'static let number = "released"'); }, /exactly one|version/i],
   ['wrong toolchain', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'swift' && args[1][0] === '--version' ? { stdout: 'Swift 5', stderr: '', exitCode: 0 } : original(...args); }, /toolchain|Swift/i],
   ['wrong Xcode build', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'xcodebuild' ? { stdout: 'Xcode 26.6\nBuild version wrong\n', stderr: '', exitCode: 0 } : original(...args); }, /toolchain|Xcode/i],
   ['wrong runner architecture', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'uname' ? { stdout: 'x86_64\n', stderr: '', exitCode: 0 } : original(...args); }, /toolchain|architecture/i],
   ['build failure', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'swift' && args[1][0] === 'build' ? { stdout: '', stderr: 'bad', exitCode: 1 } : original(...args); }, /build/i],
+  ['focused test failure', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'bash' ? { stdout: '', stderr: 'failed', exitCode: 1 } : original(...args); }, /coverage|gate/i],
+  ['wrong binary type', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'file' ? { stdout: 'text\n', stderr: '', exitCode: 0 } : original(...args); }, /Mach-O|binary/i],
+  ['wrong binary version', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0].endsWith('swift-mutation-testing') ? { stdout: 'wrong\n', stderr: '', exitCode: 0 } : original(...args); }, /version/i],
 ]) {
   test(`fails closed for ${name} and removes partial output`, async (t) => {
     const value = await fixture();
