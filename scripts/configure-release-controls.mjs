@@ -49,16 +49,21 @@ async function observe(api, maintainer) {
   const matches = summaries.filter((item) => item?.name === RULESET);
   if (matches.length > 1) fail('exactly one immutable-release-tags ruleset is required');
   const ruleset = matches.length === 1 ? await api.getRuleset(matches[0].id) : null;
-  return { environment, ruleset, environmentExact: exactEnvironment(environment, maintainer), rulesetExact: exactRuleset(ruleset) };
+  const reviewerLogin = environment?.protection_rules?.[0]?.reviewers?.[0]?.reviewer?.login ?? maintainer;
+  const permission = reviewerLogin ? await api.getRepositoryPermission(reviewerLogin) : null;
+  const reviewerAuthorized = permission === 'maintain' || permission === 'admin';
+  return { environment, ruleset, reviewerAuthorized, environmentExact: exactEnvironment(environment, maintainer) && reviewerAuthorized, rulesetExact: exactRuleset(ruleset) };
 }
 
 export async function configureReleaseControls({ repository, mode = 'check', maintainer, api }) {
   if (repository !== REPOSITORY) fail(`repository must equal ${REPOSITORY}`);
   if (mode !== 'check' && mode !== 'apply') fail('mode must be check or apply');
   if (!api) fail('GitHub adapter is required');
+  if (typeof api.getRepositoryPermission !== 'function') fail('GitHub adapter must verify maintainer authority');
   if (mode === 'apply' && (typeof maintainer !== 'string' || maintainer.length === 0)) fail('apply requires an authenticated maintainer login');
 
   const before = await observe(api, mode === 'apply' ? maintainer : undefined);
+  if (before.environment && before.reviewerAuthorized === false && before.environment.protection_rules?.[0]?.reviewers?.[0]?.reviewer?.login) fail('configured approval reviewer lacks maintainer/admin authority');
   if (mode === 'check') {
     if (!before.environmentExact || !before.rulesetExact) fail('required environment or ruleset is missing or weaker than policy');
     return { repository, environment: 'exact', ruleset: 'exact', changed: false };
@@ -96,6 +101,10 @@ export function createNativeGitHubAdapter(repository, maintainer, { runCommand =
     },
     async listRulesets() { return ghJSON('GET', `repos/${repository}/rulesets`, undefined, runCommand); },
     async getRuleset(id) { return ghJSON('GET', `repos/${repository}/rulesets/${id}`, undefined, runCommand); },
+    async getRepositoryPermission(login) {
+      const value = await ghJSON('GET', `repos/${repository}/collaborators/${login}/permission`, undefined, runCommand);
+      return value?.permission;
+    },
     async putEnvironment(payload) {
       const user = await ghJSON('GET', `users/${payload.maintainer}`, undefined, runCommand);
       if (!Number.isSafeInteger(user?.id) || user.id <= 0) fail('maintainer identity is not observable');

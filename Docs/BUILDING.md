@@ -120,7 +120,46 @@ executable digests, and workflow/source commits in the Guide candidate
 descriptor. The Guide proof returns its commit, descriptor digest, and
 content-free release-proof digest for promotion.
 
+```bash
+gh workflow run release-candidate.yml --repo dsifry/swift-mutation-testing \
+  -f version=1.3.1 -f source_commit=FULL_40_CHARACTER_SOURCE_COMMIT
+gh run watch CANDIDATE_RUN_ID --repo dsifry/swift-mutation-testing --exit-status
+gh run download CANDIDATE_RUN_ID --repo dsifry/swift-mutation-testing \
+  --name CANDIDATE_ARTIFACT_NAME --dir candidate-evidence
+```
+
+Copy the authenticated run ID/attempt, artifact ID/name, workflow/source commits,
+and the three candidate digests into The Guide's release-candidate descriptor.
+After The Guide produces and reviewers merge its content-free proof, copy that
+proof into `Docs/ReleaseEvidence/v1.3.1-guide-proof.json` and record its Guide
+commit, descriptor digest, and proof SHA-256.
+
+Create the already-reviewed release tag as a signed annotated tag and push it
+without rewriting any existing tag:
+
+```bash
+git tag -s v1.3.1 SOURCE_COMMIT -m 'swift-mutation-testing 1.3.1'
+git push origin refs/tags/v1.3.1
+```
+
+Dispatch promotion using every required field shown by the workflow interface:
+
+```bash
+gh workflow run release.yml --repo dsifry/swift-mutation-testing \
+  -f version=1.3.1 -f canonical_tag=v1.3.1 \
+  -f candidate_run_id=RUN_ID -f candidate_run_attempt=ATTEMPT \
+  -f candidate_artifact_id=ARTIFACT_ID -f candidate_artifact_name=ARTIFACT_NAME \
+  -f candidate_workflow_commit=WORKFLOW_COMMIT -f source_commit=SOURCE_COMMIT \
+  -f manifest_sha256=MANIFEST_SHA256 -f archive_sha256=ARCHIVE_SHA256 \
+  -f executable_sha256=EXECUTABLE_SHA256 \
+  -f candidate_descriptor_sha256=DESCRIPTOR_SHA256 \
+  -f proof_commit=PROOF_COMMIT -f guide_commit=GUIDE_COMMIT \
+  -f guide_proof_sha256=GUIDE_PROOF_SHA256
+```
+
 Retry promotion only against the same nonpublic draft whose three assets match
 byte-for-byte. An expired candidate must be rebuilt and fully reproven. A
 mismatched draft, public release, public asset, or tag collision is terminal for
 automation: stop and investigate; never clobber, replace, or reconstruct bytes.
+For a transient failure with the exact same candidate and matching draft, rerun
+the same workflow attempt and inputs: `gh run rerun PROMOTION_RUN_ID --failed`.

@@ -51,8 +51,8 @@ VERSION="1.3.1"
 BASE="https://github.com/dsifry/swift-mutation-testing/releases/download/v${VERSION}"
 curl -fLO "$BASE/swift-mutation-testing-v${VERSION}-macos.tar.gz"
 curl -fLO "$BASE/swift-mutation-testing-v${VERSION}-SHA256SUMS"
-shasum -a 256 -c "swift-mutation-testing-v${VERSION}-SHA256SUMS"
 tar -xzf "swift-mutation-testing-v${VERSION}-macos.tar.gz"
+shasum -a 256 -c "swift-mutation-testing-v${VERSION}-SHA256SUMS"
 
 # Move to a directory in your PATH
 sudo mv swift-mutation-testing /usr/local/bin/

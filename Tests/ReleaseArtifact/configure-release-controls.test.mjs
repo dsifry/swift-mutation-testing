@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile as execFileCallback } from 'node:child_process';
-import { access, readFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
@@ -44,6 +45,7 @@ function adapter({ environment = exactEnvironment(), rulesets = [exactRuleset()]
       async putEnvironment(payload) { calls.push(['putEnvironment', payload]); applied = true; },
       async createRuleset(payload) { calls.push(['createRuleset', payload]); applied = true; return { id: 17 }; },
       async updateRuleset(id, payload) { calls.push(['updateRuleset', id, payload]); applied = true; },
+      async getRepositoryPermission(login) { calls.push(['getRepositoryPermission', login]); return 'maintain'; },
     },
   };
 }
@@ -66,6 +68,17 @@ test('coverage manifest is closed and the executable gate exists', async () => {
     excludes: [],
   });
   await access(path.join(root, 'scripts/check-release-artifact-coverage.sh'));
+});
+
+test('coverage gate rejects a manifest owner absent from V8 output', async (t) => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'task6-coverage-manifest-'));
+  t.after(async () => (await import('node:fs/promises')).rm(temporary, { recursive: true, force: true }));
+  const manifestPath = path.join(temporary, 'manifest.json');
+  const absentOwner = path.join(root, 'scripts/owner-not-imported.mjs');
+  await writeFile(absentOwner, 'export const value = true;\n');
+  t.after(async () => (await import('node:fs/promises')).rm(absentOwner, { force: true }));
+  await writeFile(manifestPath, JSON.stringify({ includes: ['scripts/owner-not-imported.mjs'], thresholds: { lines: 100, branches: 100, functions: 100 }, excludes: [] }));
+  await assert.rejects(() => execFile(path.join(root, 'scripts/check-release-artifact-coverage.sh'), [], { cwd: root, env: { ...process.env, RELEASE_ARTIFACT_COVERAGE_MANIFEST: manifestPath } }), /coverage owner|absent|missing/i);
 });
 
 test('default check accepts exact controls without mutation', async () => {
@@ -117,6 +130,7 @@ test('rejects malformed and duplicate ruleset observations and a wrong apply rev
   await assert.rejects(() => configureReleaseControls({ repository: 'dsifry/swift-mutation-testing', mode: 'apply', maintainer: 'other', api: adapter().api }), /post-apply/i);
   await assert.rejects(() => configureReleaseControls({ repository: 'dsifry/swift-mutation-testing', mode: 'apply', maintainer: '', api: adapter().api }), /maintainer/i);
   await assert.rejects(() => configureReleaseControls({ repository: 'dsifry/swift-mutation-testing', mode: 'check' }), /adapter/i);
+  await assert.rejects(() => configureReleaseControls({ repository: 'dsifry/swift-mutation-testing', mode: 'check', api: {} }), /authority/i);
 });
 
 test('apply creates missing controls and requires an exact reread', async () => {
@@ -155,6 +169,23 @@ test('apply fails on partial mutation, weaker reread, lost authority, wrong repo
   await assert.rejects(() => configureReleaseControls({ repository: 'dsifry/swift-mutation-testing', mode: 'check', api: lost.api }), /requires admin/);
   await assert.rejects(() => configureReleaseControls({ repository: 'other/repo', mode: 'check', api: adapter().api }), /repository/i);
   await assert.rejects(() => configureReleaseControls({ repository: 'dsifry/swift-mutation-testing', mode: 'other', api: adapter().api }), /mode/i);
+});
+
+test('check and apply reject an approval reviewer without maintainer authority before mutation', async () => {
+  const { configureReleaseControls } = await owner();
+  for (const mode of ['check', 'apply']) {
+    const fixture = adapter();
+    fixture.api.getRepositoryPermission = async () => 'push';
+    await assert.rejects(() => configureReleaseControls({ repository: 'dsifry/swift-mutation-testing', mode, maintainer: mode === 'apply' ? 'release-maintainer' : undefined, api: fixture.api }), /maintainer|admin|authority|weaker.*policy/i);
+    assert.equal(fixture.calls.some(([name]) => name.startsWith('put') || name.startsWith('create') || name.startsWith('update')), false);
+  }
+});
+
+test('release docs order checksum verification after extraction and provide executable lifecycle commands', async () => {
+  const installation = await readFile(path.join(root, 'Docs/INSTALLATION.MD'), 'utf8');
+  assert.ok(installation.indexOf('tar -xzf') < installation.indexOf('shasum -a 256 -c'));
+  const building = await readFile(path.join(root, 'Docs/BUILDING.md'), 'utf8');
+  for (const command of ['gh workflow run release-candidate.yml', 'gh run download', 'git tag -s', 'gh workflow run release.yml', 'gh run rerun']) assert.match(building, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 
 test('CLI defaults to check, requires explicit apply maintainer, and emits JSON', async () => {
@@ -199,6 +230,7 @@ test('native GitHub adapter issues exact API reads and mutations', async () => {
     exactEnvironment(),
     [exactRuleset()],
     exactRuleset(),
+    { permission: 'admin' },
     { id: 42 },
     null,
     { id: 17 },
@@ -216,11 +248,12 @@ test('native GitHub adapter issues exact API reads and mutations', async () => {
   assert.deepEqual(await api.getEnvironment(), exactEnvironment());
   assert.deepEqual(await api.listRulesets(), [exactRuleset()]);
   assert.deepEqual(await api.getRuleset(17), exactRuleset());
+  assert.equal(await api.getRepositoryPermission('release-maintainer'), 'admin');
   await api.putEnvironment({ maintainer: 'release-maintainer' });
   await api.createRuleset(exactRuleset());
   await api.updateRuleset(17, exactRuleset());
-  assert.equal(calls.length, 8);
-  assert.match(calls[5][1].join(' '), /--input -/);
+  assert.equal(calls.length, 9);
+  assert.match(calls[6][1].join(' '), /--input -/);
 
   const bad = createNativeGitHubAdapter('dsifry/swift-mutation-testing', 'release-maintainer', { runCommand: async () => ({ stdout: '{}' }) });
   await assert.rejects(() => bad.putEnvironment({ maintainer: 'release-maintainer' }), /identity/i);
