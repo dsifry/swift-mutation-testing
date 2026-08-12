@@ -374,6 +374,230 @@ export function verifyAttestationBundle(bundle, expected) {
   return deepFreeze(statement);
 }
 
+const GUIDE_PROOF_KEYS = Object.freeze(['schemaVersion', 'guideCommit', 'candidate', 'result']);
+
+function promotionFail(message) {
+  fail('promotion', message);
+}
+
+function exactKeys(value, keys) {
+  return isObject(value)
+    && Object.keys(value).length === keys.length
+    && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function requirePromotion(condition, message) {
+  if (!condition) promotionFail(message);
+}
+
+function canonicalJSONBytes(value) {
+  return Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+export function parseGuideReleaseProof(bytes) {
+  requirePromotion(Buffer.isBuffer(bytes), 'Guide proof bytes must be a Buffer');
+  let value;
+  try {
+    value = parseJSONRejectingDuplicateKeys(bytes);
+  } catch {
+    promotionFail('Guide proof is malformed');
+  }
+  requirePromotion(exactKeys(value, GUIDE_PROOF_KEYS), 'Guide proof schema is not closed');
+  requirePromotion(bytes.equals(canonicalJSONBytes(value)), 'Guide proof bytes are not canonical');
+  requirePromotion(value.schemaVersion === 'guide-release-proof-v1', 'Guide proof schema version is invalid');
+  requirePromotion(COMMIT.test(value.guideCommit), 'Guide proof commit is invalid');
+  requirePromotion(exactKeys(value.candidate, [
+    'version', 'repository', 'run', 'artifact', 'sourceCommit',
+    'manifestSHA256', 'archiveSHA256', 'executableSHA256',
+  ]), 'Guide proof candidate schema is not closed');
+  requirePromotion(value.candidate.version === '1.3.1', 'Guide proof candidate version is invalid');
+  requirePromotion(value.candidate.repository === 'dsifry/swift-mutation-testing', 'Guide proof candidate repository is invalid');
+  requirePromotion(exactKeys(value.candidate.run, ['id', 'attempt'])
+    && Number.isSafeInteger(value.candidate.run.id) && value.candidate.run.id > 0
+    && Number.isSafeInteger(value.candidate.run.attempt) && value.candidate.run.attempt > 0,
+  'Guide proof candidate run is invalid');
+  requirePromotion(exactKeys(value.candidate.artifact, ['id', 'name'])
+    && Number.isSafeInteger(value.candidate.artifact.id) && value.candidate.artifact.id > 0
+    && typeof value.candidate.artifact.name === 'string' && value.candidate.artifact.name.length > 0,
+  'Guide proof candidate artifact is invalid');
+  requirePromotion(COMMIT.test(value.candidate.sourceCommit), 'Guide proof candidate source commit is invalid');
+  for (const key of ['manifestSHA256', 'archiveSHA256', 'executableSHA256']) {
+    requirePromotion(SHA256.test(value.candidate[key]), `Guide proof candidate ${key} is invalid`);
+  }
+  requirePromotion(exactKeys(value.result, ['status', 'selectors', 'performance', 'drills']), 'Guide proof result schema is not closed');
+  requirePromotion(value.result.status === 'passed', 'Guide proof result did not pass');
+  requirePromotion(exactKeys(value.result.selectors, ['count', 'coldTupleSHA256', 'warmTupleSHA256']), 'Guide proof selectors schema is not closed');
+  requirePromotion(value.result.selectors.count === 103, 'Guide proof selector count is not 103');
+  requirePromotion(SHA256.test(value.result.selectors.coldTupleSHA256)
+    && value.result.selectors.coldTupleSHA256 === value.result.selectors.warmTupleSHA256,
+  'Guide proof selector tuples are not equal');
+  requirePromotion(exactKeys(value.result.performance, [
+    'uncachedElapsedSeconds', 'warmElapsedSeconds', 'uncachedBuilds', 'warmFallbackBuilds',
+  ]), 'Guide proof performance schema is not closed');
+  const performance = value.result.performance;
+  requirePromotion(Number.isFinite(performance.uncachedElapsedSeconds) && performance.uncachedElapsedSeconds > 0
+    && Number.isFinite(performance.warmElapsedSeconds) && performance.warmElapsedSeconds >= 0
+    && performance.warmElapsedSeconds / performance.uncachedElapsedSeconds <= 0.80,
+  'Guide proof warm elapsed ratio exceeds 0.80');
+  requirePromotion(Number.isSafeInteger(performance.uncachedBuilds) && performance.uncachedBuilds > 0
+    && Number.isSafeInteger(performance.warmFallbackBuilds) && performance.warmFallbackBuilds >= 0
+    && performance.warmFallbackBuilds / performance.uncachedBuilds <= 0.10,
+  'Guide proof warm fallback ratio exceeds 0.10');
+  requirePromotion(exactKeys(value.result.drills, ['recovery', 'privacy', 'retention'])
+    && Object.values(value.result.drills).every((result) => result === 'passed'),
+  'Guide proof drills did not all pass');
+  return deepFreeze(value);
+}
+
+function assertPromotionInput(input) {
+  requirePromotion(isObject(input), 'input must be an object');
+  requirePromotion(input.version === '1.3.1', 'input version is invalid');
+  requirePromotion(input.repository === 'dsifry/swift-mutation-testing', 'input repository is invalid');
+  requirePromotion(Number.isSafeInteger(input.runId) && input.runId > 0
+    && Number.isSafeInteger(input.runAttempt) && input.runAttempt > 0
+    && Number.isSafeInteger(input.artifactId) && input.artifactId > 0,
+  'input run or artifact identity is invalid');
+  requirePromotion(typeof input.artifactName === 'string' && input.artifactName.length > 0, 'input artifact name is invalid');
+  requirePromotion(COMMIT.test(input.sourceCommit) && COMMIT.test(input.controlCommit), 'input commit is invalid');
+  for (const key of ['manifestSHA256', 'archiveSHA256', 'executableSHA256', 'guideProofSHA256']) {
+    requirePromotion(SHA256.test(input[key]), `input ${key} is invalid`);
+  }
+  requirePromotion(!Object.hasOwn(input, 'downloadUrl') && !Object.hasOwn(input, 'downloadURL'), 'untrusted download URL is forbidden');
+}
+
+function verifyProofBinding(input, proof) {
+  requirePromotion(proof.guideCommit === input.controlCommit, 'Guide proof commit does not match the promotion control commit');
+  const expected = {
+    version: input.version,
+    repository: input.repository,
+    run: { id: input.runId, attempt: input.runAttempt },
+    artifact: { id: input.artifactId, name: input.artifactName },
+    sourceCommit: input.sourceCommit,
+    manifestSHA256: input.manifestSHA256,
+    archiveSHA256: input.archiveSHA256,
+    executableSHA256: input.executableSHA256,
+  };
+  requirePromotion(JSON.stringify(proof.candidate) === JSON.stringify(expected), 'Guide proof candidate descriptor does not match promotion input');
+}
+
+export function verifyPromotionAuthority(input, githubState) {
+  assertPromotionInput(input);
+  requirePromotion(isObject(githubState), 'GitHub state is absent');
+  requirePromotion(githubState.controlHead === input.controlCommit, 'promotion control checkout is not the Guide proof commit');
+  requirePromotion(Buffer.isBuffer(githubState.guideProofBytes), 'Guide proof is absent');
+  requirePromotion(sha256(githubState.guideProofBytes) === input.guideProofSHA256, 'Guide proof digest does not match input');
+  const proof = parseGuideReleaseProof(githubState.guideProofBytes);
+  verifyProofBinding(input, proof);
+
+  const manifest = parseCandidateManifest(githubState.manifestBytes);
+  requirePromotion(sha256(githubState.manifestBytes) === input.manifestSHA256, 'candidate manifest digest does not match input');
+  requirePromotion(manifest.repository === input.repository
+    && manifest.workflow.commit === githubState.run?.headSha
+    && manifest.sourceCommit === input.sourceCommit
+    && manifest.run.id === input.runId
+    && manifest.run.attempt === input.runAttempt
+    && manifest.artifactName === input.artifactName
+    && manifest.release.version === input.version
+    && manifest.archive.sha256 === input.archiveSHA256
+    && manifest.executable.sha256 === input.executableSHA256,
+  'candidate manifest does not match promotion input or run');
+
+  const run = githubState.run;
+  requirePromotion(isObject(run)
+    && run.repository === input.repository
+    && run.workflowPath === '.github/workflows/release-candidate.yml'
+    && run.headBranch === 'main'
+    && run.headSha === manifest.workflow.commit
+    && run.event === 'workflow_dispatch'
+    && run.status === 'completed'
+    && run.conclusion === 'success'
+    && run.runAttempt === input.runAttempt,
+  'candidate workflow run is not authoritative');
+  const artifact = githubState.artifact;
+  requirePromotion(isObject(artifact)
+    && artifact.id === input.artifactId
+    && artifact.name === input.artifactName
+    && artifact.workflowRunId === input.runId
+    && artifact.expired === false
+    && artifact.deleted === false,
+  'candidate artifact is not authoritative');
+  requirePromotion(!Object.hasOwn(artifact, 'downloadUrl') && !Object.hasOwn(artifact, 'archiveDownloadUrl'), 'untrusted artifact download URL is forbidden');
+
+  const expectedAttestation = {
+    repository: input.repository,
+    workflowPath: manifest.workflow.path,
+    workflowRef: manifest.workflow.ref,
+    workflowCommit: manifest.workflow.commit,
+    event: 'workflow_dispatch',
+    runId: input.runId,
+    runAttempt: input.runAttempt,
+    archiveSHA256: input.archiveSHA256,
+    manifestSHA256: input.manifestSHA256,
+  };
+  requirePromotion(isObject(githubState.attestations)
+    && isObject(githubState.attestations.archive)
+    && isObject(githubState.attestations.manifest),
+  'candidate attestations are absent');
+  verifyAttestationBundle(githubState.attestations.archive, expectedAttestation);
+  verifyAttestationBundle(githubState.attestations.manifest, expectedAttestation);
+  return deepFreeze({ proof, manifest });
+}
+
+export function verifyTagTuple(tuple, input) {
+  requirePromotion(isObject(tuple), 'tag tuple is absent');
+  requirePromotion(tuple.ref === `refs/tags/v${input.version}`, 'tag ref is wrong');
+  requirePromotion(COMMIT.test(tuple.refSha), 'tag ref SHA is invalid');
+  const tag = tuple.tag;
+  requirePromotion(isObject(tag) && tag.sha === tuple.refSha && tag.tag === `v${input.version}`, 'tag is not an annotated tag object');
+  requirePromotion(isObject(tag.verification) && tag.verification.verified === true && tag.verification.reason === 'valid', 'tag signature is not GitHub-verified with reason valid');
+  requirePromotion(isObject(tag.object) && tag.object.type === 'commit' && tag.object.sha === input.sourceCommit, 'tag must target the candidate source commit directly');
+  return deepFreeze(tuple);
+}
+
+export function verifyRepositoryControls(controls) {
+  requirePromotion(isObject(controls), 'repository controls are absent');
+  const matchingRules = Array.isArray(controls.rulesets)
+    ? controls.rulesets.filter((rule) => rule?.name === 'immutable-release-tags')
+    : [];
+  requirePromotion(matchingRules.length === 1, 'repository controls require exactly one immutable-release-tags ruleset');
+  const rule = matchingRules[0];
+  requirePromotion(rule.enforcement === 'active'
+    && Array.isArray(rule.targets) && rule.targets.length === 1 && rule.targets[0] === 'refs/tags/v*'
+    && rule.restrictsUpdates === true && rule.restrictsDeletions === true
+    && Array.isArray(rule.bypassActors) && rule.bypassActors.length === 0,
+  'repository controls immutable-release-tags ruleset is weak or bypassed');
+  const environment = controls.environment;
+  requirePromotion(isObject(environment)
+    && environment.name === 'release-production'
+    && Number.isSafeInteger(environment.requiredApprovals) && environment.requiredApprovals >= 1
+    && environment.preventSelfReview === true,
+  'repository controls release-production environment is absent or approval-free');
+  return deepFreeze(controls);
+}
+
+function canonicalAssetMap(assets, scope) {
+  requirePromotion(Array.isArray(assets), `${scope} assets are invalid`);
+  const result = new Map();
+  for (const asset of assets) {
+    requirePromotion(isObject(asset) && typeof asset.name === 'string' && SHA256.test(asset.sha256), `${scope} asset is invalid`);
+    requirePromotion(!result.has(asset.name), `${scope} contains duplicate assets`);
+    result.set(asset.name, asset.sha256);
+  }
+  return result;
+}
+
+export function classifyReleaseState(release, expectedAssets) {
+  const expected = canonicalAssetMap(expectedAssets, 'expected');
+  if (release === null) return 'absent';
+  requirePromotion(isObject(release), 'release state is invalid');
+  requirePromotion(release.draft === true, 'public release collision is terminal');
+  const actual = canonicalAssetMap(release.assets, 'draft');
+  requirePromotion(actual.size === expected.size
+    && [...expected].every(([name, digest]) => actual.get(name) === digest),
+  'draft assets do not exactly match the candidate');
+  return 'exact-draft';
+}
+
 function assertResolvedChild(root, target, label) {
   const relative = path.relative(root, target);
   if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
