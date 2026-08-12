@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 
@@ -5,6 +6,173 @@ import Testing
 
 @Suite("SimulatorManager")
 struct SimulatorManagerTests {
+    @Test("One gate simulator is registered, reused, and deleted exactly once")
+    func gateSimulatorLifecycleUsesStableUDID() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gate-simulator-\(UUID().uuidString)", isDirectory: true)
+        let registrationURL = root.appendingPathComponent("registration.json")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let launcher = GateSimulatorCommandLog()
+        let manager = SimulatorManager(launcher: launcher)
+
+        let registration = try await manager.prepareGateSimulator(
+            destination: "platform=iOS Simulator,name=iPhone 16",
+            cacheRoot: root,
+            registrationURL: registrationURL,
+            gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+            guideLockInode: 42
+        )
+        #expect(registration.udid == "GATE-UDID")
+        #expect(registration.state == .idle)
+        #expect(try GateSimulatorRegistration.load(from: registrationURL).udid == "GATE-UDID")
+
+        let pool = SimulatorPool(
+            registeredUDID: registration.udid,
+            destination: "platform=iOS Simulator,name=iPhone 16",
+            launcher: launcher
+        )
+        try await pool.setUp()
+        for _ in 0 ..< 103 {
+            let slot = try await pool.acquire()
+            #expect(slot.udid == "GATE-UDID")
+            await pool.release(slot)
+        }
+        await pool.tearDown()
+        try await manager.cleanupGateSimulator(
+            registrationURL: registrationURL,
+            expectedGateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+            expectedGuideLockInode: 42
+        )
+
+        let commands = await launcher.commands
+        #expect(commands.filter { $0.contains(" create ") }.count == 1)
+        #expect(commands.filter { $0.contains(" boot GATE-UDID") }.count == 1)
+        #expect(commands.filter { $0.contains(" shutdown GATE-UDID") }.count == 1)
+        #expect(commands.filter { $0.contains(" delete GATE-UDID") }.count == 1)
+        #expect(try GateSimulatorRegistration.load(from: registrationURL).state == .deleted)
+    }
+
+    @Test("A wrapper or engine failure cleans the bound gate simulator before returning")
+    func failedInvocationCleansBoundGateSimulator() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gate-simulator-failure-\(UUID().uuidString)", isDirectory: true)
+        let registrationURL = root.appendingPathComponent("registration.json")
+        let lockURL = root.appendingPathComponent("guide.lock")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: lockURL.path, contents: Data())
+        let descriptor = open(lockURL.path, O_RDONLY | O_CLOEXEC)
+        defer {
+            _ = close(descriptor)
+            try? FileManager.default.removeItem(at: root)
+        }
+        var metadata = stat()
+        #expect(fstat(descriptor, &metadata) == 0)
+        let launcher = GateSimulatorCommandLog()
+        _ = try await SimulatorManager(launcher: launcher).prepareGateSimulator(
+            destination: "platform=iOS Simulator,name=iPhone 16",
+            cacheRoot: root,
+            registrationURL: registrationURL,
+            gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+            guideLockInode: UInt64(metadata.st_ino)
+        )
+        let parsed = ParsedArguments(cache: .init(
+            mode: .legacyBenchmark,
+            buildCacheRoot: root.path,
+            simulatorRegistration: registrationURL.path,
+            guideLockFD: Int(descriptor)
+        ))
+
+        await SwiftMutationTesting.cleanupBoundSimulatorAfterFailure(parsed: parsed, launcher: launcher)
+
+        #expect(try GateSimulatorRegistration.load(from: registrationURL).state == .deleted)
+        let commands = await launcher.commands
+        #expect(commands.filter { $0.contains(" shutdown GATE-UDID") }.count == 1)
+        #expect(commands.filter { $0.contains(" delete GATE-UDID") }.count == 1)
+    }
+
+    @Test("Gate simulator registration rejects extra keys and unauthenticated state")
+    func registrationIsClosedAndFailClosed() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gate-registration-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(#"{"activeInvocationNonce":null,"deviceSetPath":"/tmp/device-set","deviceTypeIdentifier":"type","extra":true,"gateRunNonce":"ABCDEFGHIJKLMNOPQRSTUV","generation":1,"guideLockInode":42,"runtimeIdentifier":"runtime","schemaVersion":1,"state":"idle","udid":"GATE-UDID"}"#.utf8)
+            .write(to: url)
+
+        #expect(throws: (any Error).self) {
+            _ = try GateSimulatorRegistration.load(from: url)
+        }
+    }
+
+    @Test("Gate registration validates an idle device-set and preserves active invocation encoding")
+    func validatesRegistrationAndEncodesActiveInvocation() throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        let registrationURL = root.appendingPathComponent("registration.json")
+        let registration = GateSimulatorRegistration(
+            schemaVersion: 1, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42,
+            deviceSetPath: root.path, udid: "GATE-UDID", runtimeIdentifier: "runtime",
+            deviceTypeIdentifier: "type", generation: 1, state: .idle,
+            activeInvocationNonce: "abcdefghijklmnopqrstuv"
+        )
+        try JSONEncoder().encode(registration).write(to: registrationURL)
+        let decoded = try JSONDecoder().decode(
+            GateSimulatorRegistration.self, from: Data(contentsOf: registrationURL))
+        #expect(decoded.activeInvocationNonce == "abcdefghijklmnopqrstuv")
+
+        let idle = GateSimulatorRegistration(
+            schemaVersion: 1, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42,
+            deviceSetPath: root.path, udid: "GATE-UDID", runtimeIdentifier: "runtime",
+            deviceTypeIdentifier: "type", generation: 1, state: .idle,
+            activeInvocationNonce: nil
+        )
+        try JSONEncoder().encode(idle).write(to: registrationURL)
+        #expect(try SimulatorManager.validatedRegistration(
+            at: registrationURL, expectedGuideLockInode: 42).udid == "GATE-UDID")
+    }
+
+    @Test("Gate preparation rejects an existing receipt and removes its device set after create failure")
+    func preparationFailureIsFailClosedAndScrubsDeviceSet() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        let registrationURL = root.appendingPathComponent("registration.json")
+        try Data().write(to: registrationURL)
+        await #expect(throws: SimulatorError.self) {
+            try await SimulatorManager(launcher: GateSimulatorCommandLog()).prepareGateSimulator(
+                destination: "platform=iOS Simulator,name=iPhone 16", cacheRoot: root,
+                registrationURL: registrationURL, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+                guideLockInode: 42)
+        }
+        try FileManager.default.removeItem(at: registrationURL)
+
+        let launcher = GateSimulatorFailureLog()
+        await #expect(throws: SimulatorError.self) {
+            try await SimulatorManager(launcher: launcher).prepareGateSimulator(
+                destination: "platform=iOS Simulator,name=Unknown", cacheRoot: root,
+                registrationURL: registrationURL, gateRunNonce: "abcdefghijklmnopqrstuv",
+                guideLockInode: 42)
+        }
+        #expect(!FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("gate-simulator-abcdefghijklmnopqrstuv").path))
+    }
+
+    @Test("Gate cleanup rejects a device still present after deletion")
+    func cleanupRequiresDeletionReadback() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        let deviceSet = root.appendingPathComponent("device-set")
+        try FileManager.default.createDirectory(at: deviceSet, withIntermediateDirectories: false)
+        let url = root.appendingPathComponent("registration.json")
+        let registration = GateSimulatorRegistration(
+            schemaVersion: 1, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42,
+            deviceSetPath: deviceSet.path, udid: "GATE-UDID", runtimeIdentifier: "runtime",
+            deviceTypeIdentifier: "type", generation: 1, state: .idle, activeInvocationNonce: nil)
+        try JSONEncoder().encode(registration).write(to: url)
+        await #expect(throws: SimulatorError.self) {
+            try await SimulatorManager(launcher: GateSimulatorStillListedLog()).cleanupGateSimulator(
+                registrationURL: url, expectedGateRunNonce: nil, expectedGuideLockInode: 42)
+        }
+    }
     @Test("Given iOS Simulator destination, when requiresSimulatorPool called, then returns true")
     func requiresSimulatorPoolReturnsTrueForIOSSimulator() {
         let result = SimulatorManager.requiresSimulatorPool(for: "platform=iOS Simulator,name=iPhone 15")
@@ -134,5 +302,46 @@ struct SimulatorManagerTests {
         } catch {}
 
         #expect(threwBootTimeout)
+    }
+}
+
+private actor GateSimulatorCommandLog: ProcessLaunching {
+    private(set) var commands: [String] = []
+
+    func launch(
+        executableURL: URL,
+        arguments: [String],
+        workingDirectoryURL: URL,
+        timeout: Double
+    ) async throws -> Int32 {
+        commands.append(([executableURL.path] + arguments).joined(separator: " "))
+        return 0
+    }
+
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        commands.append(([request.executableURL.path] + request.arguments).joined(separator: " "))
+        if request.arguments.contains("create") { return (0, "GATE-UDID\n") }
+        if request.arguments.contains("devicetypes") {
+            return (0, #"{"devicetypes":[{"name":"iPhone 16","identifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16"}]}"#)
+        }
+        if request.arguments.contains("runtimes") {
+            return (0, #"{"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-0","isAvailable":true}]}"#)
+        }
+        return (0, "")
+    }
+}
+
+private struct GateSimulatorFailureLog: ProcessLaunching {
+    func launch(executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double) async throws -> Int32 { 0 }
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        if request.arguments.contains("create") { return (1, "") }
+        return (1, "not-json")
+    }
+}
+
+private struct GateSimulatorStillListedLog: ProcessLaunching {
+    func launch(executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double) async throws -> Int32 { 0 }
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        (0, "GATE-UDID")
     }
 }

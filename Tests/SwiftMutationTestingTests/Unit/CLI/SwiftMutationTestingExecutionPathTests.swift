@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 
@@ -5,6 +6,151 @@ import Testing
 
 @Suite("SwiftMutationTesting.run execution path")
 struct SwiftMutationTestingExecutionPathTests {
+    @Test("Hidden simulator supervisor mode rejects an incomplete internal frame")
+    func simulatorSupervisorDispatchRejectsIncompleteFrame() async {
+        #expect(await SwiftMutationTesting.main(args: ["--gate-simulator-supervisor"]) == 64)
+    }
+    @Test("Shipping CLI prepares and cleans the authenticated gate simulator")
+    func gateSimulatorDispatch() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        chmod(root.path, 0o700)
+        let lock = root.appendingPathComponent("lock")
+        FileManager.default.createFile(atPath: lock.path, contents: Data())
+        let descriptor = open(lock.path, O_RDONLY | O_CLOEXEC)
+        defer { _ = close(descriptor) }
+        let registration = root.appendingPathComponent("registration.json")
+        let launcher = ExecutionGateSimulatorLauncher()
+        let cache = ParsedArguments.CacheOptions(
+            mode: .simulatorPrepare, buildCacheRoot: root.path,
+            invocationNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+            simulatorRegistration: registration.path,
+            guideLockFD: Int(descriptor))
+        let prepare = ParsedArguments(
+            build: .init(destination: "platform=iOS Simulator,name=iPhone 16"),
+            cache: cache)
+        #expect(try await SwiftMutationTesting.execute(parsed: prepare, launcher: launcher) == .success)
+        let cleanup = ParsedArguments(cache: .init(
+            mode: .simulatorCleanup, buildCacheRoot: root.path,
+            invocationNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+            simulatorRegistration: registration.path,
+            guideLockFD: Int(descriptor)))
+        #expect(try await SwiftMutationTesting.execute(parsed: cleanup, launcher: launcher) == .success)
+        #expect(try GateSimulatorRegistration.load(from: registration).state == .deleted)
+    }
+
+    @Test("Shipping gate simulator dispatch fails closed for incomplete protocol")
+    func gateSimulatorDispatchRejectsIncompleteOptions() async {
+        await #expect(throws: UsageError.self) {
+            _ = try await SwiftMutationTesting.execute(
+                parsed: ParsedArguments(cache: .init(mode: .simulatorPrepare)),
+                launcher: MockProcessLauncher(exitCode: 0))
+        }
+        #expect(throws: UsageError.self) { try SwiftMutationTesting.descriptorInode(-1) }
+        let root = try? FileHelpers.makeTemporaryDirectory()
+        if let root {
+            defer { FileHelpers.cleanup(root) }
+            chmod(root.path, 0o700)
+            let registration = root.appendingPathComponent("registration.json")
+            let lock = root.appendingPathComponent("lock")
+            FileManager.default.createFile(atPath: lock.path, contents: Data())
+            let descriptor = open(lock.path, O_RDONLY | O_CLOEXEC)
+            defer { _ = close(descriptor) }
+            await #expect(throws: UsageError.self) {
+                _ = try await SwiftMutationTesting.execute(
+                    parsed: ParsedArguments(
+                        build: .init(destination: nil),
+                        cache: .init(
+                            mode: .simulatorPrepare, buildCacheRoot: root.path,
+                            invocationNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+                            simulatorRegistration: registration.path,
+                            guideLockFD: Int(descriptor))),
+                    launcher: MockProcessLauncher(exitCode: 0))
+            }
+        }
+    }
+
+    @Test("Legacy build-count evidence forwards schedule and observed counters")
+    func legacyBuildCountEvidenceContract() throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        let output = root.appendingPathComponent("build-count.json")
+        try SwiftMutationTesting.writeLegacyBuildCountEvidence(
+            to: output, nonce: "ABCDEFGHIJKLMNOPQRSTUV",
+            selector: "AppTests/One", runOrdinal: 7, attemptOrdinal: 1,
+            projectPath: root.path, fullBuilds: 2, fallbackBuilds: 3,
+            testWithoutBuildingRuns: 4)
+        let receipt = try JSONDecoder().decode(BuildCountEvidence.self, from: Data(contentsOf: output))
+        #expect(receipt.runOrdinal == 7)
+        #expect(receipt.attemptOrdinal == 1)
+        #expect(receipt.counters == .init(
+            fullBuilds: 2, incrementalBuilds: 0,
+            testWithoutBuildingRuns: 4, fallbackBuilds: 3))
+    }
+
+    @Test("Legacy benchmark execution reuses the registered simulator and writes evidence")
+    func legacyBenchmarkRegisteredExecution() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        chmod(root.path, 0o700)
+        try "scheme: App\ndestination: platform=iOS Simulator,name=iPhone 16\nquiet: true\n".write(
+            to: root.appendingPathComponent(".swift-mutation-testing.yml"), atomically: true, encoding: .utf8)
+        let lock = root.appendingPathComponent("lock")
+        FileManager.default.createFile(atPath: lock.path, contents: Data())
+        let descriptor = open(lock.path, O_RDONLY | O_CLOEXEC)
+        defer { _ = close(descriptor) }
+        var metadata = stat()
+        #expect(fstat(descriptor, &metadata) == 0)
+        let registration = root.appendingPathComponent("registration.json")
+        let launcher = ExecutionGateSimulatorLauncher()
+        _ = try await SimulatorManager(launcher: launcher).prepareGateSimulator(
+            destination: "platform=iOS Simulator,name=iPhone 16", cacheRoot: root,
+            registrationURL: registration, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+            guideLockInode: UInt64(metadata.st_ino))
+        let evidence = root.appendingPathComponent("build-count.json")
+        let parsed = ParsedArguments(
+            projectPath: root.path,
+            build: .init(scheme: "App", destination: "platform=iOS Simulator,name=iPhone 16", testTarget: "AppTests/One", noCache: true),
+            reporting: .init(quiet: true),
+            cache: .init(
+                mode: .legacyBenchmark, buildCacheRoot: root.path,
+                invocationNonce: "ABCDEFGHIJKLMNOPQRSTUV", simulatorRegistration: registration.path,
+                buildCountEvidenceOutput: evidence.path, guideLockFD: Int(descriptor),
+                wrapperLeaseFD: 5, runOrdinal: 7, attemptOrdinal: 1))
+        #expect(try await SwiftMutationTesting.execute(parsed: parsed, launcher: launcher) == .success)
+        let receipt = try JSONDecoder().decode(BuildCountEvidence.self, from: Data(contentsOf: evidence))
+        #expect(receipt.runOrdinal == 7)
+        #expect(receipt.attemptOrdinal == 1)
+        #expect(receipt.counters.fullBuilds == 1)
+        #expect(receipt.counters.testWithoutBuildingRuns == 0)
+    }
+
+    @Test("Nil launcher paths use the explicit deterministic Xcode launcher seam")
+    func explicitDefaultLauncherSeam() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        chmod(root.path, 0o700)
+        let lock = root.appendingPathComponent("lock")
+        FileManager.default.createFile(atPath: lock.path, contents: Data())
+        let descriptor = open(lock.path, O_RDONLY | O_CLOEXEC)
+        defer { _ = close(descriptor) }
+        let registration = root.appendingPathComponent("registration.json")
+        let launcher = ExecutionGateSimulatorLauncher()
+        let parsed = ParsedArguments(
+            build: .init(destination: "platform=iOS Simulator,name=iPhone 16"),
+            cache: .init(
+                mode: .simulatorPrepare, buildCacheRoot: root.path,
+                invocationNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+                simulatorRegistration: registration.path, guideLockFD: Int(descriptor)))
+        #expect(try await SwiftMutationTesting.execute(
+            parsed: parsed, launcher: nil, defaultXcodeLauncher: launcher) == .success)
+        await SwiftMutationTesting.cleanupBoundSimulatorAfterFailure(
+            parsed: ParsedArguments(cache: .init(
+                mode: .legacyBenchmark, simulatorRegistration: registration.path,
+                guideLockFD: Int(descriptor))),
+            launcher: nil, defaultLauncher: launcher)
+        #expect(try GateSimulatorRegistration.load(from: registration).state == .deleted)
+    }
     @Test("Prepare and target dispatch complete through the CLI execution path")
     func successfulCacheCommandDispatch() async throws {
         let project = try FileHelpers.makeTemporaryDirectory()
@@ -326,6 +472,38 @@ struct SwiftMutationTestingExecutionPathTests {
         )
 
         #expect(result == .error)
+    }
+}
+
+private actor ExecutionGateSimulatorLauncher: ProcessLaunching {
+    private var exists = false
+    func launch(executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double) async throws -> Int32 {
+        if arguments.contains("delete") { exists = false }
+        return 0
+    }
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        if request.arguments.contains("build-for-testing"),
+            let index = request.arguments.firstIndex(of: "-derivedDataPath")
+        {
+            let products = URL(fileURLWithPath: request.arguments[index + 1]).appendingPathComponent("Build/Products")
+            try FileManager.default.createDirectory(at: products, withIntermediateDirectories: true)
+            let plist = try PropertyListSerialization.data(
+                fromPropertyList: ["__xctestrun_metadata__": ["FormatVersion": 1]], format: .xml, options: 0)
+            try plist.write(to: products.appendingPathComponent("App.xctestrun"))
+        }
+        if request.arguments.contains("create") {
+            exists = true
+            return (0, "GATE-UDID\n")
+        }
+        if request.arguments.contains("devicetypes") {
+            return (0, #"{"devicetypes":[{"name":"iPhone 16","identifier":"type"}]}"#)
+        }
+        if request.arguments.contains("runtimes") {
+            return (0, #"{"runtimes":[{"identifier":"runtime","isAvailable":true}]}"#)
+        }
+        return exists
+            ? (0, #"{"devices":{"runtime":[{"udid":"GATE-UDID"}]}}"#)
+            : (0, #"{"devices":{}}"#)
     }
 }
 

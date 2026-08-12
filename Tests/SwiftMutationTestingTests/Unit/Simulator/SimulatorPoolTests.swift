@@ -5,6 +5,19 @@ import Testing
 
 @Suite("SimulatorPool")
 struct SimulatorPoolTests {
+    @Test("Registered simulator pool uses exactly the supplied UDID without lifecycle commands")
+    func registeredSimulatorIsReusedWithoutLifecycleCommands() async throws {
+        let launcher = RegisteredPoolCommandLog()
+        let pool = SimulatorPool(
+            registeredUDID: "REGISTERED-UDID", destination: "name=iPhone 16", launcher: launcher)
+        try await pool.setUp()
+        let slot = try await pool.acquire()
+        #expect(slot.udid == "REGISTERED-UDID")
+        #expect(slot.destination == "platform=iOS Simulator,id=REGISTERED-UDID")
+        await pool.release(slot)
+        await pool.tearDown()
+        #expect(await launcher.commandCount == 0)
+    }
     @Test("Given macOS destination, when setUp called, then creates single slot with original destination")
     func setUpMacOSCreatesSingleSlot() async throws {
         let pool = SimulatorPool(
@@ -138,5 +151,17 @@ struct SimulatorPoolTests {
         await pool.tearDown()
 
         #expect(pool.size == 3)
+    }
+}
+
+private actor RegisteredPoolCommandLog: ProcessLaunching {
+    private(set) var commandCount = 0
+    func launch(executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double) async throws -> Int32 {
+        commandCount += 1
+        return 0
+    }
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        commandCount += 1
+        return (0, "")
     }
 }

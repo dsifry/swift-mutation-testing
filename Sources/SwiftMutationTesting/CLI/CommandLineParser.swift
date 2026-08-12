@@ -29,6 +29,14 @@ struct CommandLineParser: Sendable {
         var recoverOnly = false
         var custodyFD: Int?
         var invocationNonce: String?
+        var prepareGateSimulator = false
+        var cleanupGateSimulator = false
+        var simulatorRegistration: String?
+        var buildCountEvidenceOutput: String?
+        var guideLockFD: Int?
+        var wrapperLeaseFD: Int?
+        var runOrdinal: Int?
+        var attemptOrdinal: Int?
     }
 
     func parse(_ arguments: [String]) throws -> ParsedArguments {
@@ -199,6 +207,30 @@ struct CommandLineParser: Sendable {
         case "--invocation-nonce":
             values.invocationNonce = try nextValue(for: flag, at: &index, in: arguments)
 
+        case "--prepare-gate-simulator":
+            values.prepareGateSimulator = true
+
+        case "--cleanup-gate-simulator":
+            values.cleanupGateSimulator = true
+
+        case "--simulator-registration":
+            values.simulatorRegistration = try nextValue(for: flag, at: &index, in: arguments)
+
+        case "--build-count-evidence-output":
+            values.buildCountEvidenceOutput = try nextValue(for: flag, at: &index, in: arguments)
+
+        case "--guide-lock-fd":
+            values.guideLockFD = try nextNonnegativeInt(for: flag, at: &index, in: arguments)
+
+        case "--wrapper-lease-fd":
+            values.wrapperLeaseFD = try nextNonnegativeInt(for: flag, at: &index, in: arguments)
+
+        case "--run-ordinal":
+            values.runOrdinal = try nextNonnegativeInt(for: flag, at: &index, in: arguments)
+
+        case "--attempt-ordinal":
+            values.attemptOrdinal = try nextNonnegativeInt(for: flag, at: &index, in: arguments)
+
         default:
             throw UsageError(message: "unknown option '\(flag)'")
         }
@@ -250,13 +282,41 @@ struct CommandLineParser: Sendable {
             || flags.recoverOnly
             || flags.custodyFD != nil
             || flags.invocationNonce != nil
+            || flags.prepareGateSimulator
+            || flags.cleanupGateSimulator
+            || flags.simulatorRegistration != nil
+            || flags.buildCountEvidenceOutput != nil
+            || flags.guideLockFD != nil
+            || flags.wrapperLeaseFD != nil
+            || flags.runOrdinal != nil
+            || flags.attemptOrdinal != nil
 
         guard hasCacheOption else { return .init() }
 
-        let requestedModes = [flags.prepareOnly, flags.mutantSelectionManifest != nil, flags.recoverOnly]
+        let requestedModes = [
+            flags.prepareOnly, flags.mutantSelectionManifest != nil, flags.recoverOnly,
+            flags.prepareGateSimulator, flags.cleanupGateSimulator,
+        ]
             .filter { $0 }.count
-        guard requestedModes == 1 else {
-            throw UsageError(message: "cache options must select exactly one of prepare, target, or recover mode")
+        guard requestedModes == 1 || (requestedModes == 0 && flags.buildCountEvidenceOutput != nil) else {
+            throw UsageError(message: "protocol options must select exactly one operation mode")
+        }
+
+        if flags.prepareGateSimulator || flags.cleanupGateSimulator {
+            return try validatedSimulatorOptions(flags)
+        }
+
+        if requestedModes == 0, flags.buildCountEvidenceOutput != nil {
+            return try validatedLegacyBenchmarkOptions(flags)
+        }
+
+        let hasGateSimulatorBinding =
+            flags.simulatorRegistration != nil || flags.guideLockFD != nil || flags.wrapperLeaseFD != nil
+        guard !hasGateSimulatorBinding
+            || (flags.simulatorRegistration != nil && flags.guideLockFD == 4 && flags.wrapperLeaseFD == 5)
+        else { throw UsageError(message: "prepared simulator binding requires registration, fd 4, and fd 5") }
+        guard flags.buildCountEvidenceOutput == nil || hasGateSimulatorBinding else {
+            throw UsageError(message: "prepared build-count evidence requires gate simulator binding")
         }
 
         guard let root = flags.buildCacheRoot,
@@ -275,6 +335,12 @@ struct CommandLineParser: Sendable {
         try validateAbsolutePath(root, flag: "--build-cache-root")
         try validateAbsolutePath(projectManifest, flag: "--project-input-manifest")
         try validateAbsolutePath(evidenceOutput, flag: "--cache-evidence-output")
+        if let simulatorRegistration = flags.simulatorRegistration {
+            try validateAbsolutePath(simulatorRegistration, flag: "--simulator-registration")
+        }
+        if let buildCountEvidenceOutput = flags.buildCountEvidenceOutput {
+            try validateAbsolutePath(buildCountEvidenceOutput, flag: "--build-count-evidence-output")
+        }
         try validateCompatibilityID(compatibilityID)
         try validateInvocationNonce(invocationNonce)
 
@@ -326,6 +392,8 @@ struct CommandLineParser: Sendable {
             ("--mutant-inventory-output", flags.mutantInventoryOutput),
             ("--mutant-selection-manifest", flags.mutantSelectionManifest),
             ("--output", flags.output),
+            ("--simulator-registration", flags.simulatorRegistration),
+            ("--build-count-evidence-output", flags.buildCountEvidenceOutput),
         ])
 
         return .init(
@@ -338,7 +406,81 @@ struct CommandLineParser: Sendable {
             mutantSelectionManifest: flags.mutantSelectionManifest,
             evidenceOutput: evidenceOutput,
             custodyFD: custodyFD,
-            invocationNonce: invocationNonce
+            invocationNonce: invocationNonce,
+            simulatorRegistration: flags.simulatorRegistration,
+            buildCountEvidenceOutput: flags.buildCountEvidenceOutput,
+            guideLockFD: flags.guideLockFD,
+            wrapperLeaseFD: flags.wrapperLeaseFD
+        )
+    }
+
+    private func validatedSimulatorOptions(_ flags: FlagValues) throws -> ParsedArguments.CacheOptions {
+        guard let root = flags.buildCacheRoot,
+            let registration = flags.simulatorRegistration,
+            let nonce = flags.invocationNonce,
+            let guideLockFD = flags.guideLockFD, guideLockFD == 4,
+            flags.wrapperLeaseFD == nil,
+            flags.cacheCompatibilityID == nil,
+            flags.projectInputManifest == nil,
+            flags.testEnumerationOutput == nil,
+            flags.mutantInventoryOutput == nil,
+            flags.mutantSelectionManifest == nil,
+            flags.cacheEvidenceOutput == nil,
+            flags.buildCountEvidenceOutput == nil,
+            flags.runOrdinal == nil,
+            flags.attemptOrdinal == nil,
+            flags.noCache == false,
+            flags.custodyFD == nil,
+            flags.testTarget == nil,
+            flags.output == nil
+        else { throw UsageError(message: "gate simulator mode has invalid or missing protocol options") }
+        try validateAbsolutePath(root, flag: "--build-cache-root")
+        try validateAbsolutePath(registration, flag: "--simulator-registration")
+        try validateInvocationNonce(nonce)
+        return .init(
+            mode: flags.prepareGateSimulator ? .simulatorPrepare : .simulatorCleanup,
+            buildCacheRoot: root,
+            invocationNonce: nonce,
+            simulatorRegistration: registration,
+            guideLockFD: guideLockFD
+        )
+    }
+
+    private func validatedLegacyBenchmarkOptions(_ flags: FlagValues) throws -> ParsedArguments.CacheOptions {
+        guard flags.noCache,
+            let root = flags.buildCacheRoot,
+            let registration = flags.simulatorRegistration,
+            let evidence = flags.buildCountEvidenceOutput,
+            let nonce = flags.invocationNonce,
+            let guideLockFD = flags.guideLockFD, guideLockFD == 4,
+            let wrapperLeaseFD = flags.wrapperLeaseFD, wrapperLeaseFD == 5,
+            let runOrdinal = flags.runOrdinal,
+            let attemptOrdinal = flags.attemptOrdinal, attemptOrdinal == 0 || attemptOrdinal == 1,
+            flags.cacheCompatibilityID == nil,
+            flags.projectInputManifest == nil,
+            flags.prepareOnly == false,
+            flags.recoverOnly == false,
+            flags.custodyFD == nil,
+            flags.testTarget != nil,
+            flags.testEnumerationOutput == nil,
+            flags.mutantInventoryOutput == nil,
+            flags.cacheEvidenceOutput == nil,
+            flags.output == nil
+        else { throw UsageError(message: "legacy build-count mode has invalid or missing protocol options") }
+        try validateAbsolutePath(root, flag: "--build-cache-root")
+        try validateAbsolutePath(registration, flag: "--simulator-registration")
+        try validateAbsolutePath(evidence, flag: "--build-count-evidence-output")
+        try validateInvocationNonce(nonce)
+        return .init(
+            mode: .legacyBenchmark,
+            buildCacheRoot: root,
+            invocationNonce: nonce,
+            simulatorRegistration: registration,
+            buildCountEvidenceOutput: evidence,
+            guideLockFD: guideLockFD,
+            wrapperLeaseFD: wrapperLeaseFD
+            , runOrdinal: runOrdinal,
+            attemptOrdinal: attemptOrdinal
         )
     }
 

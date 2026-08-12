@@ -17,6 +17,131 @@ struct CacheEvidenceCodingKey: CodingKey, Equatable {
     }
 }
 
+struct BuildCountEvidence: Codable, Equatable, Sendable {
+    struct Counters: Codable, Equatable, Sendable {
+        let fullBuilds: Int
+        let incrementalBuilds: Int
+        let testWithoutBuildingRuns: Int
+        let fallbackBuilds: Int
+    }
+
+    let schemaVersion: Int
+    let invocationNonce: String
+    let companionExecutableSHA256: String
+    let capabilitySHA256: String
+    let sourceSnapshotSHA256: String
+    let projectInputManifestSHA256: String?
+    let prepareInventorySHA256: String?
+    let compatibilitySHA256: String?
+    let mode: String
+    let selector: String?
+    let runOrdinal: Int?
+    let attemptOrdinal: Int?
+    let counters: Counters
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, invocationNonce, companionExecutableSHA256, capabilitySHA256
+        case sourceSnapshotSHA256, projectInputManifestSHA256, prepareInventorySHA256
+        case compatibilitySHA256, mode, selector, runOrdinal, attemptOrdinal, counters
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(invocationNonce, forKey: .invocationNonce)
+        try container.encode(companionExecutableSHA256, forKey: .companionExecutableSHA256)
+        try container.encode(capabilitySHA256, forKey: .capabilitySHA256)
+        try container.encode(sourceSnapshotSHA256, forKey: .sourceSnapshotSHA256)
+        try container.encode(projectInputManifestSHA256, forKey: .projectInputManifestSHA256)
+        try container.encode(prepareInventorySHA256, forKey: .prepareInventorySHA256)
+        try container.encode(compatibilitySHA256, forKey: .compatibilitySHA256)
+        try container.encode(mode, forKey: .mode)
+        try container.encode(selector, forKey: .selector)
+        try container.encode(runOrdinal, forKey: .runOrdinal)
+        try container.encode(attemptOrdinal, forKey: .attemptOrdinal)
+        try container.encode(counters, forKey: .counters)
+    }
+}
+
+enum BuildCountEvidenceWriter {
+    static let capabilitySHA256 = ProjectInputManifest.sha256(Data(
+        "swift-mutation-testing-v1.3.1:gate-simulator-build-count".utf8
+    ))
+
+    static func write(_ evidence: BuildCountEvidence, to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        var data = try encoder.encode(evidence)
+        data.append(0x0A)
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    static func make(
+        nonce: String,
+        projectPath: String,
+        projectInputManifestSHA256: String?,
+        inventorySHA256: String?,
+        compatibilitySHA256: String?,
+        mode: String,
+        selector: String?,
+        runOrdinal: Int?,
+        attemptOrdinal: Int?,
+        counter: ObservedBuildCountingLauncher? = nil,
+        counters: BuildCountEvidence.Counters? = nil
+    ) throws -> BuildCountEvidence {
+        guard let resolvedCounters = counters ?? counter.map({ counter in
+            .init(
+                fullBuilds: counter.fullBuildAttempts,
+                incrementalBuilds: counter.incrementalBuildAttempts,
+                testWithoutBuildingRuns: counter.testWithoutBuildingRuns,
+                fallbackBuilds: counter.fallbackBuildAttempts)
+        }) else { throw PreparedCacheError.invalidCacheState }
+        let executable = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+        return BuildCountEvidence(
+            schemaVersion: 1,
+            invocationNonce: nonce,
+            companionExecutableSHA256: ProjectInputManifest.sha256(try Data(contentsOf: executable)),
+            capabilitySHA256: capabilitySHA256,
+            sourceSnapshotSHA256: try sourceSnapshotSHA256(projectPath),
+            projectInputManifestSHA256: projectInputManifestSHA256,
+            prepareInventorySHA256: inventorySHA256,
+            compatibilitySHA256: compatibilitySHA256,
+            mode: mode,
+            selector: selector,
+            runOrdinal: runOrdinal,
+            attemptOrdinal: attemptOrdinal,
+            counters: resolvedCounters
+        )
+    }
+
+    static func sourceSnapshotSHA256(_ projectPath: String) throws -> String {
+        let root = URL(fileURLWithPath: projectPath, isDirectory: true).standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw UsageError(message: "cannot enumerate benchmark source snapshot")
+        }
+        var files: [[String: Any]] = []
+        for relative in try FileManager.default.subpathsOfDirectory(atPath: root.path).sorted() {
+            guard !relative.split(separator: "/").contains(where: { $0.hasPrefix(".") }) else { continue }
+            let url = root.appendingPathComponent(relative)
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isExecutableKey])
+            guard values.isRegularFile == true, url.pathExtension == "swift" else { continue }
+            files.append([
+                "path": relative,
+                "sha256": ProjectInputManifest.sha256(try Data(contentsOf: url)),
+                "executable": values.isExecutable == true,
+            ])
+        }
+        let canonical = try JSONSerialization.data(
+            withJSONObject: [
+                "schemaVersion": 1,
+                "files": files.sorted { ($0["path"] as! String) < ($1["path"] as! String) },
+            ], options: [.sortedKeys, .withoutEscapingSlashes])
+        return ProjectInputManifest.sha256(canonical)
+    }
+}
+
 struct CacheEvidence: Codable, Equatable, Sendable {
     let schemaVersion: Int
     let invocationNonce: String
@@ -244,6 +369,7 @@ enum CacheFailureEvidenceRecorder {
         case .target: operation = "target"
         case .recover: operation = "recover"
         case .legacy: return
+        case .legacyBenchmark, .simulatorPrepare, .simulatorCleanup: return
         }
         try CacheEvidenceWriter.write(
             CacheEvidence(
@@ -314,6 +440,7 @@ struct PreparedBuildCoordinator: Sendable {
     let configuration: RunnerConfiguration
     let options: ParsedArguments.CacheOptions
     let launcher: any ProcessLaunching
+    var registeredSimulatorUDID: String? = nil
     var afterCollectionLockAcquired: @Sendable (URL) -> Void = { _ in }
     var afterIdentityLockAcquired: @Sendable (URL) -> Void = { _ in }
     var claimIdentityDirectory: @Sendable (CacheLock, String, Bool) throws -> CacheEntryIdentity? = {
@@ -423,14 +550,14 @@ struct PreparedBuildCoordinator: Sendable {
             let artifact = try await BuildStage(launcher: commandLauncher).build(
                 sandbox: sandbox,
                 scheme: scheme,
-                destination: destination,
+                destination: simulatorBoundDestination(destination),
                 timeout: configuration.build.timeout,
                 derivedDataURL: store.derivedDataURL
             )
             let xctestrunURL = try Self.requireXCTestRun(from: artifact)
             try await PreparedTestEnumerator(launcher: commandLauncher).enumerate(
                 xctestrunURL: xctestrunURL,
-                destination: destination,
+                destination: simulatorBoundDestination(destination),
                 timeout: configuration.build.timeout,
                 outputURL: URL(fileURLWithPath: enumerationOutput)
             )
@@ -476,6 +603,14 @@ struct PreparedBuildCoordinator: Sendable {
                     sourceBearingBytesScrubbed: true,
                     childGroupsQuiescent: Self.custodyIsQuiescent(custodyRuntime)
                 )
+            )
+            try writeBuildCountEvidence(
+                counter: observedLauncher,
+                projectInputManifestSHA256: manifestHash,
+                inventorySHA256: inventoryHash,
+                compatibilitySHA256: compatibilityID,
+                selector: nil,
+                selection: nil
             )
             evidenceWritten = true
         } catch {
@@ -598,6 +733,14 @@ struct PreparedBuildCoordinator: Sendable {
                     childGroupsQuiescent: Self.custodyIsQuiescent(custodyRuntime)
                 )
             )
+            try writeBuildCountEvidence(
+                counter: observedLauncher,
+                projectInputManifestSHA256: currentManifestHash,
+                inventorySHA256: inventoryHash,
+                compatibilitySHA256: compatibilityID,
+                selector: selector,
+                selection: selection
+            )
             evidenceWritten = true
             return []
         }
@@ -631,7 +774,11 @@ struct PreparedBuildCoordinator: Sendable {
         )
         try collectionLock.validateDirectoryIdentity()
         try lock.validateDirectoryIdentity()
-        let results = try await MutantExecutor(configuration: configuration, launcher: commandLauncher).executePrepared(
+        let results = try await MutantExecutor(
+            configuration: configuration,
+            launcher: commandLauncher,
+            registeredSimulatorUDID: registeredSimulatorUDID
+        ).executePrepared(
             selectedInput,
             sandbox: Sandbox(rootURL: projectURL),
             artifact: BuildArtifact(
@@ -660,6 +807,14 @@ struct PreparedBuildCoordinator: Sendable {
                 fallbackBuilds: observedLauncher.fallbackBuildAttempts,
                 childGroupsQuiescent: Self.custodyIsQuiescent(custodyRuntime)
             )
+        )
+        try writeBuildCountEvidence(
+            counter: observedLauncher,
+            projectInputManifestSHA256: currentManifestHash,
+            inventorySHA256: inventoryHash,
+            compatibilitySHA256: compatibilityID,
+            selector: selector,
+            selection: selection
         )
         evidenceWritten = true
         return results
@@ -775,6 +930,41 @@ struct PreparedBuildCoordinator: Sendable {
             throw PreparedCacheError.unsafeCachePath
         }
         return root
+    }
+
+    func simulatorBoundDestination(_ destination: String) -> String {
+        guard let registeredSimulatorUDID else { return destination }
+        let platform = destination.components(separatedBy: ",")
+            .first(where: { $0.hasPrefix("platform=") }) ?? "platform=iOS Simulator"
+        return "\(platform),id=\(registeredSimulatorUDID)"
+    }
+
+    func writeBuildCountEvidence(
+        counter: ObservedBuildCountingLauncher,
+        projectInputManifestSHA256: String,
+        inventorySHA256: String,
+        compatibilitySHA256: String,
+        selector: String?,
+        selection: MutantSelectionManifest?
+    ) throws {
+        guard let path = options.buildCountEvidenceOutput,
+            let nonce = options.invocationNonce
+        else { return }
+        try BuildCountEvidenceWriter.write(
+            try BuildCountEvidenceWriter.make(
+                nonce: nonce,
+                projectPath: configuration.projectPath,
+                projectInputManifestSHA256: projectInputManifestSHA256,
+                inventorySHA256: inventorySHA256,
+                compatibilitySHA256: compatibilitySHA256,
+                mode: "prepared_cache",
+                selector: selector,
+                runOrdinal: selection?.runOrdinal,
+                attemptOrdinal: selection?.attemptOrdinal,
+                counter: counter
+            ),
+            to: URL(fileURLWithPath: path)
+        )
     }
 
     static func custodyIsQuiescent(_ runtime: CustodyRuntime?) -> Bool {

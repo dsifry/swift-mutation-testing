@@ -37,6 +37,15 @@ enum HelpText {
           --recover-only                Recover stale prepared-build state, then exit
           --custody-fd <fd>             Nonnegative wrapper-custody file descriptor
           --invocation-nonce <nonce>    22-character unpadded base64url invocation nonce
+          --prepare-gate-simulator      Create the private gate-wide simulator
+          --cleanup-gate-simulator      Delete the private gate-wide simulator
+          --simulator-registration <p>  Absolute gate simulator registration path
+          --build-count-evidence-output <p>
+                                        Absolute benchmark build-count evidence path
+          --guide-lock-fd <fd>          Guide lock descriptor (must be 4)
+          --wrapper-lease-fd <fd>       Wrapper lease descriptor (must be 5)
+          --run-ordinal <n>             Benchmark schedule ordinal
+          --attempt-ordinal <0|1>       Benchmark attempt ordinal
           --version                     Print version and exit
           --help                        Print this help and exit
         """
