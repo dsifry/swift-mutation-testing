@@ -55,23 +55,35 @@ checks out that exact commit with full history.
 
 The job runs on `macos-26`, uses the full Xcode developer directory, performs no
 SwiftPM build-cache restore, and requires Xcode 26.6 build 17F113, Apple Swift
-6.3.3, and target `arm64-apple-macosx26.0`. It also records those facts and the
-runner image, workflow identity, run ID, and run attempt. A toolchain policy
-change therefore requires a reviewed design update rather than silently
-producing another candidate. The version injection must replace exactly one
-`0.0.0-dev` occurrence in
+6.3.3, an arm64 Mach-O, and the package's existing macOS 15 minimum deployment
+target. The compiler's observed build-host target triple
+`arm64-apple-macosx26.0` is recorded as toolchain identity; it does not replace
+or raise the Mach-O deployment minimum. This preserves the existing
+`-macos.tar.gz` arm64 artifact produced by the current `macos-26` workflow and
+the source-build path for other architectures. It also records the runner
+image, workflow identity, workflow commit, dispatch trigger commit, run ID, and
+run attempt. A toolchain or deployment policy change therefore requires a
+reviewed design update rather than silently producing another candidate.
+
+The full focused coverage and exact-union suite replay run against the unchanged
+reviewed source, where the existing `Version` tests require `0.0.0-dev`. Only
+after they pass may version injection replace exactly one `0.0.0-dev`
+occurrence in
 `Version.swift`; zero or multiple replacements fail. The job runs the release
-validation suite, performs one clean release build, verifies
+specific version and binary checks after injection, performs one clean release
+build, verifies
 `swift-mutation-testing --version`, and validates the resulting regular file and
-code signature.
+code signature, CPU type, and macOS 15 deployment minimum.
 
 Packaging occurs once. The archive has the existing public filename
 `swift-mutation-testing-vX.Y.Z-macos.tar.gz` and contains only the executable at
 its root. A closed `release-candidate-v1.json` manifest records:
 
-- schema version, repository, workflow path/ref, run ID, and run attempt;
+- schema version, repository, workflow path/ref, workflow commit, dispatch
+  trigger commit, run ID, run attempt, and Actions artifact name;
 - source commit, version, tag, and exact version output;
-- runner image/architecture, Xcode version/build, Swift version, and target;
+- runner image/architecture, Xcode version/build, Swift version, compiler target,
+  Mach-O CPU type, and deployment minimum;
 - archive filename and SHA-256;
 - executable filename, mode, byte size, Mach-O UUID, and SHA-256.
 
@@ -84,11 +96,17 @@ It does not create a tag or release.
 
 ### 2. Guide proof consumption
 
-The Guide-side candidate fetch is given the candidate workflow run ID. Before
+The Guide-side candidate fetch is given the candidate workflow run ID, run
+attempt, artifact ID, and artifact name. Before
 using any bytes, it verifies through GitHub APIs that the run belongs to this
 repository, used the candidate workflow from the default branch, was manually
-dispatched, completed successfully, and has the manifest's source commit and
-run attempt. It downloads the named Actions artifact without following an
+dispatched, completed successfully, and has the manifest's dispatch trigger
+commit and run attempt. The manifest's separate workflow commit must equal the
+trusted default-branch revision of the candidate workflow. The separate source
+commit is authenticated by the workflow's recorded ancestry check and exact
+post-checkout `HEAD`; it is not compared to the workflow run's `head_sha`. The
+consumer requires the requested artifact ID/name to belong to that exact run
+attempt. It downloads that artifact without following an
 operator-supplied URL and verifies both GitHub attestations.
 
 The consumer accepts the exact manifest schema only. It rejects unknown,
@@ -98,7 +116,8 @@ and path, file type, link count, mode, size, digest, version output, Mach-O UUID
 and signature are revalidated afterward.
 
 The Guide release-candidate descriptor advances to a closed schema that binds
-the source commit, candidate workflow/run/attempt and artifact ID, candidate
+the source commit, workflow commit, dispatch trigger commit, candidate workflow
+run/attempt and artifact ID/name, candidate
 manifest SHA-256, archive SHA-256, executable SHA-256, version output, and
 capability. The cold/warm proof receipt binds that descriptor digest. Copying the
 executable without its authenticated manifest is not a valid candidate.
@@ -107,8 +126,8 @@ executable without its authenticated manifest is not a valid candidate.
 
 `release.yml` becomes a manually dispatched promotion workflow. Automatic tag
 pushes no longer build or publish. Inputs are the canonical version, candidate
-workflow run ID, candidate manifest SHA-256, archive SHA-256, and executable
-SHA-256 copied from the accepted Guide proof.
+workflow run ID, run attempt, artifact ID/name, candidate manifest SHA-256,
+archive SHA-256, and executable SHA-256 copied from the accepted Guide proof.
 
 Promotion has `actions: read`, `contents: write`, `attestations: read`, and
 `id-token: write` permissions. It downloads the candidate artifact from this
@@ -124,9 +143,13 @@ executable checks. It additionally requires:
 - no public release exists for the tag and no public asset with the release
   filename exists.
 
-Only after every check passes may the workflow create or reuse a draft release,
-upload the unchanged candidate archive plus manifest and checksum file, download
-the draft assets, and verify their bytes again. It then publishes the draft. A
+Only after every check passes may the workflow create or reuse a draft release
+named `swift-mutation-testing X.Y.Z` for `vX.Y.Z`, upload the unchanged candidate
+archive, the candidate manifest, and `swift-mutation-testing-vX.Y.Z-SHA256SUMS`,
+then download the draft assets and verify their bytes again. The checksum file
+contains exactly two lowercase SHA-256 lines in byte-sorted filename order: one
+for the archive and one for the extracted executable's published filename. It
+then publishes the draft. A
 retry may reuse a draft only when every existing asset digest equals the
 candidate; otherwise it fails closed. It never uses clobber or replaces a public
 asset. The final workflow assertion downloads the public archive and requires
