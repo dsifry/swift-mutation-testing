@@ -475,6 +475,11 @@ struct CommandLineParser: Sendable {
             throw UsageError(message: "--build-cache-root must be an existing canonical directory")
         }
         let outputURL = URL(fileURLWithPath: output).standardizedFileURL
+        if let existingOutput = CachePathGuard.canonicalURL(outputURL) {
+            guard CachePathGuard.isContained(existingOutput, in: rootURL) else {
+                throw UsageError(message: "--output must be beneath --build-cache-root")
+            }
+        }
         var outputAncestor = outputURL.deletingLastPathComponent()
         var outputSuffix = [outputURL.lastPathComponent]
         while CachePathGuard.canonicalURL(outputAncestor) == nil, outputAncestor.path != "/" {

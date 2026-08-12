@@ -45,12 +45,41 @@ struct CommandLineParserTests {
         #expect(legacy.cache.attemptOrdinal == 1)
         #expect(legacy.reporting.output == root + "/reports/selector-report.json")
 
+        let existingReport = temporaryRoot.appendingPathComponent("existing-selector-report.json")
+        try Data().write(to: existingReport)
+        let legacyWithExistingReport = try parser.parse([
+            "run", "--scheme", "App", "--destination", "platform=iOS Simulator,name=iPhone 16",
+            "--no-cache", "--target", "AppTests/One",
+            "--build-cache-root", root, "--simulator-registration", registration,
+            "--build-count-evidence-output", root + "/build-count.json", "--output", existingReport.path,
+            "--run-ordinal", "7", "--attempt-ordinal", "1",
+            "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
+        ])
+        #expect(legacyWithExistingReport.reporting.output == existingReport.path)
+
         #expect(throws: UsageError.self) {
             _ = try parser.parse([
                 "run", "--scheme", "App", "--destination", "platform=iOS Simulator,name=iPhone 16",
                 "--no-cache", "--target", "AppTests/One",
                 "--build-cache-root", root, "--simulator-registration", registration,
                 "--build-count-evidence-output", "/tmp/build-count.json",
+                "--run-ordinal", "7", "--attempt-ordinal", "1",
+                "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
+            ])
+        }
+        let escapedReport = temporaryRoot.appendingPathComponent("escaped-report.json")
+        let outsideReport = temporaryRoot.deletingLastPathComponent()
+            .appendingPathComponent("outside-selector-report-\(UUID().uuidString).json")
+        try Data().write(to: outsideReport)
+        defer { try? FileManager.default.removeItem(at: outsideReport) }
+        try FileManager.default.createSymbolicLink(
+            at: escapedReport, withDestinationURL: outsideReport)
+        #expect(throws: UsageError.self) {
+            _ = try parser.parse([
+                "run", "--scheme", "App", "--destination", "platform=iOS Simulator,name=iPhone 16",
+                "--no-cache", "--target", "AppTests/One",
+                "--build-cache-root", root, "--simulator-registration", registration,
+                "--build-count-evidence-output", root + "/build-count.json", "--output", escapedReport.path,
                 "--run-ordinal", "7", "--attempt-ordinal", "1",
                 "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
             ])
