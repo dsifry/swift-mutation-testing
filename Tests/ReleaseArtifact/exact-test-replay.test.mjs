@@ -18,9 +18,9 @@ function successfulRun({ list = expected, shards = {} } = {}) {
       calls.push({ executable, argv, options });
       if (argv.at(-1) === 'list') return { stdout: `${list.join('\n')}\n`, stderr: '', exitCode: 0 };
       const filter = argv.at(-1);
+      const executed = shards[filter] ?? expected.filter((name) => name.startsWith(filter));
       return {
-        stdout: `${(shards[filter] ?? expected.filter((name) => name.startsWith(filter))).join('\n')}\n`,
-        executedTests: shards[filter],
+        stdout: `${executed.join('\n')}\nTest run with ${executed.length} test${executed.length === 1 ? '' : 's'} in 1 suite passed after 0.001 seconds.\n`,
         stderr: '',
         exitCode: 0,
       };
@@ -44,6 +44,29 @@ test('replays each stable suite exactly once without parallel execution', async 
     ['swift', ['test', '--package-path', packagePath, '--no-parallel', '--filter', 'SwiftMutationTestingTests.OtherTests']],
   ]);
   assert.equal(fixture.calls.every(({ options }) => options.timeoutMs === 1234), true);
+});
+
+test('fails closed when a production shard result has no authenticated executed count', async () => {
+  const fixture = successfulRun();
+  fixture.run = async (executable, argv, options) => {
+    if (argv.at(-1) === 'list') return { stdout: `${expected.join('\n')}\n`, stderr: '', exitCode: 0 };
+    return { stdout: '', stderr: '', exitCode: 0 };
+  };
+
+  await assert.rejects(() => checkExactTestReplay({ packagePath, run: fixture.run }), /executed count|result/i);
+});
+
+test('accepts a production-form shard summary only when its independently reported count matches the selected suite', async () => {
+  const fixture = successfulRun();
+  fixture.run = async (executable, argv, options) => {
+    if (argv.at(-1) === 'list') return { stdout: `${expected.join('\n')}\n`, stderr: '', exitCode: 0 };
+    const suite = argv.at(-1);
+    const count = expected.filter((name) => name.startsWith(suite)).length;
+    return { stdout: `Test run with ${count} test${count === 1 ? '' : 's'} in 1 suite passed after 0.001 seconds.\n`, stderr: '', exitCode: 0 };
+  };
+
+  const receipt = await checkExactTestReplay({ packagePath, run: fixture.run });
+  assert.deepEqual(receipt.executed, [...expected].sort());
 });
 
 for (const [name, options, pattern] of [

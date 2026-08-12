@@ -35,6 +35,14 @@ function assertExactSet(expected, executed) {
   }
 }
 
+function executedCount(stdout, label) {
+  const matches = [...stdout.matchAll(/Test run with (\d+) tests? in \d+ suites? passed after /g)];
+  if (matches.length !== 1) fail(`${label} has no authenticated executed count`);
+  const count = Number(matches[0][1]);
+  if (!Number.isSafeInteger(count) || count < 1) fail(`${label} has an invalid executed count`);
+  return count;
+}
+
 async function nativeRun(executable, argv, { timeoutMs }) {
   try {
     const result = await execFile(executable, argv, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 });
@@ -68,14 +76,12 @@ export async function checkExactTestReplay({ packagePath, run = nativeRun, timeo
       throw error;
     }
     if (!result || result.exitCode !== 0) fail(`shard failed: ${suite}`);
-    const selected = result.executedTests ?? expected.filter((name) => TEST_IDENTIFIER.exec(name).groups.suite === suite);
-    if (!Array.isArray(selected) || selected.some((name) => typeof name !== 'string' || !TEST_IDENTIFIER.test(name))) {
-      fail(`shard ${suite} output is malformed`);
-    }
+    const selected = expected.filter((name) => TEST_IDENTIFIER.exec(name).groups.suite === suite);
     const emitted = parseTestNames(result.stdout, `shard ${suite}`, { requireAtLeastOne: false });
     if (emitted.length > 0 && JSON.stringify(sorted(emitted)) !== JSON.stringify(sorted(selected))) {
       fail(`shard ${suite} output does not match its selected test set`);
     }
+    if (executedCount(result.stdout, `shard ${suite}`) !== selected.length) fail(`shard ${suite} executed count does not match its selected test set`);
     executed.push(...selected);
   }
 

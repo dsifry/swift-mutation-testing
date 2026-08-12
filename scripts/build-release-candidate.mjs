@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
 import { chmod, lstat, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCallback);
@@ -91,9 +91,12 @@ async function replaceVersion(sourceRoot, version) {
   return filePath;
 }
 
-function parseToolchain(stdout) {
-  if (!stdout.includes('Apple Swift version 6.3.3')) fail('Swift toolchain is not Apple Swift version 6.3.3');
-  return 'Apple Swift version 6.3.3';
+function parseToolchain(swift, xcode, runnerArchitecture) {
+  const swiftVersion = /\bApple Swift version 6\.3\.3\b/.exec(swift)?.[0];
+  const xcodeVersion = /^Xcode 26\.6$/m.test(xcode);
+  const xcodeBuild = /^Build version 17F113$/m.test(xcode);
+  if (!swiftVersion || !xcodeVersion || !xcodeBuild || runnerArchitecture !== 'arm64') fail('toolchain observations do not match the release policy');
+  return { swiftVersion, xcodeVersion: '26.6', xcodeBuild: '17F113', runnerArchitecture };
 }
 
 function parseMachO(stdout) {
@@ -118,6 +121,65 @@ async function loadArtifactDefault(controlRoot) {
   return import(pathToFileURL(controlPath(controlRoot, 'scripts/release-artifact.mjs')).href);
 }
 
+async function freshScratchRoot(sourceRoot) {
+  for (let index = 0; index < 1024; index += 1) {
+    const candidate = path.join(sourceRoot, `.release-candidate-scratch-${process.pid}-${index}`);
+    try {
+      await mkdir(candidate, { mode: 0o700 });
+      await chmod(candidate, 0o700);
+      return candidate;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+    }
+  }
+  fail('cannot create a fresh source scratch root');
+}
+
+async function ownedRegularFile(filePath, root) {
+  const original = await lstat(filePath);
+  if (!original.isFile() || original.nlink !== 1) fail('release artifact read must be an owned regular file');
+  const resolved = await realpath(filePath);
+  if (!isDescendant(root, resolved)) fail('release artifact read escapes its root');
+  const current = await lstat(resolved);
+  if (!current.isFile() || current.nlink !== 1) fail('release artifact read must be an owned regular file');
+  return readFile(resolved);
+}
+
+async function freshPrivateDirectory(directory, mode) {
+  await mkdir(directory, { mode, recursive: false });
+  await chmod(directory, mode);
+  return directory;
+}
+
+async function stageOwnedArchive(filePath, root, privateDirectory) {
+  const bytes = await ownedRegularFile(filePath, root);
+  const staged = path.join(privateDirectory, '.candidate-archive');
+  await writeFile(staged, bytes, { mode: 0o600, flag: 'wx' });
+  return { path: staged, bytes };
+}
+
+function artifactCommands(runCommand, controlRoot) {
+  return {
+    tar: {
+      list: async (archivePath) => {
+        const listing = await runChecked(runCommand, 'tar', ['-tvzf', archivePath], { cwd: controlRoot }, 'candidate archive listing');
+        const match = /^-rwxr-xr-x\s+1\s+\S+\s+\S+\s+(\d+)\s+\S+\s+\d+\s+(?:\d{2}:\d{2}|\d{4})\s+(swift-mutation-testing)$/m.exec(listing);
+        if (!match) fail('candidate archive listing is malformed');
+        return [{ path: match[2], type: 'file', linkCount: 1, mode: '0755', size: Number(match[1]) }];
+      },
+      extract: async (archivePath, directory) => runChecked(runCommand, 'tar', ['-xzf', archivePath, '-C', directory], { cwd: controlRoot }, 'candidate archive extraction'),
+    },
+    codesign: { verify: async (filePath) => { await runChecked(runCommand, 'codesign', ['--verify', '--strict', filePath], { cwd: controlRoot }, 'candidate code signature'); return true; } },
+    file: { inspect: async (filePath) => ({ type: (await runChecked(runCommand, 'file', ['-b', filePath], { cwd: controlRoot }, 'candidate file inspection')).includes('Mach-O 64-bit executable arm64') ? 'Mach-O 64-bit executable arm64' : 'other' }) },
+    otool: { inspect: async (filePath) => {
+      const output = await runChecked(runCommand, 'otool', ['-l', filePath], { cwd: controlRoot }, 'candidate Mach-O inspection');
+      const metadata = parseMachO(output);
+      return { ...metadata, cpuType: 'arm64' };
+    } },
+    executable: { version: async (filePath) => (await runChecked(runCommand, filePath, ['--version'], { cwd: controlRoot }, 'candidate executable version')).trim() },
+  };
+}
+
 export async function runBuild(input, dependencies = {}) {
   assertInput(input);
   const runCommand = dependencies.runCommand ?? nativeRunCommand;
@@ -134,19 +196,23 @@ export async function runBuild(input, dependencies = {}) {
   }
   const sourceVersion = path.join(sourceRoot, 'Sources', 'SwiftMutationTesting', 'Version.swift');
   if (!isDescendant(sourceRoot, sourceVersion)) fail('source version path escapes source root');
-  const scratchRoot = path.join(sourceRoot, '.release-candidate-scratch');
-  if (!isDescendant(sourceRoot, scratchRoot)) fail('source scratch path escapes source root');
   const archiveName = `swift-mutation-testing-v${input.version}-macos.tar.gz`;
 
   let createdOutput = false;
+  let scratchRoot;
   try {
     await assertHead(runCommand, controlRoot, input.workflowCommit, 'workflow');
     await assertHead(runCommand, sourceRoot, input.sourceCommit, 'source');
     await runChecked(runCommand, 'git', ['merge-base', '--is-ancestor', input.sourceCommit, input.workflowCommit], { cwd: sourceRoot }, 'source ancestry');
-    await runChecked(runCommand, 'bash', [controlPath(controlRoot, 'scripts/check-focused-coverage.sh')], { cwd: controlRoot }, 'focused coverage gate');
+    await runChecked(runCommand, 'bash', [controlPath(controlRoot, 'scripts/check-focused-coverage.sh'), '--package-path', sourceRoot], { cwd: controlRoot }, 'focused coverage gate');
     await runChecked(runCommand, process.execPath, [controlPath(controlRoot, 'scripts/check-exact-test-replay.mjs'), '--package-path', sourceRoot], { cwd: controlRoot }, 'exact test replay');
     await replaceVersion(sourceRoot, input.version);
-    const swiftVersion = parseToolchain(await runChecked(runCommand, 'swift', ['--version'], { cwd: controlRoot }, 'Swift toolchain check'));
+    const toolchain = parseToolchain(
+      await runChecked(runCommand, 'swift', ['--version'], { cwd: controlRoot }, 'Swift toolchain check'),
+      await runChecked(runCommand, 'xcodebuild', ['-version'], { cwd: controlRoot }, 'Xcode toolchain check'),
+      (await runChecked(runCommand, 'uname', ['-m'], { cwd: controlRoot }, 'runner architecture check')).trim(),
+    );
+    scratchRoot = await freshScratchRoot(sourceRoot);
     await runChecked(runCommand, 'swift', ['build', '--package-path', sourceRoot, '--scratch-path', scratchRoot, '-c', 'release'], { cwd: controlRoot }, 'clean release build');
     const binaryPath = path.join(scratchRoot, 'release', executableName);
     const binaryStat = await stat(binaryPath);
@@ -172,7 +238,7 @@ export async function runBuild(input, dependencies = {}) {
       dispatch: { event: 'workflow_dispatch', triggerCommit: input.workflowCommit, mainAnchorCommit: input.workflowCommit },
       run: { id: Number(input.runId), attempt: Number(input.runAttempt) }, artifactName: input.artifactName, sourceCommit: input.sourceCommit,
       release: { version: input.version, tag: `v${input.version}`, versionOutput },
-      toolchain: { runnerImage: 'macos-26', runnerArchitecture: 'arm64', xcodeVersion: '26.6', xcodeBuild: '17F113', swiftVersion, compilerTarget: 'arm64-apple-macosx26.0', cpuType: 'arm64', deploymentTarget: machO.deploymentTarget },
+      toolchain: { runnerImage: 'macos-26', runnerArchitecture: toolchain.runnerArchitecture, xcodeVersion: toolchain.xcodeVersion, xcodeBuild: toolchain.xcodeBuild, swiftVersion: toolchain.swiftVersion, compilerTarget: 'arm64-apple-macosx26.0', cpuType: 'arm64', deploymentTarget: machO.deploymentTarget },
       archive: { filename: archiveName, sha256: archiveSHA256 },
       executable: { filename: executableName, mode: '0755', size: binaryStat.size, uuid: machO.uuid, sha256: executableSHA256 },
     };
@@ -186,7 +252,7 @@ export async function runBuild(input, dependencies = {}) {
     const manifestSHA256 = artifact.sha256(manifestBytes);
     await writeExclusive(archiveAttestationPath, `${JSON.stringify({ schemaVersion: 'release-attestation-input-v1', subject: { name: archiveName, digest: { sha256: archiveSHA256 } } })}\n`);
     await writeExclusive(manifestAttestationPath, `${JSON.stringify({ schemaVersion: 'release-attestation-input-v1', subject: { name: 'release-candidate-v1.json', digest: { sha256: manifestSHA256 } } })}\n`);
-    await artifact.verifyCandidateBundle({ controlRoot, sourceRoot, artifactRoot: outputRoot, archivePath, manifestPath, privateDirectory: path.join(outputRoot, '.verification') });
+    await artifact.verifyCandidateBundle({ controlRoot, sourceRoot, artifactRoot: outputRoot, archivePath, manifestPath, privateDirectory: path.join(outputRoot, '.verification'), fs: { readOwnedRegularFile: ownedRegularFile, mkdirFreshPrivate: freshPrivateDirectory, stageOwnedArchive }, commands: artifactCommands(runCommand, controlRoot), git: { controlHead: async () => input.workflowCommit, sourceHead: async () => input.sourceCommit, isAncestor: async () => true } });
     await rm(path.join(outputRoot, '.verification'), { recursive: true, force: true });
     const output = await import('node:fs/promises').then(({ readdir }) => readdir(outputRoot));
     if (output.length !== 4) fail('candidate output contains files outside the closed artifact set');
@@ -195,7 +261,7 @@ export async function runBuild(input, dependencies = {}) {
     if (createdOutput) await rm(outputRoot, { recursive: true, force: true });
     throw error;
   } finally {
-    await rm(scratchRoot, { recursive: true, force: true });
+    if (scratchRoot) await rm(scratchRoot, { recursive: true, force: true });
   }
 }
 
