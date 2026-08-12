@@ -104,12 +104,6 @@ export function parseJSONBytes(bytes, scope) {
   }
 }
 
-export function parseAttestationFile(bytes) {
-  const line = bytes.toString('utf8').split('\n').find((value) => value.trim().length > 0);
-  if (!line) promotionFail('candidate attestation bundle is empty');
-  return parseJSONBytes(line, 'candidate attestation');
-}
-
 export function createNativeGitHubAdapter({
   token,
   controlRoot,
@@ -130,6 +124,17 @@ export function createNativeGitHubAdapter({
   }
   const ghEnvironment = { ...process.env, GH_TOKEN: token };
   const gh = async (arguments_, options = {}) => runCommand('gh', ['api', ...arguments_], { env: ghEnvironment, ...options });
+  const verifyAttestation = async (subjectPath, bundlePath) => parseJSONBytes(await runCommand('gh', [
+    'attestation', 'verify', subjectPath,
+    '--repo', input.repository,
+    '--bundle', bundlePath,
+    '--signer-workflow', `github.com/${input.repository}/.github/workflows/release-candidate.yml`,
+    '--signer-digest', input.candidateWorkflowCommit,
+    '--source-digest', input.candidateWorkflowCommit,
+    '--source-ref', 'refs/heads/main',
+    '--deny-self-hosted-runners',
+    '--format', 'json',
+  ], { env: ghEnvironment }), 'gh attestation verify');
   const ghJSON = async (arguments_) => parseJSONBytes(await gh(arguments_), `gh api ${arguments_[0]}`);
   const ghBytes = async (arguments_) => {
     const output = await gh(arguments_, { encoding: 'buffer' });
@@ -164,8 +169,8 @@ export function createNativeGitHubAdapter({
         runCommand,
       }),
       attestations: {
-        archive: parseAttestationFile(await readFileImpl(path.join(artifactRoot, 'archive-attestation-bundle-v1.jsonl'))),
-        manifest: parseAttestationFile(await readFileImpl(path.join(artifactRoot, 'manifest-attestation-bundle-v1.jsonl'))),
+        archive: await verifyAttestation(archivePath, path.join(artifactRoot, 'archive-attestation-bundle-v1.jsonl')),
+        manifest: await verifyAttestation(manifestPath, path.join(artifactRoot, 'manifest-attestation-bundle-v1.jsonl')),
       },
     };
     return candidateDownload;
@@ -204,7 +209,7 @@ export function createNativeGitHubAdapter({
     if (release === null) return null;
     const assets = [];
     for (const asset of release.assets ?? []) assets.push({ name: asset.name, sha256: sha256(await downloadReleaseAsset(asset)) });
-    return { id: release.id, draft: release.draft, assets, rawAssets: release.assets ?? [] };
+    return { id: release.id, draft: release.draft, assets, rawAssets: release.assets ?? [], upload_url: release.upload_url };
   };
   const findRelease = async () => {
     try {
@@ -255,11 +260,16 @@ export function createNativeGitHubAdapter({
       '-f', `tag_name=${tag}`, '-f', `name=${name}`, '-f', `target_commitish=${targetCommitish}`, '-F', 'draft=true',
     ]),
     uploadAsset: async (release, asset) => {
+      const uploadUrl = typeof release.upload_url === 'string'
+        ? release.upload_url.replace(/\{\?name,label\}$/u, '')
+        : '';
+      const expectedUploadUrl = `https://uploads.github.com/repos/${input.repository}/releases/${release.id}/assets`;
+      if (uploadUrl !== expectedUploadUrl) promotionFail('release upload URL is not authoritative');
       const assetPath = path.join(workRoot, `upload-${asset.name}`);
       await writeFileImpl(assetPath, asset.bytes, { flag: 'wx', mode: 0o600 });
       try {
         await gh([
-          '--method', 'POST', `repos/${input.repository}/releases/${release.id}/assets?name=${encodeURIComponent(asset.name)}`,
+          '--method', 'POST', `${uploadUrl}?name=${encodeURIComponent(asset.name)}`,
           '-H', 'Content-Type: application/octet-stream', '--input', assetPath,
         ]);
       } finally {

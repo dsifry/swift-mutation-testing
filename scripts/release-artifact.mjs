@@ -350,27 +350,20 @@ function subjectDigest(subject, name) {
 }
 
 export function verifyAttestationBundle(bundle, expected) {
-  assertAttestation(isObject(bundle) && Object.keys(bundle).length === 1 && isObject(bundle.statement), 'bundle must contain exactly one statement');
-  const statement = bundle.statement;
   assertAttestation(isObject(expected), 'expected provenance must be an object');
+  assertAttestation(Array.isArray(bundle) && bundle.length === 1, 'gh verification output must contain exactly one attestation');
+  const result = bundle[0];
+  assertAttestation(isObject(result) && isObject(result.attestation) && isObject(result.verificationResult), 'gh verification result is invalid');
+  const statement = result.verificationResult.statement;
+  assertAttestation(isObject(statement), 'verified statement is absent');
   assertAttestation(Object.keys(statement).length === 4, 'statement schema is not closed');
   assertAttestation(statement._type === 'https://in-toto.io/Statement/v1', 'statement type is invalid');
   assertAttestation(statement.predicateType === 'https://slsa.dev/provenance/v1', 'predicate type is invalid');
-  assertAttestation(Array.isArray(statement.subject) && statement.subject.length === 2, 'attestation must have both subjects');
-  const subjectNames = new Set(statement.subject.map((subject) => subject?.name));
-  assertAttestation(subjectNames.size === 2 && subjectNames.has('swift-mutation-testing-v1.3.1-macos.tar.gz') && subjectNames.has('release-candidate-v1.json'), 'attestation subjects are not closed');
-  const archive = statement.subject.find((subject) => subject.name === 'swift-mutation-testing-v1.3.1-macos.tar.gz');
-  const manifest = statement.subject.find((subject) => subject.name === 'release-candidate-v1.json');
-  assertAttestation(subjectDigest(archive, 'swift-mutation-testing-v1.3.1-macos.tar.gz') === expected.archiveSHA256, 'archive subject digest does not match');
-  assertAttestation(subjectDigest(manifest, 'release-candidate-v1.json') === expected.manifestSHA256, 'manifest subject digest does not match');
+  assertAttestation(Array.isArray(statement.subject) && statement.subject.length === 1, 'attestation must have exactly one subject');
+  assertAttestation(subjectDigest(statement.subject[0], expected.subjectName) === expected.subjectSHA256, 'subject digest does not match');
   const predicate = statement.predicate;
-  assertAttestation(isObject(predicate) && Object.keys(predicate).length === 6, 'predicate schema is not closed');
-  assertAttestation(predicate.repository === expected.repository, 'repository does not match');
-  assertAttestation(predicate.workflowPath === expected.workflowPath, 'workflow path does not match');
-  assertAttestation(predicate.workflowRef === expected.workflowRef, 'workflow ref does not match');
-  assertAttestation(predicate.workflowCommit === expected.workflowCommit, 'workflow commit does not match');
-  assertAttestation(predicate.event === expected.event, 'event does not match');
-  assertAttestation(predicate.runnerInvocationUri === `https://github.com/${expected.repository}/actions/runs/${expected.runId}/attempts/${expected.runAttempt}`, 'runner invocation URI does not match');
+  assertAttestation(isObject(predicate) && isObject(predicate.runDetails) && isObject(predicate.runDetails.metadata), 'provenance run metadata is absent');
+  assertAttestation(predicate.runDetails.metadata.invocationId === `https://github.com/${expected.repository}/actions/runs/${expected.runId}/attempts/${expected.runAttempt}`, 'runner invocation URI does not match');
   return deepFreeze(statement);
 }
 
@@ -542,11 +535,11 @@ export function verifyPromotionAuthority(input, githubState) {
     manifestSHA256: input.manifestSHA256,
   };
   requirePromotion(isObject(githubState.attestations)
-    && isObject(githubState.attestations.archive)
-    && isObject(githubState.attestations.manifest),
+    && Array.isArray(githubState.attestations.archive)
+    && Array.isArray(githubState.attestations.manifest),
   'candidate attestations are absent');
-  verifyAttestationBundle(githubState.attestations.archive, expectedAttestation);
-  verifyAttestationBundle(githubState.attestations.manifest, expectedAttestation);
+  verifyAttestationBundle(githubState.attestations.archive, { ...expectedAttestation, subjectName: manifest.archive.filename, subjectSHA256: input.archiveSHA256 });
+  verifyAttestationBundle(githubState.attestations.manifest, { ...expectedAttestation, subjectName: 'release-candidate-v1.json', subjectSHA256: input.manifestSHA256 });
   return deepFreeze({ proof, manifest });
 }
 
@@ -656,7 +649,7 @@ export function parseTarListing(stdout) {
     return {
       path: match.groups.name.replace(/\s+link to .+$/, ''),
       type: match.groups.type === '-' ? 'file' : match.groups.type === 'd' ? 'directory' : match.groups.type === 'l' ? 'symlink' : 'other',
-      linkCount: Number(match.groups.links),
+      linkCount: match.groups.type === '-' && match.groups.links === '0' ? 1 : Number(match.groups.links),
       mode: `0${match.groups.mode.replace(/[^rwx-]/g, '').split('').reduce((total, character, index) => total + ((character !== '-' ? 1 : 0) << (8 - index)), 0).toString(8)}`,
       size: Number(match.groups.size),
     };
@@ -733,8 +726,8 @@ export function createNativeCandidateVerificationInput({
 
 export function parseAttestationBundle(bytes) {
   const bundle = parseJSONRejectingDuplicateKeys(bytes);
-  if (!isObject(bundle) || Object.keys(bundle).length !== 1 || !isObject(bundle.statement)) {
-    fail('attestation', 'bundle must contain exactly one statement');
+  if (!Array.isArray(bundle) || bundle.length !== 1) {
+    fail('attestation', 'gh verification output must contain exactly one attestation');
   }
   return bundle;
 }

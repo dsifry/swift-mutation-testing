@@ -68,6 +68,13 @@ test('release candidate workflow preserves immutable candidate authority and cus
   assertBefore(workflow, 'Build candidate once', 'Attest candidate');
   assertBefore(workflow, 'Attest candidate', 'Upload immutable candidate');
   assert.doesNotMatch(workflow, /gh release|create-release|tags:/u);
+  assert.doesNotMatch(workflow, /gh attestation download[^\n]*--bundle/u);
+  assert.match(workflow, /\(cd "\$ARCHIVE_BUNDLE_DIR" && gh attestation download "\$OUTPUT_ROOT\/swift-mutation-testing-v\$\{VERSION\}-macos\.tar\.gz" --repo "\$GITHUB_REPOSITORY"\)/u);
+  assert.match(workflow, /mv "\$ARCHIVE_BUNDLE_DIR\/sha256:\$ARCHIVE_SHA256\.jsonl" "\$RUNNER_TEMP\/candidate-upload\/archive-attestation-bundle-v1\.jsonl"/u);
+  assert.match(workflow, /gh attestation verify "\$OUTPUT_ROOT\/swift-mutation-testing-v\$\{VERSION\}-macos\.tar\.gz"[^\n]*--bundle "\$RUNNER_TEMP\/candidate-upload\/archive-attestation-bundle-v1\.jsonl"[^\n]*--format json/u);
+  assert.equal((workflow.match(/gh attestation verify /gmu) ?? []).length, 4);
+  assert.equal((workflow.match(/--signer-digest "\$WORKFLOW_COMMIT" --source-digest "\$WORKFLOW_COMMIT" --source-ref refs\/heads\/main --deny-self-hosted-runners --format json/gmu) ?? []).length, 4);
+  assert.equal((workflow.match(/release-artifact\.mjs" attestation /gmu) ?? []).length, 4);
 
   for (const summaryValue of ['Artifact ID', 'Service digest', 'Run ID', 'Run attempt', 'Manifest SHA-256', 'Archive SHA-256', 'Executable SHA-256']) {
     assert.match(workflow, new RegExp(`^\\s*echo "${summaryValue}: .+"$`, 'mu'));

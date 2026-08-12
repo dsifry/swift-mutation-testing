@@ -162,7 +162,7 @@ export function artifactCommands(runCommand, controlRoot) {
     tar: {
       list: async (archivePath) => {
         const listing = await runChecked(runCommand, 'tar', ['-tvzf', archivePath], { cwd: controlRoot }, 'candidate archive listing');
-        const match = /^-rwxr-xr-x\s+1\s+\S+\s+\S+\s+(\d+)\s+\S+\s+\d+\s+(?:\d{2}:\d{2}|\d{4})\s+(swift-mutation-testing)$/m.exec(listing);
+        const match = /^-rwxr-xr-x\s+0\s+\S+\s+\S+\s+(\d+)\s+\S+\s+\d+\s+(?:\d{2}:\d{2}|\d{4})\s+(swift-mutation-testing)$/m.exec(listing);
         if (!match) fail('candidate archive listing is malformed');
         return [{ path: match[2], type: 'file', linkCount: 1, mode: '0755', size: Number(match[1]) }];
       },

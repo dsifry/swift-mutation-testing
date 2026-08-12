@@ -82,7 +82,7 @@ async function fixture() {
       await writeFile(argv[1], 'archive');
       return { stdout: '', stderr: '', exitCode: 0 };
     }
-    if (executable === 'tar' && argv[0] === '-tvzf') return { stdout: '-rwxr-xr-x  1 builder  staff  6 Aug 11 17:00 swift-mutation-testing\n', stderr: '', exitCode: 0 };
+    if (executable === 'tar' && argv[0] === '-tvzf') return { stdout: '-rwxr-xr-x  0 builder  staff  6 Aug 11 17:00 swift-mutation-testing\n', stderr: '', exitCode: 0 };
     if (executable === 'tar' && argv[0] === '-xzf') {
       const destination = argv[argv.indexOf('-C') + 1];
       await writeFile(path.join(destination, 'swift-mutation-testing'), 'binary');

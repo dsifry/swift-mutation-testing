@@ -123,13 +123,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OUTPUT_ROOT: ${{ runner.temp }}/release-candidate
           VERSION: ${{ steps.authority.outputs.version }}
+          WORKFLOW_COMMIT: ${{ steps.authority.outputs.workflow_commit }}
+          ARCHIVE_SHA256: ${{ steps.build.outputs.archive_sha256 }}
+          MANIFEST_SHA256: ${{ steps.build.outputs.manifest_sha256 }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/candidate-upload"
           cp "$OUTPUT_ROOT/swift-mutation-testing-v${VERSION}-macos.tar.gz" "$RUNNER_TEMP/candidate-upload/"
           cp "$OUTPUT_ROOT/release-candidate-v1.json" "$RUNNER_TEMP/candidate-upload/"
-          gh attestation download "$OUTPUT_ROOT/swift-mutation-testing-v${VERSION}-macos.tar.gz" --repo "$GITHUB_REPOSITORY" --bundle > "$RUNNER_TEMP/candidate-upload/archive-attestation-bundle-v1.jsonl"
-          gh attestation download "$OUTPUT_ROOT/release-candidate-v1.json" --repo "$GITHUB_REPOSITORY" --bundle > "$RUNNER_TEMP/candidate-upload/manifest-attestation-bundle-v1.jsonl"
+          ARCHIVE_BUNDLE_DIR="$RUNNER_TEMP/archive-attestation-download"
+          MANIFEST_BUNDLE_DIR="$RUNNER_TEMP/manifest-attestation-download"
+          mkdir "$ARCHIVE_BUNDLE_DIR" "$MANIFEST_BUNDLE_DIR"
+          (cd "$ARCHIVE_BUNDLE_DIR" && gh attestation download "$OUTPUT_ROOT/swift-mutation-testing-v${VERSION}-macos.tar.gz" --repo "$GITHUB_REPOSITORY")
+          (cd "$MANIFEST_BUNDLE_DIR" && gh attestation download "$OUTPUT_ROOT/release-candidate-v1.json" --repo "$GITHUB_REPOSITORY")
+          test -s "$ARCHIVE_BUNDLE_DIR/sha256:$ARCHIVE_SHA256.jsonl"
+          test -s "$MANIFEST_BUNDLE_DIR/sha256:$MANIFEST_SHA256.jsonl"
+          mv "$ARCHIVE_BUNDLE_DIR/sha256:$ARCHIVE_SHA256.jsonl" "$RUNNER_TEMP/candidate-upload/archive-attestation-bundle-v1.jsonl"
+          mv "$MANIFEST_BUNDLE_DIR/sha256:$MANIFEST_SHA256.jsonl" "$RUNNER_TEMP/candidate-upload/manifest-attestation-bundle-v1.jsonl"
+          gh attestation verify "$OUTPUT_ROOT/swift-mutation-testing-v${VERSION}-macos.tar.gz" --repo "$GITHUB_REPOSITORY" --bundle "$RUNNER_TEMP/candidate-upload/archive-attestation-bundle-v1.jsonl" --signer-workflow "github.com/$GITHUB_REPOSITORY/.github/workflows/release-candidate.yml" --signer-digest "$WORKFLOW_COMMIT" --source-digest "$WORKFLOW_COMMIT" --source-ref refs/heads/main --deny-self-hosted-runners --format json > "$RUNNER_TEMP/archive-attestation-verification-v1.json"
+          gh attestation verify "$OUTPUT_ROOT/release-candidate-v1.json" --repo "$GITHUB_REPOSITORY" --bundle "$RUNNER_TEMP/candidate-upload/manifest-attestation-bundle-v1.jsonl" --signer-workflow "github.com/$GITHUB_REPOSITORY/.github/workflows/release-candidate.yml" --signer-digest "$WORKFLOW_COMMIT" --source-digest "$WORKFLOW_COMMIT" --source-ref refs/heads/main --deny-self-hosted-runners --format json > "$RUNNER_TEMP/manifest-attestation-verification-v1.json"
+          printf '{"subjectName":"swift-mutation-testing-v%s-macos.tar.gz","subjectSHA256":"%s","repository":"%s","runId":%s,"runAttempt":%s}\n' "$VERSION" "$ARCHIVE_SHA256" "$GITHUB_REPOSITORY" "${{ github.run_id }}" "${{ github.run_attempt }}" > "$RUNNER_TEMP/archive-attestation-expected-v1.json"
+          printf '{"subjectName":"release-candidate-v1.json","subjectSHA256":"%s","repository":"%s","runId":%s,"runAttempt":%s}\n' "$MANIFEST_SHA256" "$GITHUB_REPOSITORY" "${{ github.run_id }}" "${{ github.run_attempt }}" > "$RUNNER_TEMP/manifest-attestation-expected-v1.json"
+          node "${{ github.workspace }}/control/scripts/release-artifact.mjs" attestation "$RUNNER_TEMP/archive-attestation-verification-v1.json" "$RUNNER_TEMP/archive-attestation-expected-v1.json" >/dev/null
+          node "${{ github.workspace }}/control/scripts/release-artifact.mjs" attestation "$RUNNER_TEMP/manifest-attestation-verification-v1.json" "$RUNNER_TEMP/manifest-attestation-expected-v1.json" >/dev/null
 
       - name: Upload immutable candidate
         id: upload
@@ -148,6 +164,7 @@ jobs:
 
       - name: Reverify downloaded candidate
         env:
+          GH_TOKEN: ${{ github.token }}
           WORKFLOW_COMMIT: ${{ steps.authority.outputs.workflow_commit }}
           SOURCE_COMMIT: ${{ steps.authority.outputs.source_commit }}
           VERSION: ${{ steps.authority.outputs.version }}
@@ -158,6 +175,10 @@ jobs:
           {"controlRoot":"${{ github.workspace }}/control","sourceRoot":"${{ github.workspace }}/source","artifactRoot":"$RUNNER_TEMP/downloaded-candidate","archivePath":"$RUNNER_TEMP/downloaded-candidate/swift-mutation-testing-v${VERSION}-macos.tar.gz","manifestPath":"$RUNNER_TEMP/downloaded-candidate/release-candidate-v1.json","privateDirectory":"$RUNNER_TEMP/downloaded-candidate/.verification"}
           EOF
           node "${{ github.workspace }}/control/scripts/release-artifact.mjs" candidate-bundle "$INPUT_PATH" >/dev/null
+          gh attestation verify "$RUNNER_TEMP/downloaded-candidate/swift-mutation-testing-v${VERSION}-macos.tar.gz" --repo "$GITHUB_REPOSITORY" --bundle "$RUNNER_TEMP/downloaded-candidate/archive-attestation-bundle-v1.jsonl" --signer-workflow "github.com/$GITHUB_REPOSITORY/.github/workflows/release-candidate.yml" --signer-digest "$WORKFLOW_COMMIT" --source-digest "$WORKFLOW_COMMIT" --source-ref refs/heads/main --deny-self-hosted-runners --format json > "$RUNNER_TEMP/downloaded-archive-attestation-verification-v1.json"
+          gh attestation verify "$RUNNER_TEMP/downloaded-candidate/release-candidate-v1.json" --repo "$GITHUB_REPOSITORY" --bundle "$RUNNER_TEMP/downloaded-candidate/manifest-attestation-bundle-v1.jsonl" --signer-workflow "github.com/$GITHUB_REPOSITORY/.github/workflows/release-candidate.yml" --signer-digest "$WORKFLOW_COMMIT" --source-digest "$WORKFLOW_COMMIT" --source-ref refs/heads/main --deny-self-hosted-runners --format json > "$RUNNER_TEMP/downloaded-manifest-attestation-verification-v1.json"
+          node "${{ github.workspace }}/control/scripts/release-artifact.mjs" attestation "$RUNNER_TEMP/downloaded-archive-attestation-verification-v1.json" "$RUNNER_TEMP/archive-attestation-expected-v1.json" >/dev/null
+          node "${{ github.workspace }}/control/scripts/release-artifact.mjs" attestation "$RUNNER_TEMP/downloaded-manifest-attestation-verification-v1.json" "$RUNNER_TEMP/manifest-attestation-expected-v1.json" >/dev/null
 
       - name: Publish candidate summary
         run: |

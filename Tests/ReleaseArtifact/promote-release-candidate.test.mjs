@@ -92,23 +92,21 @@ function promotionInput(overrides = {}) {
 }
 
 function attestation(subjectName, digest) {
-  return {
-    statement: {
-      _type: 'https://in-toto.io/Statement/v1',
-      subject: subjectName === candidate.archive.filename
-        ? [{ name: candidate.archive.filename, digest: { sha256: archiveSHA256 } }, { name: 'release-candidate-v1.json', digest: { sha256: manifestSHA256 } }]
-        : [{ name: candidate.archive.filename, digest: { sha256: archiveSHA256 } }, { name: 'release-candidate-v1.json', digest: { sha256: manifestSHA256 } }],
-      predicateType: 'https://slsa.dev/provenance/v1',
-      predicate: {
-        repository: candidate.repository,
-        workflowPath: candidate.workflow.path,
-        workflowRef: candidate.workflow.ref,
-        workflowCommit: candidate.workflow.commit,
-        event: 'workflow_dispatch',
-        runnerInvocationUri: `https://github.com/${candidate.repository}/actions/runs/${candidate.run.id}/attempts/${candidate.run.attempt}`,
+  return [{
+    attestation: { mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json' },
+    verificationResult: {
+      signature: { certificate: { sourceRepository: `https://github.com/${candidate.repository}` } },
+      verifiedTimestamps: [{ type: 'transparency-log' }],
+      statement: {
+        _type: 'https://in-toto.io/Statement/v1',
+        subject: [{ name: subjectName, digest: { sha256: digest } }],
+        predicateType: 'https://slsa.dev/provenance/v1',
+        predicate: {
+          runDetails: { metadata: { invocationId: `https://github.com/${candidate.repository}/actions/runs/${candidate.run.id}/attempts/${candidate.run.attempt}` } },
+        },
       },
     },
-  };
+  }];
 }
 
 function state(overrides = {}) {
@@ -221,7 +219,7 @@ for (const [name, mutate] of [
   ['expired artifact', (value) => { value.artifact.expired = true; }],
   ['deleted artifact', (value) => { value.artifact.deleted = true; }],
   ['wrong artifact run', (value) => { value.artifact.workflowRunId = 99; }],
-  ['wrong attestation attempt', (value) => { value.attestations.archive.statement.predicate.runnerInvocationUri = value.attestations.archive.statement.predicate.runnerInvocationUri.replace('/attempts/2', '/attempts/3'); }],
+  ['wrong attestation attempt', (value) => { value.attestations.archive[0].verificationResult.statement.predicate.runDetails.metadata.invocationId = value.attestations.archive[0].verificationResult.statement.predicate.runDetails.metadata.invocationId.replace('/attempts/2', '/attempts/3'); }],
   ['missing attestation', (value) => { delete value.attestations.manifest; }],
   ['input digest mismatch', (value) => { value.manifestBytes = Buffer.from(JSON.stringify(candidate)); }],
   ['wrong proof digest', (value) => { value.guideProofBytes = proofBytes(); }],
@@ -492,7 +490,6 @@ test('promotion decision seams reject incomplete downloads, assets, adapters, an
   assert.throws(() => promotionOwner.requireSameTag({a:1},{a:2}), /tag tuple/);
   assert.doesNotThrow(() => promotionOwner.requireSameTag({a:1},{a:1}));
   assert.throws(() => promotionOwner.parseJSONBytes(Buffer.from('{'), 'api'), /malformed/);
-  assert.throws(() => promotionOwner.parseAttestationFile(Buffer.from('\n')), /empty/);
 });
 
 test('native runner and native adapter validate authentication and roots', async () => {
@@ -533,6 +530,7 @@ test('CLI rejects malformed values and main covers both dispatch paths', async (
 
 test('native adapter authenticates distinct promotion and candidate control checkouts', async () => {
   const heads = [];
+  const ghCalls = [];
   let releaseResponse = null;
   let rulesetsResponse;
   let environmentResponse;
@@ -563,13 +561,19 @@ test('native adapter authenticates distinct promotion and candidate control chec
       }
       if (executable === 'git' && argv[0] === 'merge-base') return '';
       if (executable === 'gh') {
+        ghCalls.push(argv);
+        if (argv[0] === 'attestation' && argv[1] === 'verify') {
+          return JSON.stringify(argv[2].endsWith('.tar.gz')
+            ? attestation(candidate.archive.filename, archiveSHA256)
+            : attestation('release-candidate-v1.json', manifestSHA256));
+        }
         const endpoint = argv.find((value) => value.startsWith('repos/') || value.startsWith('https://'));
         if (endpoint.endsWith('/zip')) return 'zip';
         if (endpoint.includes('/releases/tags/')) {
           if (releaseResponse) return JSON.stringify(releaseResponse);
           throw Object.assign(new Error('404 Not Found'), { stderr: '404' });
         }
-        if (argv.includes('POST') && endpoint.includes('/releases')) return JSON.stringify({id:99,draft:true,assets:[]});
+        if (argv.includes('POST') && endpoint.includes('/releases')) return JSON.stringify({id:99,draft:true,assets:[],upload_url:'https://uploads.github.com/repos/dsifry/swift-mutation-testing/releases/99/assets{?name,label}'});
         if (argv.includes('PATCH')) return JSON.stringify({id:99,draft:false});
         if (endpoint.includes('/releases/99')) return JSON.stringify({id:99,draft:true,assets:draftAssets});
         if (endpoint.startsWith('https://asset/')) return Buffer.from(endpoint.endsWith('/archive') ? archiveBytes : 'asset');
@@ -587,10 +591,30 @@ test('native adapter authenticates distinct promotion and candidate control chec
   const githubState = await adapter.readState();
   assert.equal(githubState.controlHead, controlCommit);
   const downloaded = await adapter.downloadCandidate();
+  const attestationCalls = ghCalls.filter((argv) => argv[0] === 'attestation' && argv[1] === 'verify');
+  assert.equal(attestationCalls.length, 2);
+  for (const call of attestationCalls) {
+    assert.deepEqual(call.slice(3), [
+      '--repo', candidate.repository,
+      '--bundle', call[6],
+      '--signer-workflow', `github.com/${candidate.repository}/.github/workflows/release-candidate.yml`,
+      '--signer-digest', candidateWorkflowCommit,
+      '--source-digest', candidateWorkflowCommit,
+      '--source-ref', 'refs/heads/main',
+      '--deny-self-hosted-runners',
+      '--format', 'json',
+    ]);
+  }
   assert.equal(await downloaded.verificationInput.git.controlHead(downloaded.verificationInput.controlRoot), candidateWorkflowCommit);
   assert.deepEqual(heads, ['/control', '/candidate-control']);
   const draft=await adapter.createDraft({tag:'v1.3.1',name:'release',targetCommitish:commit});
+  await assert.rejects(() => adapter.uploadAsset({ ...draft, upload_url: undefined }, {name:'asset',bytes:Buffer.from('asset')}), /upload URL.*authoritative/i);
+  await assert.rejects(() => adapter.uploadAsset({ ...draft, upload_url: 'https://api.github.com/wrong{?name,label}' }, {name:'asset',bytes:Buffer.from('asset')}), /upload URL.*authoritative/i);
   await adapter.uploadAsset(draft,{name:'asset',bytes:Buffer.from('asset')});
+  const uploadCall=ghCalls.find((argv)=>argv.includes('Content-Type: application/octet-stream'));
+  assert.equal(uploadCall.some((value)=>value==='https://uploads.github.com/repos/dsifry/swift-mutation-testing/releases/99/assets?name=asset'),true);
+  assert.equal(uploadCall.some((value)=>value.includes('api.github.com')||value.startsWith('repos/dsifry/swift-mutation-testing/releases/99/assets?')),false);
+  assert.equal(files.has('/work/upload-asset'), true);
   assert.deepEqual(await adapter.downloadDraftAssets(draft),{});
   draftAssets=[{name:'asset',url:'https://asset/other'}];
   assert.deepEqual(await adapter.downloadDraftAssets(draft),{asset:Buffer.from('asset')});

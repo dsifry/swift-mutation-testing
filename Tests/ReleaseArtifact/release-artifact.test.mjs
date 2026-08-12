@@ -143,6 +143,8 @@ function manifestBytes(mutator) {
 
 function candidateExpected() {
   return {
+    subjectName: validCandidate.archive.filename,
+    subjectSHA256: validCandidate.archive.sha256,
     archiveSHA256: validCandidate.archive.sha256,
     manifestSHA256,
     repository: validCandidate.repository,
@@ -391,13 +393,13 @@ test('candidate bundle binds manifest and executable reads to their canonical ro
   });
 });
 
-test('attestation bundle accepts both authenticated subjects and exact provenance', () => {
-  assert.deepEqual(verifyAttestationBundle(validAttestation, candidateExpected()), validAttestation.statement);
+test('attestation policy accepts a real-shaped gh verify result for one exact authenticated subject', () => {
+  assert.deepEqual(verifyAttestationBundle(validAttestation, candidateExpected()), validAttestation[0].verificationResult.statement);
 });
 
 test('attestation bundle rejects an extra subject key', () => {
   const bundle = clone(validAttestation);
-  bundle.statement.subject[0].extra = true;
+  bundle[0].verificationResult.statement.subject[0].extra = true;
   assert.throws(() => verifyAttestationBundle(bundle, candidateExpected()), /attestation/i);
 });
 
@@ -407,7 +409,7 @@ test('native command adapters parse and execute the closed inspection commands',
     runCommand: async (command, arguments_) => {
       calls.push([command, arguments_]);
       if (command === 'tar' && arguments_[0] === '-tvzf') {
-        return '-rwxr-xr-x  1 builder  staff  123456 Aug 11 17:00 swift-mutation-testing\n';
+        return '-rwxr-xr-x  0 builder  staff  123456 Aug 11 17:00 swift-mutation-testing\n';
       }
       if (command === 'file') return 'Mach-O 64-bit executable arm64\n';
       if (command === 'otool') return 'Load command 1\n      cmd LC_UUID\n  cmdsize 24\n     uuid 12345678-1234-1234-1234-123456789ABC\nLoad command 2\n      cmd LC_BUILD_VERSION\n  cmdsize 32\n    minos 15.0\n';
@@ -452,20 +454,19 @@ test('CLI command arms emit verified results and reject duplicate attestation JS
   await assert.rejects(() => runCli(['attestation', 'duplicate.json', 'expected.json'], {
     ...dependencies,
     readFile: async (filePath) => filePath === 'duplicate.json'
-      ? Buffer.from('{"statement":{"_type":"https://in-toto.io/Statement/v1","_type":"https://in-toto.io/Statement/v1"}}')
+      ? Buffer.from('[{"verificationResult":{"statement":{"_type":"https://in-toto.io/Statement/v1","_type":"https://in-toto.io/Statement/v1"}}}]')
       : Buffer.from(JSON.stringify(expected)),
   }), /candidate manifest: duplicate JSON key/i);
   await assert.rejects(() => runCli(['unknown'], dependencies), /usage/i);
 });
 
 for (const [name, mutate] of [
-  ['missing manifest subject', (value) => { value.statement.subject.pop(); }],
-  ['other repository', (value) => { value.statement.predicate.repository = 'other/repository'; }],
-  ['other workflow', (value) => { value.statement.predicate.workflowPath = '.github/workflows/release.yml'; }],
-  ['other workflow commit', (value) => { value.statement.predicate.workflowCommit = '3333333333333333333333333333333333333333'; }],
-  ['other event', (value) => { value.statement.predicate.event = 'push'; }],
-  ['other run', (value) => { value.statement.predicate.runnerInvocationUri = value.statement.predicate.runnerInvocationUri.replace('/123456789/', '/987654321/'); }],
-  ['other attempt', (value) => { value.statement.predicate.runnerInvocationUri = value.statement.predicate.runnerInvocationUri.replace('/2', '/3'); }],
+  ['missing subject', (value) => { value[0].verificationResult.statement.subject.pop(); }],
+  ['multiple verification results', (value) => { value.push(clone(value[0])); }],
+  ['other subject', (value) => { value[0].verificationResult.statement.subject[0].name = 'other'; }],
+  ['other digest', (value) => { value[0].verificationResult.statement.subject[0].digest.sha256 = 'b'.repeat(64); }],
+  ['other run', (value) => { value[0].verificationResult.statement.predicate.runDetails.metadata.invocationId = value[0].verificationResult.statement.predicate.runDetails.metadata.invocationId.replace('/123456789/', '/987654321/'); }],
+  ['other attempt', (value) => { value[0].verificationResult.statement.predicate.runDetails.metadata.invocationId = value[0].verificationResult.statement.predicate.runDetails.metadata.invocationId.replace('/2', '/3'); }],
 ]) {
   test(`attestation bundle rejects ${name}`, () => {
     const bundle = clone(validAttestation);
