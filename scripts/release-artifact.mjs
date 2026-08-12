@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
-import { chmod, lstat, mkdir, readFile, realpath } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -246,7 +246,7 @@ function assertBundleInput(input) {
   if (typeof input.privateDirectory !== 'string' || !path.isAbsolute(input.privateDirectory)) {
     fail('candidate bundle', 'private directory must be an absolute path');
   }
-  if (!isObject(input.fs) || typeof input.fs.readOwnedRegularFile !== 'function' || typeof input.fs.mkdirFreshPrivate !== 'function') {
+  if (!isObject(input.fs) || typeof input.fs.readOwnedRegularFile !== 'function' || typeof input.fs.mkdirFreshPrivate !== 'function' || typeof input.fs.stageOwnedArchive !== 'function') {
     fail('candidate bundle', 'fs must provide owned regular reads and fresh private directories');
   }
   if (!isObject(input.commands)) fail('candidate bundle', 'commands must be an object');
@@ -254,6 +254,9 @@ function assertBundleInput(input) {
     if (!isObject(input.commands[owner]) || typeof input.commands[owner][method] !== 'function') {
       fail('candidate bundle', `commands.${owner}.${method} must be a function`);
     }
+  }
+  if (!isObject(input.git) || typeof input.git.controlHead !== 'function' || typeof input.git.sourceHead !== 'function' || typeof input.git.isAncestor !== 'function') {
+    fail('candidate bundle', 'git must verify both checkout HEADs and source ancestry');
   }
 }
 
@@ -270,13 +273,35 @@ async function verifyArchiveListing(archivePath, manifest, commands) {
   }
 }
 
-async function extractPrivately(input, manifest) {
-  await input.fs.mkdirFreshPrivate(input.privateDirectory, 0o700);
-  await input.commands.tar.extract(input.archivePath, input.privateDirectory);
-  return path.join(input.privateDirectory, manifest.executable.filename);
+async function verifySourceCheckout(input, manifest) {
+  const controlHead = await input.git.controlHead(input.controlRoot);
+  const sourceHead = await input.git.sourceHead(input.sourceRoot);
+  if (controlHead !== manifest.workflow.commit || sourceHead !== manifest.sourceCommit) {
+    fail('candidate bundle', 'control or source checkout HEAD does not match the candidate manifest');
+  }
+  if (await input.git.isAncestor(manifest.sourceCommit, manifest.workflow.commit, input.sourceRoot) !== true) {
+    fail('candidate bundle', 'source commit is not an authenticated ancestor of the workflow commit');
+  }
 }
 
-async function inspectExecutable(executablePath, manifest, commands, fs) {
+async function stageArchivePrivately(input) {
+  await input.fs.mkdirFreshPrivate(input.privateDirectory, 0o700);
+  const staged = await input.fs.stageOwnedArchive(input.archivePath, input.controlRoot, input.privateDirectory);
+  if (!isObject(staged) || typeof staged.path !== 'string' || !Buffer.isBuffer(staged.bytes)) {
+    fail('candidate bundle', 'staged archive must be an owned private file and bytes');
+  }
+  assertAbsoluteChild(input.privateDirectory, staged.path, 'staged archive path');
+  return staged;
+}
+
+async function extractPrivately(input, manifest, archivePath) {
+  const extractionDirectory = path.join(input.privateDirectory, 'extracted');
+  await input.fs.mkdirFreshPrivate(extractionDirectory, 0o700);
+  await input.commands.tar.extract(archivePath, extractionDirectory);
+  return path.join(extractionDirectory, manifest.executable.filename);
+}
+
+async function inspectExecutable(executablePath, manifest, commands, fs, privateRoot) {
   const signature = await commands.codesign.verify(executablePath);
   if (signature !== true) fail('candidate bundle', 'executable code signature verification failed');
   const fileResult = await commands.file.inspect(executablePath);
@@ -289,20 +314,23 @@ async function inspectExecutable(executablePath, manifest, commands, fs) {
   }
   const version = await commands.executable.version(executablePath);
   if (version !== manifest.release.versionOutput) fail('candidate bundle', 'executable version output does not match the manifest');
-  const executableBytes = await fs.readOwnedRegularFile(executablePath);
+  const executableBytes = await fs.readOwnedRegularFile(executablePath, privateRoot);
   return { executableSHA256: sha256(executableBytes) };
 }
 
 export async function verifyCandidateBundle(input) {
   assertBundleInput(input);
-  const manifestBytes = await input.fs.readOwnedRegularFile(input.manifestPath);
+  const manifestBytes = await input.fs.readOwnedRegularFile(input.manifestPath, input.controlRoot);
   const manifest = parseCandidateManifest(manifestBytes);
-  await verifyArchiveListing(input.archivePath, manifest, input.commands);
-  const executablePath = await extractPrivately(input, manifest);
-  const observed = await inspectExecutable(executablePath, manifest, input.commands, input.fs);
-  const archiveSHA256 = sha256(await input.fs.readOwnedRegularFile(input.archivePath));
+  await verifySourceCheckout(input, manifest);
+  const stagedArchive = await stageArchivePrivately(input);
+  const archiveSHA256 = sha256(stagedArchive.bytes);
+  if (archiveSHA256 !== manifest.archive.sha256) fail('candidate bundle', 'observed archive digest does not match the candidate manifest');
+  await verifyArchiveListing(stagedArchive.path, manifest, input.commands);
+  const executablePath = await extractPrivately(input, manifest, stagedArchive.path);
+  const observed = await inspectExecutable(executablePath, manifest, input.commands, input.fs, input.privateDirectory);
   const manifestSHA256 = sha256(manifestBytes);
-  if (archiveSHA256 !== manifest.archive.sha256 || observed.executableSHA256 !== manifest.executable.sha256) {
+  if (observed.executableSHA256 !== manifest.executable.sha256) {
     fail('candidate bundle', 'observed digest does not match the candidate manifest');
   }
   return Object.freeze({ manifest, archiveSHA256, manifestSHA256, executableSHA256: observed.executableSHA256 });
@@ -313,7 +341,7 @@ function assertAttestation(condition, message) {
 }
 
 function subjectDigest(subject, name) {
-  if (!isObject(subject) || subject.name !== name || !isObject(subject.digest) || !SHA256.test(subject.digest.sha256) || Object.keys(subject.digest).length !== 1) {
+  if (!isObject(subject) || Object.keys(subject).length !== 2 || !Object.hasOwn(subject, 'name') || !Object.hasOwn(subject, 'digest') || subject.name !== name || !isObject(subject.digest) || !SHA256.test(subject.digest.sha256) || Object.keys(subject.digest).length !== 1) {
     fail('attestation', `subject ${name} is invalid`);
   }
   return subject.digest.sha256;
@@ -344,8 +372,19 @@ export function verifyAttestationBundle(bundle, expected) {
   return deepFreeze(statement);
 }
 
-async function readOwnedRegularFile(filePath) {
+function assertResolvedChild(root, target, label) {
+  const relative = path.relative(root, target);
+  if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`candidate bundle: ${label} escapes its required root`);
+  }
+}
+
+async function readOwnedRegularFile(filePath, root) {
+  const rootResolved = await realpath(root);
+  const original = await lstat(filePath);
+  if (!original.isFile() || original.nlink !== 1) throw new Error(`candidate bundle: ${filePath} is not an owned regular file`);
   const resolved = await realpath(filePath);
+  assertResolvedChild(rootResolved, resolved, filePath);
   const stat = await lstat(resolved);
   if (!stat.isFile() || stat.nlink !== 1) throw new Error(`candidate bundle: ${filePath} is not an owned regular file`);
   return readFile(resolved);
@@ -363,14 +402,23 @@ async function mkdirFreshPrivate(directory, mode) {
   return directory;
 }
 
-async function run(command, arguments_) {
-  const { stdout } = await execFile(command, arguments_, { encoding: 'utf8' });
+async function stageOwnedArchive(filePath, root, privateDirectory) {
+  const bytes = await readOwnedRegularFile(filePath, root);
+  const stagedPath = path.join(privateDirectory, '.candidate-archive');
+  await writeFile(stagedPath, bytes, { encoding: undefined, mode: 0o600, flag: 'wx' });
+  const stat = await lstat(stagedPath);
+  if (!stat.isFile() || stat.nlink !== 1) throw new Error('candidate bundle: staged archive is not an owned regular file');
+  return { path: stagedPath, bytes };
+}
+
+async function run(command, arguments_, options = {}) {
+  const { stdout } = await execFile(command, arguments_, { encoding: 'utf8', ...options });
   return stdout;
 }
 
 function parseTarListing(stdout) {
   return stdout.trim().split('\n').filter(Boolean).map((line) => {
-    const match = /^(?<type>.)(?<mode>[rwx-]{9})\s+(?<links>\d+)\s+\S+(?:\s+\S+)?\s+(?<size>\d+)\s+.+?\s+(?<name>.+)$/.exec(line);
+    const match = /^(?<type>.)(?<mode>[rwx-]{9})\s+(?<links>\d+)\s+\S+\s+\S+\s+(?<size>\d+)\s+\w{3}\s+\d{1,2}\s+(?:\d{2}:\d{2}|\d{4})\s+(?<name>.+)$/.exec(line);
     if (!match?.groups) throw new Error('candidate bundle: unable to parse tar listing');
     return {
       path: match.groups.name.replace(/\s+link to .+$/, ''),
@@ -382,50 +430,83 @@ function parseTarListing(stdout) {
   });
 }
 
-function nativeCommands() {
+export function createNativeCommands({ runCommand = run } = {}) {
   return {
     tar: {
-      list: async (archivePath) => parseTarListing(await run('tar', ['-tvzf', archivePath])),
-      extract: async (archivePath, directory) => run('tar', ['-xzf', archivePath, '-C', directory]),
+      list: async (archivePath) => parseTarListing(await runCommand('tar', ['-tvzf', archivePath])),
+      extract: async (archivePath, directory) => runCommand('tar', ['-xzf', archivePath, '-C', directory]),
     },
-    codesign: { verify: async (filePath) => { await run('codesign', ['--verify', '--strict', filePath]); return true; } },
-    file: { inspect: async (filePath) => ({ type: (await run('file', ['-b', filePath])).trim().includes('Mach-O 64-bit executable arm64') ? 'Mach-O 64-bit executable arm64' : 'other' }) },
+    codesign: { verify: async (filePath) => { await runCommand('codesign', ['--verify', '--strict', filePath]); return true; } },
+    file: { inspect: async (filePath) => ({ type: (await runCommand('file', ['-b', filePath])).trim().includes('Mach-O 64-bit executable arm64') ? 'Mach-O 64-bit executable arm64' : 'other' }) },
     otool: {
       inspect: async (filePath) => {
-        const output = await run('otool', ['-l', filePath]);
+        const output = await runCommand('otool', ['-l', filePath]);
         const uuid = /cmd LC_UUID\s+cmdsize \d+\s+uuid ([0-9A-F-]+)/s.exec(output)?.[1]?.toLowerCase();
         const deploymentTarget = /cmd LC_BUILD_VERSION[\s\S]*?minos (\d+(?:\.\d+)?)/.exec(output)?.[1];
-        return { uuid, cpuType: (await run('file', ['-b', filePath])).includes('arm64') ? 'arm64' : 'other', deploymentTarget };
+        return { uuid, cpuType: (await runCommand('file', ['-b', filePath])).includes('arm64') ? 'arm64' : 'other', deploymentTarget };
       },
     },
-    executable: { version: async (filePath) => (await run(filePath, ['--version'])).trim() },
+    executable: { version: async (filePath) => (await runCommand(filePath, ['--version'])).trim() },
   };
 }
 
-async function runCli() {
-  const [command, first, second] = process.argv.slice(2);
+function nativeGit() {
+  return {
+    controlHead: async (root) => (await run('git', ['rev-parse', 'HEAD'], { cwd: root })).trim(),
+    sourceHead: async (root) => (await run('git', ['rev-parse', 'HEAD'], { cwd: root })).trim(),
+    isAncestor: async (ancestor, descendant, root) => {
+      try {
+        await run('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd: root });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
+function parseAttestationBundle(bytes) {
+  const bundle = parseJSONRejectingDuplicateKeys(bytes);
+  if (!isObject(bundle) || Object.keys(bundle).length !== 1 || !isObject(bundle.statement)) {
+    fail('attestation', 'bundle must contain exactly one statement');
+  }
+  return bundle;
+}
+
+export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
+  const {
+    readFile: readFileImpl = readFile,
+    readOwnedRegularFile: readOwnedRegularFileImpl = readOwnedRegularFile,
+    realpath: realpathImpl = realpath,
+    verifyCandidateBundle: verifyCandidateBundleImpl = verifyCandidateBundle,
+    createNativeCommands: createNativeCommandsImpl = createNativeCommands,
+    nativeGit: nativeGitImpl = nativeGit,
+    stdout = (value) => process.stdout.write(value),
+  } = dependencies;
+  const [command, first, second] = argv;
   if (command === 'candidate-manifest' && first && !second) {
-    process.stdout.write(`${JSON.stringify(parseCandidateManifest(await readOwnedRegularFile(first)))}\n`);
+    stdout(`${JSON.stringify(parseCandidateManifest(await readOwnedRegularFileImpl(first, path.dirname(first))))}\n`);
     return;
   }
   if (command === 'attestation' && first && second) {
-    const bundle = JSON.parse(await readFile(first, 'utf8'));
-    const expected = JSON.parse(await readFile(second, 'utf8'));
-    process.stdout.write(`${JSON.stringify(verifyAttestationBundle(bundle, expected))}\n`);
+    const bundle = parseAttestationBundle(await readFileImpl(first));
+    const expected = JSON.parse(await readFileImpl(second, 'utf8'));
+    stdout(`${JSON.stringify(verifyAttestationBundle(bundle, expected))}\n`);
     return;
   }
   if (command === 'candidate-bundle' && first && !second) {
-    const input = JSON.parse(await readFile(first, 'utf8'));
-    const controlRoot = await realpath(input.controlRoot);
-    const sourceRoot = await realpath(input.sourceRoot);
-    const verified = await verifyCandidateBundle({
+    const input = JSON.parse(await readFileImpl(first, 'utf8'));
+    const controlRoot = await realpathImpl(input.controlRoot);
+    const sourceRoot = await realpathImpl(input.sourceRoot);
+    const verified = await verifyCandidateBundleImpl({
       ...input,
       controlRoot,
       sourceRoot,
-      fs: { readOwnedRegularFile, mkdirFreshPrivate },
-      commands: nativeCommands(),
+      fs: { readOwnedRegularFile, mkdirFreshPrivate, stageOwnedArchive },
+      commands: createNativeCommandsImpl(),
+      git: nativeGitImpl(),
     });
-    process.stdout.write(`${JSON.stringify(verified)}\n`);
+    stdout(`${JSON.stringify(verified)}\n`);
     return;
   }
   throw new Error('usage: release-artifact.mjs candidate-manifest <manifest> | attestation <bundle> <expected> | candidate-bundle <input-json>');

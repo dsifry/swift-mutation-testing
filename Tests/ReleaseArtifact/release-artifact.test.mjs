@@ -5,7 +5,9 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  createNativeCommands,
   parseCandidateManifest,
+  runCli,
   sha256,
   verifyAttestationBundle,
   verifyCandidateBundle,
@@ -135,6 +137,11 @@ async function withBundle(overrides, assertion) {
         records.push(`mkdir:${directory}`);
         return directory;
       },
+      stageOwnedArchive: async (_archivePath, _controlRoot, privateDirectory) => {
+        const stagedPath = path.join(privateDirectory, '.candidate-archive');
+        records.push(`stage:${stagedPath}`);
+        return { path: stagedPath, bytes: archiveBytes };
+      },
     },
     commands: validCommands({
       tar: {
@@ -143,6 +150,11 @@ async function withBundle(overrides, assertion) {
         },
       },
     }),
+    git: {
+      controlHead: async () => candidate.workflow.commit,
+      sourceHead: async () => candidate.sourceCommit,
+      isAncestor: async () => true,
+    },
   };
   Object.assign(input, overrides);
   try {
@@ -172,8 +184,8 @@ for (const [name, listing] of [
 }
 
 for (const [name, override] of [
-  ['archive digest mismatch', (input) => { input.fs.readOwnedRegularFile = async (filePath) => filePath.endsWith('.json') ? Buffer.from(JSON.stringify(validCandidate)) : Buffer.from('wrong archive'); }],
-  ['executable digest mismatch', (input) => { input.fs.readOwnedRegularFile = async (filePath) => filePath.endsWith('.json') ? Buffer.from(JSON.stringify(validCandidate)) : Buffer.from('wrong executable'); }],
+  ['archive digest mismatch', (input) => { input.fs.stageOwnedArchive = async (_archivePath, _controlRoot, privateDirectory) => ({ path: path.join(privateDirectory, '.candidate-archive'), bytes: Buffer.from('wrong archive') }); }],
+  ['executable digest mismatch', (input) => { input.fs.readOwnedRegularFile = async (filePath) => filePath.endsWith('.json') ? Buffer.from(JSON.stringify(input.candidate)) : Buffer.from('wrong executable'); }],
   ['wrong Mach-O UUID', (input) => { input.commands.otool.inspect = async () => ({ uuid: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', cpuType: 'arm64', deploymentTarget: '15.0' }); }],
   ['wrong Mach-O CPU', (input) => { input.commands.otool.inspect = async () => ({ uuid: validCandidate.executable.uuid, cpuType: 'x86_64', deploymentTarget: '15.0' }); }],
   ['wrong deployment minimum', (input) => { input.commands.otool.inspect = async () => ({ uuid: validCandidate.executable.uuid, cpuType: 'arm64', deploymentTarget: '26.0' }); }],
@@ -181,7 +193,8 @@ for (const [name, override] of [
   ['failed code signature', (input) => { input.commands.codesign.verify = async () => false; }],
 ]) {
   test(`candidate bundle rejects ${name}`, async () => {
-    await withBundle({}, async (input) => {
+    await withBundle({}, async (input, _records, candidate) => {
+      input.candidate = candidate;
       override(input);
       await assert.rejects(() => verifyCandidateBundle(input), /candidate|archive|executable/i);
     });
@@ -199,12 +212,138 @@ test('candidate bundle verifies listing before private 0700 extraction and retur
     });
     assert.equal(records[0], `read:${input.manifestPath}`);
     assert.equal(records.some((record) => record === `mkdir:${input.privateDirectory}`), true);
-    assert.equal(records.some((record) => record === `extract:${input.privateDirectory}`), true);
+    assert.equal(records.some((record) => record === `extract:${path.join(input.privateDirectory, 'extracted')}`), true);
+  });
+});
+
+test('candidate bundle rejects a source checkout whose HEAD does not match the manifest source commit', async () => {
+  await withBundle({}, async (input) => {
+    input.git = {
+      controlHead: async () => validCandidate.workflow.commit,
+      sourceHead: async () => '3333333333333333333333333333333333333333',
+      isAncestor: async () => true,
+    };
+    await assert.rejects(() => verifyCandidateBundle(input), /source|checkout|candidate/i);
+  });
+});
+
+test('candidate bundle rejects a source commit that is not an authenticated ancestor', async () => {
+  await withBundle({}, async (input) => {
+    input.git = {
+      controlHead: async () => validCandidate.workflow.commit,
+      sourceHead: async () => validCandidate.sourceCommit,
+      isAncestor: async () => false,
+    };
+    await assert.rejects(() => verifyCandidateBundle(input), /ancestor|source|candidate/i);
+  });
+});
+
+test('candidate bundle lists and extracts the same private archive copy', async () => {
+  await withBundle({}, async (input) => {
+    const paths = [];
+    input.git = {
+      controlHead: async () => validCandidate.workflow.commit,
+      sourceHead: async () => validCandidate.sourceCommit,
+      isAncestor: async () => true,
+    };
+    input.fs.stageOwnedArchive = async (_archivePath, _controlRoot, privateDirectory) => ({
+      path: path.join(privateDirectory, '.candidate-archive'),
+      bytes: Buffer.from('archive bytes'),
+    });
+    input.commands.tar.list = async (archivePath) => {
+      paths.push(archivePath);
+      return validListing();
+    };
+    input.commands.tar.extract = async (archivePath) => {
+      paths.push(archivePath);
+    };
+    await verifyCandidateBundle(input);
+    assert.notEqual(paths[0], input.archivePath);
+    assert.equal(paths[0], paths[1]);
+  });
+});
+
+test('candidate bundle binds manifest and executable reads to their canonical roots', async () => {
+  await withBundle({}, async (input, _records, candidate, _archiveBytes, executableBytes) => {
+    const reads = [];
+    input.fs.readOwnedRegularFile = async (filePath, root) => {
+      reads.push([filePath, root]);
+      if (filePath.endsWith('.json')) return Buffer.from(JSON.stringify(candidate));
+      return executableBytes;
+    };
+    await verifyCandidateBundle(input);
+    assert.deepEqual(reads, [
+      [input.manifestPath, input.controlRoot],
+      [path.join(input.privateDirectory, 'extracted', candidate.executable.filename), input.privateDirectory],
+    ]);
   });
 });
 
 test('attestation bundle accepts both authenticated subjects and exact provenance', () => {
   assert.deepEqual(verifyAttestationBundle(validAttestation, candidateExpected()), validAttestation.statement);
+});
+
+test('attestation bundle rejects an extra subject key', () => {
+  const bundle = clone(validAttestation);
+  bundle.statement.subject[0].extra = true;
+  assert.throws(() => verifyAttestationBundle(bundle, candidateExpected()), /attestation/i);
+});
+
+test('native command adapters parse and execute the closed inspection commands', async () => {
+  const calls = [];
+  const commands = createNativeCommands({
+    runCommand: async (command, arguments_) => {
+      calls.push([command, arguments_]);
+      if (command === 'tar' && arguments_[0] === '-tvzf') {
+        return '-rwxr-xr-x  1 builder  staff  123456 Aug 11 17:00 swift-mutation-testing\n';
+      }
+      if (command === 'file') return 'Mach-O 64-bit executable arm64\n';
+      if (command === 'otool') return 'Load command 1\n      cmd LC_UUID\n  cmdsize 24\n     uuid 12345678-1234-1234-1234-123456789ABC\nLoad command 2\n      cmd LC_BUILD_VERSION\n  cmdsize 32\n    minos 15.0\n';
+      if (command === '/private/extracted/swift-mutation-testing') return 'swift-mutation-testing 1.3.1 [arm64-macos26]\n';
+      return '';
+    },
+  });
+  assert.deepEqual(await commands.tar.list('/private/archive'), validListing());
+  await commands.tar.extract('/private/archive', '/private/extracted');
+  assert.equal(await commands.codesign.verify('/private/extracted/swift-mutation-testing'), true);
+  assert.deepEqual(await commands.file.inspect('/private/extracted/swift-mutation-testing'), { type: 'Mach-O 64-bit executable arm64' });
+  assert.deepEqual(await commands.otool.inspect('/private/extracted/swift-mutation-testing'), {
+    uuid: validCandidate.executable.uuid,
+    cpuType: 'arm64',
+    deploymentTarget: '15.0',
+  });
+  assert.equal(await commands.executable.version('/private/extracted/swift-mutation-testing'), validCandidate.release.versionOutput);
+  assert.deepEqual(calls.map(([command, arguments_]) => [command, arguments_[0]]), [
+    ['tar', '-tvzf'], ['tar', '-xzf'], ['codesign', '--verify'], ['file', '-b'], ['otool', '-l'], ['file', '-b'], ['/private/extracted/swift-mutation-testing', '--version'],
+  ]);
+});
+
+test('CLI command arms emit verified results and reject duplicate attestation JSON keys', async () => {
+  const stdout = [];
+  const expected = candidateExpected();
+  const dependencies = {
+    stdout: (value) => stdout.push(value),
+    readOwnedRegularFile: async () => validCandidateBytes,
+    readFile: async (filePath) => filePath === 'bundle.json'
+      ? Buffer.from(JSON.stringify(validAttestation))
+      : Buffer.from(JSON.stringify(expected)),
+    realpath: async (value) => value,
+    verifyCandidateBundle: async () => ({ manifest: validCandidate, archiveSHA256: validCandidate.archive.sha256, manifestSHA256, executableSHA256: validCandidate.executable.sha256 }),
+  };
+  await runCli(['candidate-manifest', 'manifest.json'], dependencies);
+  await runCli(['attestation', 'bundle.json', 'expected.json'], dependencies);
+  await runCli(['candidate-bundle', 'input.json'], {
+    ...dependencies,
+    readFile: async () => Buffer.from(JSON.stringify({ controlRoot: '/control', sourceRoot: '/source' })),
+  });
+  assert.equal(stdout.length, 3);
+  await assert.rejects(() => runCli(['attestation', 'duplicate.json', 'expected.json'], {
+    ...dependencies,
+    readFile: async (filePath) => filePath === 'duplicate.json'
+      ? Buffer.from('{"statement":{"_type":"https://in-toto.io/Statement/v1","_type":"https://in-toto.io/Statement/v1"}}')
+      : Buffer.from(JSON.stringify(expected)),
+  }), /candidate manifest: duplicate JSON key/i);
+  await assert.rejects(() => runCli(['unknown'], dependencies), /usage/i);
 });
 
 for (const [name, mutate] of [
