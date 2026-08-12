@@ -40,7 +40,7 @@ function expectedAssets(input, manifest, checksums) {
   ];
 }
 
-function verifyDownloadedCandidate(input, downloaded) {
+export function verifyDownloadedCandidate(input, downloaded) {
   if (!downloaded || !Buffer.isBuffer(downloaded.archiveBytes) || !Buffer.isBuffer(downloaded.manifestBytes)) {
     promotionFail('candidate download is incomplete');
   }
@@ -60,7 +60,7 @@ function verifyDownloadedCandidate(input, downloaded) {
   return manifest;
 }
 
-function verifyAssetDownloads(downloaded, expected) {
+export function verifyAssetDownloads(downloaded, expected) {
   if (!downloaded || typeof downloaded !== 'object' || Array.isArray(downloaded)) {
     promotionFail('draft asset downloads are absent');
   }
@@ -76,7 +76,7 @@ function verifyAssetDownloads(downloaded, expected) {
   }
 }
 
-function requireAdapter(github) {
+export function requireAdapter(github) {
   const methods = [
     'readState', 'downloadCandidate', 'createDraft', 'uploadAsset',
     'downloadDraftAssets', 'getTagTuple', 'publishDraft',
@@ -87,12 +87,16 @@ function requireAdapter(github) {
   }
 }
 
-async function nativeRun(command, arguments_, options = {}) {
-  const { stdout = '' } = await execFile(command, arguments_, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, ...options });
+export function requireSameTag(current, original) {
+  if (JSON.stringify(current) !== JSON.stringify(original)) promotionFail('tag tuple changed during promotion');
+}
+
+export async function nativeRun(command, arguments_, options = {}, runCommand = execFile) {
+  const { stdout = '' } = await runCommand(command, arguments_, { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, ...options });
   return stdout;
 }
 
-function parseJSONBytes(bytes, scope) {
+export function parseJSONBytes(bytes, scope) {
   try {
     return JSON.parse(Buffer.isBuffer(bytes) ? bytes.toString('utf8') : bytes);
   } catch {
@@ -100,7 +104,7 @@ function parseJSONBytes(bytes, scope) {
   }
 }
 
-function parseAttestationFile(bytes) {
+export function parseAttestationFile(bytes) {
   const line = bytes.toString('utf8').split('\n').find((value) => value.trim().length > 0);
   if (!line) promotionFail('candidate attestation bundle is empty');
   return parseJSONBytes(line, 'candidate attestation');
@@ -132,13 +136,9 @@ export function createNativeGitHubAdapter({
     return Buffer.isBuffer(output) ? output : Buffer.from(output);
   };
   let candidateDownload;
-  let workReady = false;
-
   const prepareWorkRoot = async () => {
-    if (workReady) return;
     await mkdirImpl(workRoot, { mode: 0o700, recursive: false });
     await chmodImpl(workRoot, 0o700);
-    workReady = true;
   };
 
   const ensureCandidate = async () => {
@@ -290,7 +290,7 @@ export function createNativeGitHubAdapter({
   };
 }
 
-export async function promoteReleaseCandidate(input, github) {
+export async function promoteReleaseCandidate(input, github, dependencies = {}) {
   requireAdapter(github);
   const githubState = await github.readState(input);
   const authority = verifyPromotionAuthority(input, githubState);
@@ -306,7 +306,7 @@ export async function promoteReleaseCandidate(input, github) {
   });
   const manifest = verifyDownloadedCandidate(input, candidateDownload);
   if (!candidateDownload.verificationInput) promotionFail('candidate verification input is absent');
-  const verifiedCandidate = await verifyCandidateBundle(candidateDownload.verificationInput);
+  const verifiedCandidate = await (dependencies.verifyCandidateBundle ?? verifyCandidateBundle)(candidateDownload.verificationInput);
   if (verifiedCandidate.archiveSHA256 !== input.archiveSHA256
     || verifiedCandidate.manifestSHA256 !== input.manifestSHA256
     || verifiedCandidate.executableSHA256 !== input.executableSHA256
@@ -320,9 +320,7 @@ export async function promoteReleaseCandidate(input, github) {
 
   const requireUnchangedTag = async () => {
     const current = verifyTagTuple(await github.getTagTuple(input), input);
-    if (JSON.stringify(current) !== JSON.stringify(originalTagTuple)) {
-      promotionFail('tag tuple changed during promotion');
-    }
+    requireSameTag(current, originalTagTuple);
   };
 
   await requireUnchangedTag();
@@ -365,7 +363,7 @@ export async function promoteReleaseCandidate(input, github) {
   return Object.freeze({ authority, mutations: Object.freeze(mutations) });
 }
 
-function parseCliArguments(argv) {
+export function parseCliArguments(argv) {
   if (!Array.isArray(argv) || argv.length !== CLI_KEYS.length * 2) promotionFail('usage: exact promotion inputs are required');
   const values = {};
   for (let index = 0; index < argv.length; index += 2) {
@@ -379,7 +377,6 @@ function parseCliArguments(argv) {
     if (Object.hasOwn(values, key)) promotionFail(`duplicate promotion input ${flag}`);
     values[key] = value;
   }
-  if (CLI_KEYS.some((key) => !Object.hasOwn(values, key))) promotionFail('usage: exact promotion inputs are required');
   for (const key of ['control-root', 'candidate-control-root', 'source-root', 'work-root']) {
     if (!path.isAbsolute(values[key])) promotionFail(`${key} must be an absolute path`);
   }
@@ -426,9 +423,15 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
   return result;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  runCli().catch((error) => {
-    process.stderr.write(`${error.message}\n`);
-    process.exitCode = 1;
-  });
+export async function runMain(argv = process.argv.slice(2), dependencies = {}) {
+  try { await runCli(argv, dependencies); return 0; }
+  catch (error) { (dependencies.stderr ?? ((value) => process.stderr.write(value)))(`${error.message}\n`); return 1; }
 }
+
+export async function main({ moduleURL = import.meta.url, argv = process.argv, runMainImpl = runMain } = {}) {
+  if (moduleURL !== `file://${argv[1]}`) return false;
+  process.exitCode = await runMainImpl(argv.slice(2));
+  return true;
+}
+
+await main();

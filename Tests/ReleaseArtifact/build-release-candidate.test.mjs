@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmod, copyFile, lstat, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, copyFile, lstat, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { runBuild } from '../../scripts/build-release-candidate.mjs';
+import { artifactCommands, canonicalOutputRoot, controlPath, freshScratchRoot, main, nativeRunCommand, ownedRegularFile, parseArguments, parseDigest, parseMachO, runBuild, runChecked, runCli, runMain } from '../../scripts/build-release-candidate.mjs';
 import * as releaseArtifact from '../../scripts/release-artifact.mjs';
 
 const commit = (character) => character.repeat(40);
@@ -246,3 +246,87 @@ for (const [name, mutate, pattern] of [
     await assert.rejects(() => readFile(value.input.outputRoot), /ENOENT|is a directory/i);
   });
 }
+
+test('input, parsing, and native command decisions fail closed', async (t) => {
+  for (const input of [null, {}, { version: '01.3' }, { version: '1.3.1' }, { version: '1.3.1', sourceCommit: commit('a') }, { version: '1.3.1', sourceCommit: 'bad', workflowCommit: commit('b') }, { version: '1.3.1', sourceCommit: commit('a'), workflowCommit: commit('b'), runId: 0, runAttempt: 1 }, { version: '1.3.1', sourceCommit: commit('a'), workflowCommit: commit('b'), runId: 1, runAttempt: 1, artifactName: 'bad' }]) {
+    await assert.rejects(() => runBuild(input), /build release candidate/);
+  }
+  await assert.rejects(() => canonicalOutputRoot('relative'), /absolute/);
+  const root = await mkdtemp(path.join(os.tmpdir(), 'task6-output-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await assert.rejects(() => canonicalOutputRoot(path.join(root, 'missing', 'output')), /ENOENT/);
+  await assert.rejects(() => canonicalOutputRoot('/absolute', async () => { const error=new Error('denied'); error.code='EACCES'; throw error; }), /denied/);
+  assert.throws(() => parseMachO('bad'), /Mach-O/);
+  assert.throws(() => parseMachO('cmd LC_UUID\n uuid bad\ncmd LC_BUILD_VERSION\n minos 15.0'), /Mach-O/);
+  assert.throws(() => parseDigest('bad', '/x/file'), /SHA-256/);
+  assert.throws(() => parseDigest(`${'a'.repeat(64)}  other\n`, '/x/file'), /SHA-256/);
+  assert.throws(() => parseArguments([]), /usage/);
+  assert.throws(() => parseArguments(['bad', 'x']), /usage/);
+  assert.throws(() => parseArguments(['--version', 'x', '--version', 'y']), /usage/);
+  assert.deepEqual(await nativeRunCommand('x', [], {}, async () => ({ stdout: 'ok', stderr: 'warn' })), { stdout: 'ok', stderr: 'warn', exitCode: 0 });
+  assert.deepEqual(await nativeRunCommand('x', [], {}, async () => { throw {}; }), { stdout: '', stderr: '', exitCode: 1 });
+  assert.deepEqual(await nativeRunCommand('x', [], {}, async () => { const error = new Error(); error.code = 7; error.stdout = 'out'; error.stderr = 'bad'; throw error; }), { stdout: 'out', stderr: 'bad', exitCode: 7 });
+  assert.equal(await runChecked(async()=>({exitCode:0}),'x',[],{},'x'),'');
+  await assert.rejects(() => freshScratchRoot('/tmp', { limit: 1, mkdirImpl: async () => { const error = new Error(); error.code = 'EEXIST'; throw error; } }), /fresh/);
+  await assert.rejects(() => freshScratchRoot('/tmp', { limit: 1, mkdirImpl: async () => { throw new Error('denied'); } }), /denied/);
+  assert.throws(() => controlPath('/control', '../escape'), /escapes/);
+  const commands = artifactCommands(async (_command, argv) => argv[0] === '-tvzf' ? { stdout: 'bad', exitCode: 0 } : { stdout: 'text', exitCode: 0 }, '/control');
+  await assert.rejects(() => commands.tar.list('/archive'), /listing/);
+  assert.deepEqual(await commands.file.inspect('/binary'), { type: 'other' });
+});
+
+test('owned file reads reject links, escapes, and post-resolution replacement', async (t) => {
+  const root=await mkdtemp(path.join(os.tmpdir(),'task6-owned-')); t.after(()=>rm(root,{recursive:true,force:true}));
+  const file=path.join(root,'file'); await writeFile(file,'x');
+  const canonical = await realpath(root);
+  assert.equal((await ownedRegularFile(file,canonical)).toString(),'x');
+  const directory=path.join(root,'directory'); await mkdir(directory);
+  await assert.rejects(()=>ownedRegularFile(directory,canonical),/regular/);
+  const outside=path.join(path.dirname(root),`${path.basename(root)}-outside`); await writeFile(outside,'x'); t.after(()=>rm(outside,{force:true}));
+  await assert.rejects(()=>ownedRegularFile(outside,canonical),/escapes/);
+  let checks=0;
+  const canonicalFile=path.join(canonical,'file');
+  await assert.rejects(()=>ownedRegularFile(file,canonical,{lstatImpl:async()=>({isFile:()=>++checks===1,nlink:1}),realpathImpl:async()=>canonicalFile,readFileImpl:readFile}),/regular/);
+});
+
+test('default loader imports only the control-owned artifact module', async (t) => {
+  const value=await fixture(); t.after(()=>rm(value.root,{recursive:true,force:true}));
+  await assert.rejects(()=>runBuild(value.input,{runCommand:value.runCommand}),/interface/);
+  await assert.rejects(()=>runBuild(value.input),/build release candidate/);
+});
+
+for (const [name, mutate, pattern] of [
+  ['unsafe built executable', (value) => { const original=value.runCommand; value.runCommand=async(...args)=>{const result=await original(...args); if(args[0]==='swift'&&args[1][0]==='build'){const scratch=args[1][args[1].indexOf('--scratch-path')+1]; await chmod(path.join(scratch,'release','swift-mutation-testing'),0o777);} return result;}; }, /safe regular/],
+  ['malformed Mach-O', (value) => { const original=value.runCommand; value.runCommand=async(...args)=>args[0]==='otool'?{stdout:'bad',exitCode:0}:original(...args); }, /Mach-O metadata/],
+  ['malformed archive digest', (value) => { const original=value.runCommand; value.runCommand=async(...args)=>args[0]==='shasum'&&args[1].at(-1).endsWith('.tar.gz')?{stdout:'bad',exitCode:0}:original(...args); }, /SHA-256/],
+  ['incomplete artifact interface', () => {}, /interface/],
+]) test(`rejects ${name}`, async (t) => {
+  const value=await fixture(); t.after(()=>rm(value.root,{recursive:true,force:true})); mutate(value);
+  await assert.rejects(()=>runBuild(value.input,{runCommand:value.runCommand,loadArtifact:async()=>name==='incomplete artifact interface'?{}:{sha256:(b)=>createHash('sha256').update(b).digest('hex'),parseCandidateManifest:JSON.parse,verifyCandidateBundle:async()=>({})}}),pattern);
+});
+
+test('removes output when late output-set validation fails', async (t) => {
+  const value=await fixture(); t.after(()=>rm(value.root,{recursive:true,force:true}));
+  await assert.rejects(()=>runBuild(value.input,{runCommand:value.runCommand,loadArtifact:async()=>({sha256:(b)=>createHash('sha256').update(b).digest('hex'),parseCandidateManifest:JSON.parse,verifyCandidateBundle:async()=>{await writeFile(path.join(value.outputRoot,'extra'),'x');}})}),/outside/);
+  await assert.rejects(()=>access(value.outputRoot),/ENOENT/);
+});
+
+test('CLI and main preserve the closed argument contract', async () => {
+  const argv = ['--control-root','/c','--source-root','/s','--output-root','/o','--version','1.3.1','--source-commit',commit('a'),'--workflow-commit',commit('b'),'--run-id','1','--run-attempt','1','--artifact-name','swift-mutation-testing-v1.3.1-candidate-1-1'];
+  const output = [];
+  const receipt = { ok: true };
+  assert.equal(await runCli(argv, { runBuild: async () => receipt, stdout: (value) => output.push(value) }), receipt);
+  const originalWrite = process.stdout.write;
+  process.stdout.write = () => true;
+  try { assert.equal(await runCli(argv, { runBuild: async () => receipt }), receipt); } finally { process.stdout.write = originalWrite; }
+  assert.equal(await runMain(argv, { runBuild: async () => receipt, stdout() {} }), 0);
+  const errors = [];
+  assert.equal(await runMain([], { stderr: (value) => errors.push(value) }), 1);
+  const originalError = process.stderr.write;
+  process.stderr.write = () => true;
+  try { assert.equal(await runMain([]), 1); } finally { process.stderr.write = originalError; }
+  assert.equal(await main({ moduleURL: 'file:///a', argv: ['node','/b'] }), false);
+  const old = process.exitCode;
+  try { assert.equal(await main({ moduleURL: 'file:///a', argv: ['node','/a','x'], runMainImpl: async (args) => { assert.deepEqual(args, ['x']); return 3; } }), true); assert.equal(process.exitCode, 3); }
+  finally { process.exitCode = old; }
+});

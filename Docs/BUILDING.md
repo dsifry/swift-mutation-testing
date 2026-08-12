@@ -90,3 +90,37 @@ To run all hooks on the current checkout:
 ```bash
 pre-commit run --all-files
 ```
+
+## Immutable release operations
+
+Release candidates are built once by `release-candidate.yml`, retained for 30
+days, proven by The Guide, and promoted unchanged by `release.yml`. Before a
+candidate dispatch, verify the protected environment and tag ruleset read-only:
+
+```bash
+node scripts/configure-release-controls.mjs \
+  --repository dsifry/swift-mutation-testing --check
+```
+
+An authenticated repository administrator performs initial setup explicitly:
+
+```bash
+node scripts/configure-release-controls.mjs \
+  --repository dsifry/swift-mutation-testing \
+  --apply --maintainer GITHUB_LOGIN
+```
+
+The exact reread requires `release-production` to have one authenticated user
+reviewer with self-review prevented, and the active `immutable-release-tags`
+ruleset to protect `refs/tags/v*` from updates and deletion with no bypass.
+
+Dispatch `release-candidate.yml` with a canonical version and reviewed source
+commit. Record the run ID, run attempt, artifact ID/name, manifest/archive/
+executable digests, and workflow/source commits in the Guide candidate
+descriptor. The Guide proof returns its commit, descriptor digest, and
+content-free release-proof digest for promotion.
+
+Retry promotion only against the same nonpublic draft whose three assets match
+byte-for-byte. An expired candidate must be rebuilt and fully reproven. A
+mismatched draft, public release, public asset, or tag collision is terminal for
+automation: stop and investigate; never clobber, replace, or reconstruct bytes.

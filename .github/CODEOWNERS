@@ -1,3 +1,13 @@
 # CODEOWNERS
 
 * @ericodx
+/.github/workflows/release-candidate.yml @ericodx
+/.github/workflows/release.yml @ericodx
+/scripts/build-release-candidate.mjs @ericodx
+/scripts/check-exact-test-replay.mjs @ericodx
+/scripts/check-release-artifact-coverage.sh @ericodx
+/scripts/configure-release-controls.mjs @ericodx
+/scripts/promote-release-candidate.mjs @ericodx
+/scripts/release-artifact.mjs @ericodx
+/scripts/release-artifact-coverage-manifest.json @ericodx
+/Docs/ReleaseEvidence/ @ericodx

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -11,6 +11,17 @@ import {
   sha256,
   verifyAttestationBundle,
   verifyCandidateBundle,
+  assertResolvedChild,
+  mkdirFreshPrivate,
+  stageOwnedArchive,
+  readOwnedRegularFile,
+  parseTarListing,
+  parseAttestationBundle,
+  nativeGit,
+  runMain,
+  main,
+  createNativeCandidateVerificationInput,
+  verifyRepositoryControls,
 } from '../../scripts/release-artifact.mjs';
 
 const fixtures = path.join(import.meta.dirname, 'fixtures');
@@ -22,6 +33,107 @@ const manifestSHA256 = sha256(validCandidateBytes);
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
+
+test('native filesystem and parsing decisions fail closed', async (t) => {
+  assert.throws(()=>assertResolvedChild('/root','/root','same'),/escapes/);
+  assert.throws(()=>assertResolvedChild('/root','/other','outside'),/escapes/);
+  assert.throws(()=>parseTarListing('bad'),/parse/);
+  assert.deepEqual(parseTarListing('drwxr-xr-x  1 a  b  0 Aug 11 2026 dir\nlrwxrwxrwx  1 a  b  1 Aug 11 2026 link\n-rwxr-xr-x  1 a  b  1 Aug 11 2026 file\n'),[
+    {path:'dir',type:'directory',linkCount:1,mode:'0755',size:0},{path:'link',type:'symlink',linkCount:1,mode:'0777',size:1},{path:'file',type:'file',linkCount:1,mode:'0755',size:1},
+  ]);
+  assert.throws(()=>parseAttestationBundle(Buffer.from('{}')),/attestation/);
+  const root=await mkdtemp(path.join(os.tmpdir(),'task6-release-')); t.after(()=>rm(root,{recursive:true,force:true}));
+  const file=path.join(root,'file'); await writeFile(file,'bytes');
+  assert.equal((await readOwnedRegularFile(file,root)).toString(),'bytes');
+  await assert.rejects(()=>readOwnedRegularFile(root,root),/regular/);
+  await assert.rejects(()=>mkdirFreshPrivate(root,0o700),/exists/);
+  const privateDir=path.join(root,'private'); await mkdirFreshPrivate(privateDir,0o700);
+  const staged=await stageOwnedArchive(file,root,privateDir); assert.equal(staged.bytes.toString(),'bytes');
+});
+
+test('native git adapter and CLI main preserve behavior', async () => {
+  const git=nativeGit();
+  assert.equal(await git.controlHead(process.cwd()),(await import('node:child_process')).execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim());
+  assert.equal(await git.sourceHead(process.cwd()),await git.controlHead(process.cwd()));
+  assert.equal(await git.isAncestor('HEAD','HEAD',process.cwd()),true);
+  assert.equal(await git.isAncestor('bad','HEAD',process.cwd()),false);
+  const deps={readOwnedRegularFile:async()=>validCandidateBytes,stdout() {}};
+  assert.equal(await runMain(['candidate-manifest','x'],deps),0);
+  const errors=[];assert.equal(await runMain([], {stderr:(v)=>errors.push(v)}),1);
+  const originalError=process.stderr.write;process.stderr.write=()=>true;try{assert.equal(await runMain([]),1);}finally{process.stderr.write=originalError;}
+  assert.equal(await main({moduleURL:'file:///a',argv:['node','/b']}),false);
+  const old=process.exitCode;try{assert.equal(await main({moduleURL:'file:///a',argv:['node','/a'],runMainImpl:async()=>5}),true);assert.equal(process.exitCode,5);}finally{process.exitCode=old;}
+});
+
+test('manifest parser rejects malformed JSON grammar and primitive inputs', () => {
+  for(const value of [null,Buffer.from('{"a":"unterminated}'),Buffer.from('{"a":"\\'),Buffer.from('{"a" 1}'),Buffer.from('{"a":1 "b":2}'),Buffer.from('[1 2]'),Buffer.from('{"a":@}'),Buffer.from('{} trailing')]) {
+    assert.throws(()=>parseCandidateManifest(value),/candidate manifest|Buffer/);
+  }
+  assert.throws(()=>sha256('bad'),/Buffer/);
+  assert.throws(()=>parseCandidateManifest(Buffer.from('null')),/object/);
+  assert.throws(()=>parseCandidateManifest(Buffer.from('[]')),/object/);
+  assert.throws(()=>parseCandidateManifest(manifestBytes(v=>{v.workflow.commit=1;})),/string/);
+  assert.throws(()=>parseCandidateManifest(manifestBytes(v=>{v.sourceCommit='A'.repeat(40);})),/commit/);
+  assert.throws(()=>parseCandidateManifest(manifestBytes(v=>{v.executable.uuid='bad';})),/UUID/);
+  assert.throws(()=>parseCandidateManifest(Buffer.from('{1:2}')),/object key/);
+  assert.throws(()=>parseCandidateManifest(Buffer.from('{"a":"\u0001"}')),/control/);
+  const unicode=validCandidateBytes.toString().replace('"release":','"\\u0072elease":');
+  assert.deepEqual(parseCandidateManifest(Buffer.from(unicode)),validCandidate);
+  assert.throws(()=>parseCandidateManifest(Buffer.from(`${'['.repeat(20000)}0${']'.repeat(20000)}`)),/invalid JSON/);
+});
+
+test('candidate bundle input contract rejects every missing or unsafe boundary', async () => {
+  const base={controlRoot:'/control',sourceRoot:'/source',archivePath:'/control/a',manifestPath:'/control/m',privateDirectory:'/private',fs:{readOwnedRegularFile:async()=>validCandidateBytes,mkdirFreshPrivate:async()=>{},stageOwnedArchive:async()=>({path:'/private/a',bytes:Buffer.from('a')})},commands:validCommands(),git:{controlHead:async()=>'',sourceHead:async()=>'',isAncestor:async()=>false}};
+  for(const mutate of [
+    ()=>null,
+    (v)=>({...v,archivePath:'relative'}),
+    (v)=>({...v,archivePath:'/outside'}),
+    (v)=>({...v,sourceRoot:v.controlRoot}),
+    (v)=>({...v,privateDirectory:'relative'}),
+    (v)=>({...v,fs:{}}),
+    (v)=>({...v,commands:null}),
+    (v)=>({...v,commands:{...v.commands,tar:{}}}),
+    (v)=>({...v,git:{}}),
+  ]) await assert.rejects(()=>verifyCandidateBundle(mutate?mutate(base):base),/candidate bundle/);
+});
+
+test('candidate staging and file inspection reject malformed adapter results', async () => {
+  await withBundle({},async(input)=>{input.fs.stageOwnedArchive=async()=>null;await assert.rejects(()=>verifyCandidateBundle(input),/staged archive/);});
+  await withBundle({},async(input)=>{input.commands.file.inspect=async()=>null;await assert.rejects(()=>verifyCandidateBundle(input),/Mach-O/);});
+  await withBundle({},async(input)=>{input.commands.tar.list=async()=>[null];await assert.rejects(()=>verifyCandidateBundle(input),/entry/);});
+});
+
+test('repository controls reject a malformed ruleset collection', () => {
+  assert.throws(()=>verifyRepositoryControls({rulesets:{},environment:null}),/ruleset/);
+});
+
+test('native candidate input reports failed ancestry', async () => {
+  const input=createNativeCandidateVerificationInput({controlRoot:'/control',sourceRoot:'/source',artifactRoot:'/artifact',archivePath:'/artifact/a',manifestPath:'/artifact/m',privateDirectory:'/private',runCommand:async()=>{throw new Error('no');}});
+  assert.equal(await input.git.isAncestor('a','b','/source'),false);
+  const success=createNativeCandidateVerificationInput({controlRoot:'/control',sourceRoot:'/source',artifactRoot:'/artifact',archivePath:'/artifact/a',manifestPath:'/artifact/m',privateDirectory:'/private',runCommand:async(command,argv)=>command==='git'&&argv[0]==='rev-parse'?'abc\n':''});
+  assert.equal(await success.git.controlHead('/control'),'abc');
+  assert.equal(await success.git.sourceHead('/source'),'abc');
+  assert.equal(await success.git.isAncestor('a','b','/source'),true);
+});
+
+test('native post-resolution and staging checks reject substitution', async (t) => {
+  const root=await mkdtemp(path.join(os.tmpdir(),'task6-native-'));t.after(()=>rm(root,{recursive:true,force:true}));const file=path.join(root,'file');await writeFile(file,'x');let count=0;
+  await assert.rejects(()=>readOwnedRegularFile(file,root,{realpathImpl:async(v)=>v,lstatImpl:async()=>({isFile:()=>++count===1,nlink:1}),readFileImpl:readFile}),/regular/);
+  const privateDir=path.join(root,'private');await mkdirFreshPrivate(privateDir,0o700);
+  await assert.rejects(()=>stageOwnedArchive(file,root,privateDir,{lstatImpl:async()=>({isFile:()=>false,nlink:1})}),/staged/);
+});
+
+test('native command parser reports other file and CPU types', async () => {
+  const commands=createNativeCommands({runCommand:async(command)=>command==='file'?'text':'cmd LC_UUID\ncmdsize 24\nuuid 12345678-1234-1234-1234-123456789ABC\ncmd LC_BUILD_VERSION\nminos 15.0'});
+  assert.deepEqual(await commands.file.inspect('/x'),{type:'other'});
+  assert.equal((await commands.otool.inspect('/x')).cpuType,'other');
+  assert.equal(parseTarListing('prwx------  1 a  b  0 Aug 11 2026 pipe')[0].type,'other');
+});
+
+test('CLI default stdout emits a candidate manifest', async () => {
+  const original=process.stdout.write;process.stdout.write=()=>true;
+  try{await runCli(['candidate-manifest','x'],{readOwnedRegularFile:async()=>validCandidateBytes});}finally{process.stdout.write=original;}
+});
 
 function manifestBytes(mutator) {
   const value = clone(validCandidate);

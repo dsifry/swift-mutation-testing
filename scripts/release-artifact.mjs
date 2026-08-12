@@ -605,25 +605,25 @@ export function classifyReleaseState(release, expectedAssets) {
   return 'exact-draft';
 }
 
-function assertResolvedChild(root, target, label) {
+export function assertResolvedChild(root, target, label) {
   const relative = path.relative(root, target);
   if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
     throw new Error(`candidate bundle: ${label} escapes its required root`);
   }
 }
 
-async function readOwnedRegularFile(filePath, root) {
-  const rootResolved = await realpath(root);
-  const original = await lstat(filePath);
+export async function readOwnedRegularFile(filePath, root, { realpathImpl = realpath, lstatImpl = lstat, readFileImpl = readFile } = {}) {
+  const rootResolved = await realpathImpl(root);
+  const original = await lstatImpl(filePath);
   if (!original.isFile() || original.nlink !== 1) throw new Error(`candidate bundle: ${filePath} is not an owned regular file`);
-  const resolved = await realpath(filePath);
+  const resolved = await realpathImpl(filePath);
   assertResolvedChild(rootResolved, resolved, filePath);
-  const stat = await lstat(resolved);
+  const stat = await lstatImpl(resolved);
   if (!stat.isFile() || stat.nlink !== 1) throw new Error(`candidate bundle: ${filePath} is not an owned regular file`);
-  return readFile(resolved);
+  return readFileImpl(resolved);
 }
 
-async function mkdirFreshPrivate(directory, mode) {
+export async function mkdirFreshPrivate(directory, mode) {
   try {
     await lstat(directory);
     throw new Error(`candidate bundle: private directory already exists: ${directory}`);
@@ -635,11 +635,11 @@ async function mkdirFreshPrivate(directory, mode) {
   return directory;
 }
 
-async function stageOwnedArchive(filePath, root, privateDirectory) {
+export async function stageOwnedArchive(filePath, root, privateDirectory, { lstatImpl = lstat } = {}) {
   const bytes = await readOwnedRegularFile(filePath, root);
   const stagedPath = path.join(privateDirectory, '.candidate-archive');
   await writeFile(stagedPath, bytes, { encoding: undefined, mode: 0o600, flag: 'wx' });
-  const stat = await lstat(stagedPath);
+  const stat = await lstatImpl(stagedPath);
   if (!stat.isFile() || stat.nlink !== 1) throw new Error('candidate bundle: staged archive is not an owned regular file');
   return { path: stagedPath, bytes };
 }
@@ -649,7 +649,7 @@ async function run(command, arguments_, options = {}) {
   return stdout;
 }
 
-function parseTarListing(stdout) {
+export function parseTarListing(stdout) {
   return stdout.trim().split('\n').filter(Boolean).map((line) => {
     const match = /^(?<type>.)(?<mode>[rwx-]{9})\s+(?<links>\d+)\s+\S+\s+\S+\s+(?<size>\d+)\s+\w{3}\s+\d{1,2}\s+(?:\d{2}:\d{2}|\d{4})\s+(?<name>.+)$/.exec(line);
     if (!match?.groups) throw new Error('candidate bundle: unable to parse tar listing');
@@ -683,7 +683,7 @@ export function createNativeCommands({ runCommand = run } = {}) {
   };
 }
 
-function nativeGit() {
+export function nativeGit() {
   return {
     controlHead: async (root) => (await run('git', ['rev-parse', 'HEAD'], { cwd: root })).trim(),
     sourceHead: async (root) => (await run('git', ['rev-parse', 'HEAD'], { cwd: root })).trim(),
@@ -731,7 +731,7 @@ export function createNativeCandidateVerificationInput({
   };
 }
 
-function parseAttestationBundle(bytes) {
+export function parseAttestationBundle(bytes) {
   const bundle = parseJSONRejectingDuplicateKeys(bytes);
   if (!isObject(bundle) || Object.keys(bundle).length !== 1 || !isObject(bundle.statement)) {
     fail('attestation', 'bundle must contain exactly one statement');
@@ -778,9 +778,15 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
   throw new Error('usage: release-artifact.mjs candidate-manifest <manifest> | attestation <bundle> <expected> | candidate-bundle <input-json>');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  runCli().catch((error) => {
-    process.stderr.write(`${error.message}\n`);
-    process.exitCode = 1;
-  });
+export async function runMain(argv = process.argv.slice(2), dependencies = {}) {
+  try { await runCli(argv, dependencies); return 0; }
+  catch (error) { (dependencies.stderr ?? ((value) => process.stderr.write(value)))(`${error.message}\n`); return 1; }
 }
+
+export async function main({ moduleURL = import.meta.url, argv = process.argv, runMainImpl = runMain } = {}) {
+  if (moduleURL !== `file://${argv[1]}`) return false;
+  process.exitCode = await runMainImpl(argv.slice(2));
+  return true;
+}
+
+await main();

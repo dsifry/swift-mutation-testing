@@ -35,34 +35,33 @@ function assertDistinctAndDisjoint(...roots) {
   }
 }
 
-async function canonicalOutputRoot(outputRoot) {
+export async function canonicalOutputRoot(outputRoot, realpathImpl = realpath) {
   if (typeof outputRoot !== 'string' || !path.isAbsolute(outputRoot)) fail('output root must be absolute');
   try {
-    return await realpath(outputRoot);
+    return await realpathImpl(outputRoot);
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
-    const parent = await realpath(path.dirname(outputRoot));
+    const parent = await realpathImpl(path.dirname(outputRoot));
     return path.join(parent, path.basename(outputRoot));
   }
 }
 
-async function nativeRunCommand(executable, argv, options = {}) {
+export async function nativeRunCommand(executable, argv, options = {}, runCommand = execFile) {
   try {
-    const { stdout = '', stderr = '' } = await execFile(executable, argv, { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024, ...options });
+    const { stdout = '', stderr = '' } = await runCommand(executable, argv, { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024, ...options });
     return { stdout, stderr, exitCode: 0 };
   } catch (error) {
     return { stdout: error.stdout ?? '', stderr: error.stderr ?? '', exitCode: Number.isInteger(error.code) ? error.code : 1 };
   }
 }
 
-async function runChecked(runCommand, executable, argv, options, label) {
+export async function runChecked(runCommand, executable, argv, options, label) {
   const result = await runCommand(executable, argv, options);
   if (!result || result.exitCode !== 0) fail(`${label} failed`);
   return result.stdout ?? '';
 }
 
 async function assertHead(runCommand, root, expected, label) {
-  if (!COMMIT.test(expected)) fail(`${label} commit must be a lowercase full commit SHA`);
   const head = (await runChecked(runCommand, 'git', ['rev-parse', 'HEAD'], { cwd: root }, `${label} HEAD`)).trim();
   if (head !== expected) fail(`${label} checkout HEAD does not match its required commit`);
 }
@@ -75,7 +74,7 @@ function assertInput(input) {
   if (input.artifactName !== `swift-mutation-testing-v${input.version}-candidate-${input.runId}-${input.runAttempt}`) fail('artifact name does not match version, run id, and attempt');
 }
 
-function controlPath(controlRoot, relativePath) {
+export function controlPath(controlRoot, relativePath) {
   const resolved = path.resolve(controlRoot, relativePath);
   if (!isDescendant(controlRoot, resolved)) fail(`control owner path escapes control root: ${relativePath}`);
   return resolved;
@@ -99,14 +98,14 @@ function parseToolchain(swift, xcode, runnerArchitecture) {
   return { swiftVersion, xcodeVersion: '26.6', xcodeBuild: '17F113', runnerArchitecture };
 }
 
-function parseMachO(stdout) {
+export function parseMachO(stdout) {
   const uuid = /cmd LC_UUID\s+uuid ([0-9A-Fa-f-]+)/s.exec(stdout)?.[1]?.toLowerCase();
   const deploymentTarget = /cmd LC_BUILD_VERSION[\s\S]*?minos (\d+(?:\.\d+)?)/.exec(stdout)?.[1];
   if (!uuid || !UUID.test(uuid) || deploymentTarget !== '15.0') fail('Mach-O metadata does not match the release policy');
   return { uuid, deploymentTarget };
 }
 
-function parseDigest(stdout, filePath) {
+export function parseDigest(stdout, filePath) {
   const digest = /^([a-f0-9]{64})\s+\*?.+$/m.exec(stdout)?.[1];
   if (!digest || !SHA256.test(digest) || !stdout.includes(path.basename(filePath))) fail(`SHA-256 output is invalid for ${path.basename(filePath)}`);
   return digest;
@@ -121,12 +120,12 @@ async function loadArtifactDefault(controlRoot) {
   return import(pathToFileURL(controlPath(controlRoot, 'scripts/release-artifact.mjs')).href);
 }
 
-async function freshScratchRoot(sourceRoot) {
-  for (let index = 0; index < 1024; index += 1) {
+export async function freshScratchRoot(sourceRoot, { mkdirImpl = mkdir, chmodImpl = chmod, limit = 1024 } = {}) {
+  for (let index = 0; index < limit; index += 1) {
     const candidate = path.join(sourceRoot, `.release-candidate-scratch-${process.pid}-${index}`);
     try {
-      await mkdir(candidate, { mode: 0o700 });
-      await chmod(candidate, 0o700);
+      await mkdirImpl(candidate, { mode: 0o700 });
+      await chmodImpl(candidate, 0o700);
       return candidate;
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
@@ -135,14 +134,14 @@ async function freshScratchRoot(sourceRoot) {
   fail('cannot create a fresh source scratch root');
 }
 
-async function ownedRegularFile(filePath, root) {
-  const original = await lstat(filePath);
+export async function ownedRegularFile(filePath, root, { lstatImpl = lstat, realpathImpl = realpath, readFileImpl = readFile } = {}) {
+  const original = await lstatImpl(filePath);
   if (!original.isFile() || original.nlink !== 1) fail('release artifact read must be an owned regular file');
-  const resolved = await realpath(filePath);
+  const resolved = await realpathImpl(filePath);
   if (!isDescendant(root, resolved)) fail('release artifact read escapes its root');
-  const current = await lstat(resolved);
+  const current = await lstatImpl(resolved);
   if (!current.isFile() || current.nlink !== 1) fail('release artifact read must be an owned regular file');
-  return readFile(resolved);
+  return readFileImpl(resolved);
 }
 
 async function freshPrivateDirectory(directory, mode) {
@@ -158,7 +157,7 @@ async function stageOwnedArchive(filePath, root, privateDirectory) {
   return { path: staged, bytes };
 }
 
-function artifactCommands(runCommand, controlRoot) {
+export function artifactCommands(runCommand, controlRoot) {
   return {
     tar: {
       list: async (archivePath) => {
@@ -195,7 +194,6 @@ export async function runBuild(input, dependencies = {}) {
     if (error?.code !== 'ENOENT') throw error;
   }
   const sourceVersion = path.join(sourceRoot, 'Sources', 'SwiftMutationTesting', 'Version.swift');
-  if (!isDescendant(sourceRoot, sourceVersion)) fail('source version path escapes source root');
   const archiveName = `swift-mutation-testing-v${input.version}-macos.tar.gz`;
 
   let createdOutput = false;
@@ -256,16 +254,18 @@ export async function runBuild(input, dependencies = {}) {
     await rm(path.join(outputRoot, '.verification'), { recursive: true, force: true });
     const output = await import('node:fs/promises').then(({ readdir }) => readdir(outputRoot));
     if (output.length !== 4) fail('candidate output contains files outside the closed artifact set');
-    return Object.freeze({ archive: { filename: archiveName, sha256: archiveSHA256 }, manifest: { filename: 'release-candidate-v1.json', sha256: manifestSHA256 }, executable: { filename: executableName, sha256: executableSHA256 }, attestationInputs: { archive: { filename: path.basename(archiveAttestationPath), sha256: sha256(await readFile(archiveAttestationPath)) }, manifest: { filename: path.basename(manifestAttestationPath), sha256: sha256(await readFile(manifestAttestationPath)) } } });
+    const receipt = Object.freeze({ archive: { filename: archiveName, sha256: archiveSHA256 }, manifest: { filename: 'release-candidate-v1.json', sha256: manifestSHA256 }, executable: { filename: executableName, sha256: executableSHA256 }, attestationInputs: { archive: { filename: path.basename(archiveAttestationPath), sha256: sha256(await readFile(archiveAttestationPath)) }, manifest: { filename: path.basename(manifestAttestationPath), sha256: sha256(await readFile(manifestAttestationPath)) } } });
+    await rm(scratchRoot, { recursive: true, force: true });
+    scratchRoot = undefined;
+    return receipt;
   } catch (error) {
     if (createdOutput) await rm(outputRoot, { recursive: true, force: true });
-    throw error;
-  } finally {
     if (scratchRoot) await rm(scratchRoot, { recursive: true, force: true });
+    throw error;
   }
 }
 
-function parseArguments(argv) {
+export function parseArguments(argv) {
   const values = {};
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index];
@@ -284,9 +284,15 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
   return receipt;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runCli().catch((error) => {
-    process.stderr.write(`${error.message}\n`);
-    process.exitCode = 1;
-  });
+export async function runMain(argv = process.argv.slice(2), dependencies = {}) {
+  try { await runCli(argv, dependencies); return 0; }
+  catch (error) { (dependencies.stderr ?? ((value) => process.stderr.write(value)))(`${error.message}\n`); return 1; }
 }
+
+export async function main({ moduleURL = import.meta.url, argv = process.argv, runMainImpl = runMain } = {}) {
+  if (moduleURL !== pathToFileURL(argv[1]).href) return false;
+  process.exitCode = await runMainImpl(argv.slice(2));
+  return true;
+}
+
+await main();

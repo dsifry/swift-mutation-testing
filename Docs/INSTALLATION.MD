@@ -41,13 +41,18 @@ brew untap ericodx/homebrew-tools  # optional
 
 ## Download a pre-built binary
 
-Pre-built binaries are published with every release on the [GitHub Releases page](https://github.com/ericodx/swift-mutation-testing/releases).
+The release archive is a prebuilt arm64 executable for macOS 15 or later. Other
+architectures must use the source-build path below. Download both the stable
+archive and its checksum file from the canonical release, then authenticate the
+bytes before extraction:
 
 ```bash
-# Replace X.Y.Z with the desired version
-VERSION="0.1.0"
-curl -L "https://github.com/ericodx/swift-mutation-testing/releases/download/v${VERSION}/swift-mutation-testing-v${VERSION}-macos.tar.gz" \
-  | tar -xz
+VERSION="1.3.1"
+BASE="https://github.com/dsifry/swift-mutation-testing/releases/download/v${VERSION}"
+curl -fLO "$BASE/swift-mutation-testing-v${VERSION}-macos.tar.gz"
+curl -fLO "$BASE/swift-mutation-testing-v${VERSION}-SHA256SUMS"
+shasum -a 256 -c "swift-mutation-testing-v${VERSION}-SHA256SUMS"
+tar -xzf "swift-mutation-testing-v${VERSION}-macos.tar.gz"
 
 # Move to a directory in your PATH
 sudo mv swift-mutation-testing /usr/local/bin/

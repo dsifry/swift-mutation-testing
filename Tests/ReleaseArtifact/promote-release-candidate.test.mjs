@@ -477,8 +477,66 @@ test('CLI fails closed for absent auth or any missing, duplicate, or unknown inp
   await assert.rejects(() => promotionOwner.runCli([...valid, '--unknown', 'value'], dependencies), /usage|unknown/i);
 });
 
+test('promotion decision seams reject incomplete downloads, assets, adapters, and malformed JSON', () => {
+  assert.throws(() => promotionOwner.verifyDownloadedCandidate(promotionInput(), null), /incomplete/);
+  assert.throws(() => promotionOwner.verifyDownloadedCandidate(promotionInput(), { archiveBytes, manifestBytes: 'bad' }), /incomplete/);
+  const wrong = structuredClone(candidate); wrong.run.id += 1; const wrongBytes=Buffer.from(JSON.stringify(wrong)); const wrongInput={...promotionInput(),manifestSHA256:sha256(wrongBytes)};
+  assert.throws(() => promotionOwner.verifyDownloadedCandidate(wrongInput, { archiveBytes, manifestBytes: wrongBytes }), /manifest/);
+  assert.throws(() => promotionOwner.verifyDownloadedCandidate({...promotionInput(),sourceCommit:'d'.repeat(40)}, {archiveBytes,manifestBytes}),/manifest/);
+  assert.throws(() => promotionOwner.verifyAssetDownloads(null, expectedAssets()), /absent/);
+  assert.throws(() => promotionOwner.verifyAssetDownloads([], expectedAssets()), /absent/);
+  assert.throws(() => promotionOwner.verifyAssetDownloads({}, expectedAssets()), /exactly/);
+  const badAssets = Object.fromEntries(expectedAssets().map(({name}) => [name, Buffer.from('bad')]));
+  assert.throws(() => promotionOwner.verifyAssetDownloads(badAssets, expectedAssets()), /digest/);
+  assert.throws(() => promotionOwner.requireAdapter({}), /incomplete/);
+  assert.throws(() => promotionOwner.requireSameTag({a:1},{a:2}), /tag tuple/);
+  assert.doesNotThrow(() => promotionOwner.requireSameTag({a:1},{a:1}));
+  assert.throws(() => promotionOwner.parseJSONBytes(Buffer.from('{'), 'api'), /malformed/);
+  assert.throws(() => promotionOwner.parseAttestationFile(Buffer.from('\n')), /empty/);
+});
+
+test('native runner and native adapter validate authentication and roots', async () => {
+  assert.equal(await promotionOwner.nativeRun('x',[],{},async()=>({})), '');
+  assert.throws(()=>promotionOwner.createNativeGitHubAdapter({token:'',controlRoot:'/c',candidateControlRoot:'/cc',sourceRoot:'/s',workRoot:'/w'}),/auth/);
+  assert.throws(()=>promotionOwner.createNativeGitHubAdapter({token:'x',controlRoot:'c',candidateControlRoot:'/cc',sourceRoot:'/s',workRoot:'/w'}),/absolute/);
+});
+
+test('promotion rejects absent verification and changed/public bytes', async () => {
+  const value=state();
+  let github=githubFor(value,[]); github.downloadCandidate=async()=>({archiveBytes,manifestBytes});
+  await assert.rejects(()=>promoteReleaseCandidate(promotionInput(),github),/verification input/);
+  github=githubFor(value,[]);
+  await assert.rejects(()=>promoteReleaseCandidate(promotionInput(),github,{verifyCandidateBundle:async()=>({archiveSHA256:'0'.repeat(64),manifestSHA256,executableSHA256,manifest:candidate})}),/Task 1/);
+  github=githubFor(value,[]); github.downloadPublicArchive=async()=>Buffer.from('wrong');
+  await assert.rejects(()=>promoteReleaseCandidate(promotionInput(),github),/public archive/);
+  github=githubFor(value,[]); github.extractPublicExecutable=async()=>Buffer.from('wrong');
+  await assert.rejects(()=>promoteReleaseCandidate(promotionInput(),github),/public executable/);
+});
+
+test('CLI rejects malformed values and main covers both dispatch paths', async () => {
+  const valid=validCliArguments(), dependencies={env:{GH_TOKEN:'secret'},createNativeGitHubAdapter:()=>({}),promoteReleaseCandidate:async()=>({mutations:[]}),stdout() {}};
+  const mutate=(flag,value)=>{const copy=[...valid];copy[copy.indexOf(flag)+1]=value;return copy;};
+  await assert.rejects(()=>promotionOwner.runCli(mutate('--control-root','relative'),dependencies),/absolute/);
+  await assert.rejects(()=>promotionOwner.runCli(mutate('--run-id','0'),dependencies),/positive/);
+  await assert.rejects(()=>promotionOwner.runCli(mutate('--run-id',String(Number.MAX_SAFE_INTEGER+1)),dependencies),/safe/);
+  const malformed=[...valid]; malformed[0]='version'; await assert.rejects(()=>promotionOwner.runCli(malformed,dependencies),/usage/);
+  const duplicate=[...valid]; duplicate[2]='--version'; await assert.rejects(()=>promotionOwner.runCli(duplicate,dependencies),/duplicate/);
+  const unknown=[...valid]; unknown[0]='--wat'; await assert.rejects(()=>promotionOwner.runCli(unknown,dependencies),/unknown/);
+  const originalWrite=process.stdout.write; process.stdout.write=()=>true;
+  try { await promotionOwner.runCli(valid,{...dependencies,stdout:undefined}); } finally { process.stdout.write=originalWrite; }
+  assert.equal(await promotionOwner.runMain(valid,dependencies),0);
+  const errors=[]; assert.equal(await promotionOwner.runMain([], {stderr:(v)=>errors.push(v)}),1);
+  const originalError=process.stderr.write; process.stderr.write=()=>true; try { assert.equal(await promotionOwner.runMain([]),1); } finally {process.stderr.write=originalError;}
+  assert.equal(await promotionOwner.main({moduleURL:'file:///a',argv:['node','/b']}),false);
+  const old=process.exitCode; try {assert.equal(await promotionOwner.main({moduleURL:'file:///a',argv:['node','/a','x'],runMainImpl:async()=>4}),true);assert.equal(process.exitCode,4);} finally {process.exitCode=old;}
+});
+
 test('native adapter authenticates distinct promotion and candidate control checkouts', async () => {
   const heads = [];
+  let releaseResponse = null;
+  let rulesetsResponse;
+  let environmentResponse;
+  let draftAssets = [];
   const files = new Map([
     ['/control/Docs/ReleaseEvidence/v1.3.1-guide-proof.json', proofBytes()],
     [`/work/candidate/${candidate.archive.filename}`, archiveBytes],
@@ -505,20 +563,72 @@ test('native adapter authenticates distinct promotion and candidate control chec
       }
       if (executable === 'git' && argv[0] === 'merge-base') return '';
       if (executable === 'gh') {
-        const endpoint = argv[1];
-        if (endpoint.endsWith('/zip')) return Buffer.from('zip');
-        if (endpoint.includes('/releases/tags/')) throw Object.assign(new Error('404 Not Found'), { stderr: '404' });
+        const endpoint = argv.find((value) => value.startsWith('repos/') || value.startsWith('https://'));
+        if (endpoint.endsWith('/zip')) return 'zip';
+        if (endpoint.includes('/releases/tags/')) {
+          if (releaseResponse) return JSON.stringify(releaseResponse);
+          throw Object.assign(new Error('404 Not Found'), { stderr: '404' });
+        }
+        if (argv.includes('POST') && endpoint.includes('/releases')) return JSON.stringify({id:99,draft:true,assets:[]});
+        if (argv.includes('PATCH')) return JSON.stringify({id:99,draft:false});
+        if (endpoint.includes('/releases/99')) return JSON.stringify({id:99,draft:true,assets:draftAssets});
+        if (endpoint.startsWith('https://asset/')) return Buffer.from(endpoint.endsWith('/archive') ? archiveBytes : 'asset');
+        if(endpoint.endsWith('/rulesets')&&rulesetsResponse!==undefined) return JSON.stringify(rulesetsResponse);
+        if(endpoint.includes('/environments/')&&environmentResponse!==undefined) return JSON.stringify(environmentResponse);
         return JSON.stringify(api.get(endpoint));
       }
       if (executable === 'unzip') return '';
+      if (executable === 'tar') { files.set('/work/public-extraction/swift-mutation-testing', executableBytes); return ''; }
       throw new Error(`unexpected command ${executable} ${argv.join(' ')}`);
     },
     readFileImpl: async (filePath) => files.get(filePath),
-    writeFileImpl: async () => {}, mkdirImpl: async () => {}, chmodImpl: async () => {}, rmImpl: async () => {},
+    writeFileImpl: async (filePath, bytes) => { files.set(filePath, bytes); }, mkdirImpl: async () => {}, chmodImpl: async () => {}, rmImpl: async () => {},
   });
   const githubState = await adapter.readState();
   assert.equal(githubState.controlHead, controlCommit);
   const downloaded = await adapter.downloadCandidate();
   assert.equal(await downloaded.verificationInput.git.controlHead(downloaded.verificationInput.controlRoot), candidateWorkflowCommit);
   assert.deepEqual(heads, ['/control', '/candidate-control']);
+  const draft=await adapter.createDraft({tag:'v1.3.1',name:'release',targetCommitish:commit});
+  await adapter.uploadAsset(draft,{name:'asset',bytes:Buffer.from('asset')});
+  assert.deepEqual(await adapter.downloadDraftAssets(draft),{});
+  draftAssets=[{name:'asset',url:'https://asset/other'}];
+  assert.deepEqual(await adapter.downloadDraftAssets(draft),{asset:Buffer.from('asset')});
+  assert.equal((await adapter.publishDraft(draft)).draft,false);
+  await assert.rejects(()=>adapter.downloadPublicArchive(),/absent/);
+  releaseResponse={id:99,draft:false,assets:[{name:candidate.archive.filename,url:'https://asset/archive'}]};
+  assert.deepEqual(await adapter.downloadPublicArchive(),archiveBytes);
+  assert.equal((await adapter.readState()).release.assets[0].sha256,archiveSHA256);
+  releaseResponse={id:99,draft:false};
+  assert.deepEqual((await adapter.readState()).release.assets,[]);
+  rulesetsResponse={}; environmentResponse={name:'release-production'};
+  const weakState=await adapter.readState();
+  assert.deepEqual(weakState.repositoryControls.rulesets,[]);
+  rulesetsResponse=[{name:'weak'}];
+  const weakRuleState=await adapter.readState();
+  assert.deepEqual(weakRuleState.repositoryControls.rulesets[0].targets,[]);
+  assert.deepEqual(weakRuleState.repositoryControls.rulesets[0].bypassActors,[]);
+  draftAssets=undefined;
+  assert.deepEqual(await adapter.downloadDraftAssets(draft),{});
+  api.set(`repos/${candidate.repository}/actions/artifacts/444`,{id:444,name:candidate.artifactName,workflow_run:{id:candidate.run.id},expired:false});
+  assert.equal((await adapter.readState()).artifact.deleted,false);
+  assert.deepEqual(await adapter.extractPublicExecutable(archiveBytes),executableBytes);
+});
+
+test('native adapter rethrows non-404 release lookup failures', async () => {
+  const adapter=promotionOwner.createNativeGitHubAdapter({token:'x',input:promotionInput(),controlRoot:'/c',candidateControlRoot:'/cc',sourceRoot:'/s',workRoot:'/w',mkdirImpl:async()=>{},chmodImpl:async()=>{},writeFileImpl:async()=>{},readFileImpl:async(filePath)=>filePath.endsWith('.jsonl')?Buffer.from(`${JSON.stringify(attestation(filePath.includes('archive-')?candidate.archive.filename:'release-candidate-v1.json',filePath.includes('archive-')?archiveSHA256:manifestSHA256))}\n`):filePath.endsWith('.json')?manifestBytes:filePath.endsWith('.tar.gz')?archiveBytes:proofBytes(),runCommand:async(executable,argv)=>{
+    if(executable==='gh'&&argv.some((v)=>v.includes('/releases/tags/'))) throw {};
+    if(executable==='gh'&&argv.some((v)=>v.endsWith('/zip'))) return Buffer.from('zip');
+    if(executable==='unzip') return '';
+    if(executable==='git') return `${controlCommit}\n`;
+    const endpoint=argv.find((v)=>v.startsWith('repos/'));
+    if(endpoint?.includes('/actions/runs/')) return JSON.stringify({});
+    if(endpoint?.includes('/actions/artifacts/')) return JSON.stringify({deleted_at:null});
+    if(endpoint?.includes('/git/ref/')) return JSON.stringify({ref:'refs/tags/v1.3.1',object:{sha:'c'.repeat(40)}});
+    if(endpoint?.includes('/git/tags/')) return JSON.stringify(state().tagTuple.tag);
+    if(endpoint?.endsWith('/rulesets')) return '[]';
+    if(endpoint?.includes('/environments/')) return '{}';
+    return '{}';
+  }});
+  await assert.rejects(()=>adapter.readState(),()=>true);
 });
