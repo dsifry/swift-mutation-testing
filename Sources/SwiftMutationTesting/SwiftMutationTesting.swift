@@ -45,6 +45,13 @@ public struct SwiftMutationTesting {
             let descriptor = parsed.cache.guideLockFD,
             let inode = try? descriptorInode(descriptor)
         else { return }
+        guard let invocationNonce = parsed.cache.invocationNonce,
+            let bound = try? GateSimulatorRegistration.load(
+                from: URL(fileURLWithPath: registration)),
+            bound.state == .active,
+            bound.activeInvocationNonce == invocationNonce,
+            bound.guideLockInode == inode
+        else { return }
         try? await SimulatorManager(launcher: launcher ?? defaultLauncher).cleanupGateSimulator(
             registrationURL: URL(fileURLWithPath: registration),
             expectedGateRunNonce: nil,

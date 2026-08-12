@@ -69,16 +69,22 @@ struct SimulatorManagerTests {
         var metadata = stat()
         #expect(fstat(descriptor, &metadata) == 0)
         let launcher = GateSimulatorCommandLog()
-        _ = try await SimulatorManager(launcher: launcher).prepareGateSimulator(
+        let manager = SimulatorManager(launcher: launcher)
+        _ = try await manager.prepareGateSimulator(
             destination: "platform=iOS Simulator,name=iPhone 16",
             cacheRoot: root,
             registrationURL: registrationURL,
             gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV",
             guideLockInode: UInt64(metadata.st_ino)
         )
+        _ = try await manager.activateRegistration(
+            at: registrationURL, expectedCacheRoot: root,
+            expectedGuideLockInode: UInt64(metadata.st_ino),
+            invocationNonce: "INVOCATIONABCDEFGHIJKL")
         let parsed = ParsedArguments(cache: .init(
             mode: .legacyBenchmark,
             buildCacheRoot: root.path,
+            invocationNonce: "INVOCATIONABCDEFGHIJKL",
             simulatorRegistration: registrationURL.path,
             guideLockFD: Int(descriptor)
         ))
@@ -307,6 +313,7 @@ struct SimulatorManagerTests {
 
 private actor GateSimulatorCommandLog: ProcessLaunching {
     private(set) var commands: [String] = []
+    private var exists = false
 
     func launch(
         executableURL: URL,
@@ -315,19 +322,25 @@ private actor GateSimulatorCommandLog: ProcessLaunching {
         timeout: Double
     ) async throws -> Int32 {
         commands.append(([executableURL.path] + arguments).joined(separator: " "))
+        if arguments.contains("delete") { exists = false }
         return 0
     }
 
     func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
         commands.append(([request.executableURL.path] + request.arguments).joined(separator: " "))
-        if request.arguments.contains("create") { return (0, "GATE-UDID\n") }
+        if request.arguments.contains("create") {
+            exists = true
+            return (0, "GATE-UDID\n")
+        }
         if request.arguments.contains("devicetypes") {
             return (0, #"{"devicetypes":[{"name":"iPhone 16","identifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16"}]}"#)
         }
         if request.arguments.contains("runtimes") {
             return (0, #"{"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-0","isAvailable":true}]}"#)
         }
-        return (0, "")
+        return exists
+            ? (0, #"{"devices":{"runtime":[{"udid":"GATE-UDID"}]}}"#)
+            : (0, #"{"devices":{}}"#)
     }
 }
 

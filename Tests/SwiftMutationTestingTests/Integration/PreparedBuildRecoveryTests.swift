@@ -64,6 +64,15 @@ struct PreparedBuildRecoveryTests {
         #expect(PreparedBuildCoordinator.custodyIsQuiescent(runtime))
         #expect(runtimeCoordinator.activeRunRoot() == nil)
         #expect(runtimeCoordinator.commandLauncher(custodyRuntime: runtime) is XcodeProcessLauncher)
+        let wrappedCoordinator = PreparedBuildCoordinator(
+            configuration: makeRunnerConfiguration(),
+            options: .init(mode: .prepare, custodyFD: Int(descriptors[0])),
+            launcher: SimulatorDeviceSetLauncher(
+                base: XcodeProcessLauncher(), deviceSetPath: "/private/device-set")
+        )
+        let wrappedRuntime = try #require(try wrappedCoordinator.makeCustodyRuntime(store: runtimeStore))
+        defer { wrappedRuntime.monitor.cancel() }
+        #expect(wrappedCoordinator.commandLauncher(custodyRuntime: wrappedRuntime) is SimulatorDeviceSetLauncher)
         let evidenceCoordinator = PreparedBuildCoordinator(
             configuration: makeRunnerConfiguration(),
             options: .init(mode: .prepare, evidenceOutput: evidence.path),

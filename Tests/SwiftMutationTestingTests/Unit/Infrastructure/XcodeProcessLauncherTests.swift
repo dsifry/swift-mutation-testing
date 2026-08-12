@@ -33,6 +33,8 @@ struct XcodeProcessLauncherTests {
             environment: nil, additionalEnvironment: ["EXISTING": "yes"],
             workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1))
         #expect(await base.environments() == [[:], ["EXISTING": "yes", "SIMULATOR_DEVICE_SET_PATH": "/private/device-set"]])
+        #expect(!launcher.supportsXcodeCustody)
+        #expect(launcher.applyingXcodeCustody(nil, captureRoot: nil) is SimulatorDeviceSetLauncher)
     }
 
     @Test("Engine kill helper")

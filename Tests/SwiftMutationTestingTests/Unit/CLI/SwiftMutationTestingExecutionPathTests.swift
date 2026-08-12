@@ -125,6 +125,43 @@ struct SwiftMutationTestingExecutionPathTests {
         #expect(receipt.counters.testWithoutBuildingRuns == 0)
     }
 
+    @Test("A post-finish receipt failure preserves the idle shared simulator")
+    func receiptFailurePreservesIdleSimulator() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        chmod(root.path, 0o700)
+        try "scheme: App\ndestination: platform=iOS Simulator,name=iPhone 16\nquiet: true\n".write(
+            to: root.appendingPathComponent(".swift-mutation-testing.yml"), atomically: true, encoding: .utf8)
+        let lock = root.appendingPathComponent("lock")
+        FileManager.default.createFile(atPath: lock.path, contents: Data())
+        let descriptor = open(lock.path, O_RDONLY | O_CLOEXEC)
+        defer { _ = close(descriptor) }
+        var metadata = stat()
+        #expect(fstat(descriptor, &metadata) == 0)
+        let registration = root.appendingPathComponent("registration.json")
+        let launcher = ExecutionGateSimulatorLauncher()
+        _ = try await SimulatorManager(launcher: launcher).prepareGateSimulator(
+            destination: "platform=iOS Simulator,name=iPhone 16", cacheRoot: root,
+            registrationURL: registration, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+            guideLockInode: UInt64(metadata.st_ino))
+        let parsed = ParsedArguments(
+            projectPath: root.path,
+            build: .init(scheme: "App", destination: "platform=iOS Simulator,name=iPhone 16", testTarget: "AppTests/One", noCache: true),
+            reporting: .init(quiet: true),
+            cache: .init(
+                mode: .legacyBenchmark, buildCacheRoot: root.path,
+                invocationNonce: "INVOCATIONABCDEFGHIJKL", simulatorRegistration: registration.path,
+                buildCountEvidenceOutput: root.path, guideLockFD: Int(descriptor),
+                wrapperLeaseFD: 5, runOrdinal: 7, attemptOrdinal: 1))
+        await #expect(throws: (any Error).self) {
+            _ = try await SwiftMutationTesting.execute(parsed: parsed, launcher: launcher)
+        }
+        #expect(try GateSimulatorRegistration.load(from: registration).state == .idle)
+        await SwiftMutationTesting.cleanupBoundSimulatorAfterFailure(parsed: parsed, launcher: launcher)
+        #expect(try GateSimulatorRegistration.load(from: registration).state == .idle)
+        #expect(await launcher.deleteCount == 0)
+    }
+
     @Test("Nil launcher paths use the explicit deterministic Xcode launcher seam")
     func explicitDefaultLauncherSeam() async throws {
         let root = try FileHelpers.makeTemporaryDirectory()
@@ -144,9 +181,15 @@ struct SwiftMutationTestingExecutionPathTests {
                 simulatorRegistration: registration.path, guideLockFD: Int(descriptor)))
         #expect(try await SwiftMutationTesting.execute(
             parsed: parsed, launcher: nil, defaultXcodeLauncher: launcher) == .success)
+        _ = try await SimulatorManager(launcher: launcher).activateRegistration(
+            at: registration, expectedCacheRoot: root,
+            expectedGuideLockInode: SwiftMutationTesting.descriptorInode(Int(descriptor)),
+            invocationNonce: "INVOCATIONABCDEFGHIJKL")
         await SwiftMutationTesting.cleanupBoundSimulatorAfterFailure(
             parsed: ParsedArguments(cache: .init(
-                mode: .legacyBenchmark, simulatorRegistration: registration.path,
+                mode: .legacyBenchmark, buildCacheRoot: root.path,
+                invocationNonce: "INVOCATIONABCDEFGHIJKL",
+                simulatorRegistration: registration.path,
                 guideLockFD: Int(descriptor))),
             launcher: nil, defaultLauncher: launcher)
         #expect(try GateSimulatorRegistration.load(from: registration).state == .deleted)
@@ -477,8 +520,12 @@ struct SwiftMutationTestingExecutionPathTests {
 
 private actor ExecutionGateSimulatorLauncher: ProcessLaunching {
     private var exists = false
+    private(set) var deleteCount = 0
     func launch(executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double) async throws -> Int32 {
-        if arguments.contains("delete") { exists = false }
+        if arguments.contains("delete") {
+            exists = false
+            deleteCount += 1
+        }
         return 0
     }
     func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {

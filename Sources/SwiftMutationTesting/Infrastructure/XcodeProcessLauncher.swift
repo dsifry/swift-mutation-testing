@@ -1,5 +1,12 @@
 import Foundation
 
+protocol XcodeCustodyPreservingLauncher {
+    var supportsXcodeCustody: Bool { get }
+    func applyingXcodeCustody(
+        _ custody: ProcessCustody?, captureRoot: URL?
+    ) -> any ProcessLaunching
+}
+
 struct XcodeProcessLauncher: Sendable, ProcessLaunching {
     init(custody: ProcessCustody? = nil, captureRoot: URL? = nil) {
         self.custody = custody
@@ -44,6 +51,16 @@ struct XcodeProcessLauncher: Sendable, ProcessLaunching {
     }
 }
 
+extension XcodeProcessLauncher: XcodeCustodyPreservingLauncher {
+    var supportsXcodeCustody: Bool { true }
+
+    func applyingXcodeCustody(
+        _ custody: ProcessCustody?, captureRoot: URL?
+    ) -> any ProcessLaunching {
+        XcodeProcessLauncher(custody: custody, captureRoot: captureRoot)
+    }
+}
+
 struct SimulatorDeviceSetLauncher: Sendable, ProcessLaunching {
     let base: any ProcessLaunching
     let deviceSetPath: String
@@ -66,6 +83,23 @@ struct SimulatorDeviceSetLauncher: Sendable, ProcessLaunching {
             executableURL: request.executableURL, arguments: request.arguments,
             environment: request.environment, additionalEnvironment: environment,
             workingDirectoryURL: request.workingDirectoryURL, timeout: request.timeout))
+    }
+}
+
+extension SimulatorDeviceSetLauncher: XcodeCustodyPreservingLauncher {
+    var supportsXcodeCustody: Bool {
+        (base as? any XcodeCustodyPreservingLauncher)?.supportsXcodeCustody == true
+    }
+
+    func applyingXcodeCustody(
+        _ custody: ProcessCustody?, captureRoot: URL?
+    ) -> any ProcessLaunching {
+        guard let preserving = base as? any XcodeCustodyPreservingLauncher,
+            preserving.supportsXcodeCustody
+        else { return self }
+        return SimulatorDeviceSetLauncher(
+            base: preserving.applyingXcodeCustody(custody, captureRoot: captureRoot),
+            deviceSetPath: deviceSetPath)
     }
 }
 

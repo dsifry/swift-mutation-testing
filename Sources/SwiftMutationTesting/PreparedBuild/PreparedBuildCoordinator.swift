@@ -896,7 +896,9 @@ struct PreparedBuildCoordinator: Sendable {
     }
 
     func makeCustodyRuntime(store: PreparedBuildStore) throws -> CustodyRuntime? {
-        guard launcher is XcodeProcessLauncher, let descriptor = options.custodyFD else { return nil }
+        guard (launcher as? any XcodeCustodyPreservingLauncher)?.supportsXcodeCustody == true,
+            let descriptor = options.custodyFD
+        else { return nil }
         let custody = try ProcessCustody.system(
             registrationURL: store.directory.appendingPathComponent("process-custody.json")
         )
@@ -909,11 +911,11 @@ struct PreparedBuildCoordinator: Sendable {
     }
 
     func commandLauncher(custodyRuntime: CustodyRuntime?) -> any ProcessLaunching {
-        if launcher is XcodeProcessLauncher {
-            return XcodeProcessLauncher(
-                custody: custodyRuntime?.custody,
-                captureRoot: activeRunRoot()
-            )
+        if let preserving = launcher as? any XcodeCustodyPreservingLauncher,
+            preserving.supportsXcodeCustody
+        {
+            return preserving.applyingXcodeCustody(
+                custodyRuntime?.custody, captureRoot: activeRunRoot())
         }
         return custodyRuntime?.launcher ?? launcher
     }
