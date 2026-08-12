@@ -76,7 +76,7 @@ async function fixture() {
     }
     if (executable === 'codesign') return { stdout: '', stderr: '', exitCode: 0 };
     if (executable === 'file') return { stdout: 'Mach-O 64-bit executable arm64\n', stderr: '', exitCode: 0 };
-    if (executable === 'otool') return { stdout: 'cmd LC_UUID\n uuid 12345678-1234-1234-1234-123456789abc\ncmd LC_BUILD_VERSION\n minos 15.0\n', stderr: '', exitCode: 0 };
+    if (executable === 'otool') return { stdout: '      cmd LC_UUID\n  cmdsize 24\n     uuid 12345678-1234-1234-1234-123456789ABC\n      cmd LC_BUILD_VERSION\n  cmdsize 32\n    minos 15.0\n', stderr: '', exitCode: 0 };
     if (executable.endsWith('swift-mutation-testing')) return { stdout: 'swift-mutation-testing 1.3.1 [arm64-macos26]\n', stderr: '', exitCode: 0 };
     if (executable === 'tar' && argv[0] === '-czf') {
       await writeFile(argv[1], 'archive');
@@ -122,6 +122,14 @@ test('builds the candidate exactly once from source while every owner path is co
   assert.equal(value.calls.some(({ executable, argv }) => executable === 'swift' && argv.includes('--no-parallel')), false);
   assert.equal(value.calls.some(({ executable, argv }) => executable === 'swift' && argv.includes('--scratch-path') && argv.some((argument) => argument.includes('.release-candidate-scratch-'))), true);
   assert.equal((await readFile(path.join(value.sourceRoot, 'Sources', 'SwiftMutationTesting', 'Version.swift'), 'utf8')).includes('1.3.1'), true);
+});
+
+test('Mach-O parser requires the real LC_UUID cmdsize layout', () => {
+  assert.deepEqual(parseMachO('cmd LC_UUID\ncmdsize 24\nuuid 12345678-1234-1234-1234-123456789ABC\ncmd LC_BUILD_VERSION\ncmdsize 32\nminos 15.0\n'), {
+    uuid: '12345678-1234-1234-1234-123456789abc',
+    deploymentTarget: '15.0',
+  });
+  assert.throws(() => parseMachO('cmd LC_UUID\nuuid 12345678-1234-1234-1234-123456789ABC\ncmd LC_BUILD_VERSION\nminos 15.0\n'), /Mach-O metadata/u);
 });
 
 test('verifies the produced candidate through the real root-bound release artifact verifier', async (t) => {

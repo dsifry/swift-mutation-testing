@@ -99,7 +99,7 @@ function parseToolchain(swift, xcode, runnerArchitecture) {
 }
 
 export function parseMachO(stdout) {
-  const uuid = /cmd LC_UUID\s+uuid ([0-9A-Fa-f-]+)/s.exec(stdout)?.[1]?.toLowerCase();
+  const uuid = /cmd LC_UUID\s+cmdsize \d+\s+uuid ([0-9A-Fa-f-]+)/s.exec(stdout)?.[1]?.toLowerCase();
   const deploymentTarget = /cmd LC_BUILD_VERSION[\s\S]*?minos (\d+(?:\.\d+)?)/.exec(stdout)?.[1];
   if (!uuid || !UUID.test(uuid) || deploymentTarget !== '15.0') fail('Mach-O metadata does not match the release policy');
   return { uuid, deploymentTarget };

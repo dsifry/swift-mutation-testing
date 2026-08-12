@@ -26,12 +26,14 @@ jobs:
         id: authority
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_SOURCE_COMMIT: ${{ inputs.source_commit }}
         run: |
           set -euo pipefail
           WORKFLOW_COMMIT="${{ github.sha }}"
           DISPATCH_TRIGGER_COMMIT="${{ github.sha }}"
-          VERSION="${{ inputs.version }}"
-          SOURCE_COMMIT="${{ inputs.source_commit }}"
+          VERSION="$INPUT_VERSION"
+          SOURCE_COMMIT="$INPUT_SOURCE_COMMIT"
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           MAIN_ANCHOR_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"

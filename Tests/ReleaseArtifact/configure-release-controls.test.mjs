@@ -70,15 +70,17 @@ test('coverage manifest is closed and the executable gate exists', async () => {
   await access(path.join(root, 'scripts/check-release-artifact-coverage.sh'));
 });
 
-test('coverage gate rejects a manifest owner absent from V8 output', async (t) => {
+test('coverage gate rejects a manifest owner absent from V8 output', { skip: Boolean(process.env.RELEASE_ARTIFACT_COVERAGE_CHILD) }, async (t) => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), 'task6-coverage-manifest-'));
   t.after(async () => (await import('node:fs/promises')).rm(temporary, { recursive: true, force: true }));
-  const manifestPath = path.join(temporary, 'manifest.json');
-  const absentOwner = path.join(root, 'scripts/owner-not-imported.mjs');
+  const scripts = path.join(temporary, 'scripts');
+  await (await import('node:fs/promises')).mkdir(scripts);
+  const manifestPath = path.join(scripts, 'manifest.json');
+  const absentOwner = path.join(scripts, 'owner-not-imported.mjs');
   await writeFile(absentOwner, 'export const value = true;\n');
-  t.after(async () => (await import('node:fs/promises')).rm(absentOwner, { force: true }));
   await writeFile(manifestPath, JSON.stringify({ includes: ['scripts/owner-not-imported.mjs'], thresholds: { lines: 100, branches: 100, functions: 100 }, excludes: [] }));
-  await assert.rejects(() => execFile(path.join(root, 'scripts/check-release-artifact-coverage.sh'), [], { cwd: root, env: { ...process.env, RELEASE_ARTIFACT_COVERAGE_MANIFEST: manifestPath } }), /coverage owner|absent|missing/i);
+  await (await import('node:fs/promises')).copyFile(path.join(root, 'scripts/check-release-artifact-coverage.sh'), path.join(scripts, 'check-release-artifact-coverage.sh'));
+  await assert.rejects(() => execFile(path.join(scripts, 'check-release-artifact-coverage.sh'), [], { cwd: temporary, env: { ...process.env, RELEASE_ARTIFACT_COVERAGE_MANIFEST: manifestPath } }), /coverage owner|absent|missing|test/i);
 });
 
 test('default check accepts exact controls without mutation', async () => {
@@ -265,11 +267,36 @@ test('native GitHub adapter issues exact API reads and mutations', async () => {
   await api.updateRuleset(17, exactRuleset());
   assert.equal(calls.length, 9);
   assert.match(calls[6][1].join(' '), /--input -/);
+  assert.equal(typeof calls[6][2], 'string');
+  assert.deepEqual(JSON.parse(calls[6][2]), {
+    wait_timer: 0,
+    prevent_self_review: true,
+    reviewers: [{ type: 'User', id: 42 }],
+    deployment_branch_policy: null,
+  });
 
   const bad = createNativeGitHubAdapter('dsifry/swift-mutation-testing', 'release-maintainer', { runCommand: async () => ({ stdout: '{}' }) });
   await assert.rejects(() => bad.putEnvironment({ maintainer: 'release-maintainer' }), /identity/i);
   const lost = createNativeGitHubAdapter('dsifry/swift-mutation-testing', 'release-maintainer', { runCommand: async () => { const error = new Error('lost'); error.code = 2; throw error; } });
   await assert.rejects(() => lost.getEnvironment(), /lost/);
+});
+
+test('native GitHub command closes stdin with the serialized request body', async () => {
+  const { nativeRunCommand } = await owner();
+  const inputs = [];
+  const fakeExecFile = (_executable, _argv, options, callback) => ({
+    stdin: {
+      end(input) {
+        inputs.push(input);
+        callback(null, '{"ok":true}', '');
+      },
+    },
+  });
+  assert.deepEqual(await nativeRunCommand('gh', ['api'], '{"value":1}\n', fakeExecFile), { stdout: '{"ok":true}', stderr: '' });
+  assert.deepEqual(inputs, ['{"value":1}\n']);
+  await assert.rejects(() => nativeRunCommand('gh', ['api'], undefined, (_executable, _argv, _options, callback) => ({
+    stdin: { end() { callback(new Error('gh failed'), '', 'failure'); } },
+  })), /gh failed/u);
 });
 
 test('direct CLI failure exits nonzero', async () => {

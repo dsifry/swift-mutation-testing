@@ -330,6 +330,18 @@ test('candidate bundle verifies listing before private 0700 extraction and retur
   });
 });
 
+test('candidate bundle verifies the executable digest before executing it', async () => {
+  await withBundle({}, async (input, _records, candidate, archiveBytes) => {
+    let executions = 0;
+    input.fs.readOwnedRegularFile = async (filePath) => filePath.endsWith('.json')
+      ? Buffer.from(JSON.stringify(candidate))
+      : filePath.endsWith('.tar.gz') ? archiveBytes : Buffer.from('wrong executable');
+    input.commands.executable.version = async () => { executions += 1; return validCandidate.release.versionOutput; };
+    await assert.rejects(() => verifyCandidateBundle(input), /digest/u);
+    assert.equal(executions, 0);
+  });
+});
+
 test('candidate bundle rejects a source checkout whose HEAD does not match the manifest source commit', async () => {
   await withBundle({}, async (input) => {
     input.git = {

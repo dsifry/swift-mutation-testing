@@ -313,10 +313,14 @@ async function inspectExecutable(executablePath, manifest, commands, fs, private
   if (!isObject(machO) || machO.uuid !== manifest.executable.uuid || machO.cpuType !== manifest.toolchain.cpuType || machO.deploymentTarget !== manifest.toolchain.deploymentTarget) {
     fail('candidate bundle', 'executable Mach-O metadata does not match the manifest');
   }
+  const executableBytes = await fs.readOwnedRegularFile(executablePath, privateRoot);
+  const executableSHA256 = sha256(executableBytes);
+  if (executableSHA256 !== manifest.executable.sha256) {
+    fail('candidate bundle', 'observed digest does not match the candidate manifest');
+  }
   const version = await commands.executable.version(executablePath);
   if (version !== manifest.release.versionOutput) fail('candidate bundle', 'executable version output does not match the manifest');
-  const executableBytes = await fs.readOwnedRegularFile(executablePath, privateRoot);
-  return { executableSHA256: sha256(executableBytes) };
+  return { executableSHA256 };
 }
 
 export async function verifyCandidateBundle(input) {
@@ -332,9 +336,6 @@ export async function verifyCandidateBundle(input) {
   const executablePath = await extractPrivately(input, manifest, stagedArchive.path);
   const observed = await inspectExecutable(executablePath, manifest, input.commands, input.fs, input.privateDirectory);
   const manifestSHA256 = sha256(manifestBytes);
-  if (observed.executableSHA256 !== manifest.executable.sha256) {
-    fail('candidate bundle', 'observed digest does not match the candidate manifest');
-  }
   return Object.freeze({ manifest, archiveSHA256, manifestSHA256, executableSHA256: observed.executableSHA256 });
 }
 

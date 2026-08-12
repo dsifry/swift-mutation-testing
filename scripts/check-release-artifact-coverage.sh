@@ -19,7 +19,7 @@ node -e '
 
 while IFS= read -r owner; do
   coverage_root="$(mktemp -d)"
-  NODE_V8_COVERAGE="$coverage_root" node --test --experimental-test-coverage \
+  RELEASE_ARTIFACT_COVERAGE_CHILD=1 NODE_V8_COVERAGE="$coverage_root" node --test --experimental-test-coverage \
     --test-coverage-include="$owner" \
     --test-coverage-lines=100 \
     --test-coverage-branches=100 \

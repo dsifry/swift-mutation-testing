@@ -54,6 +54,9 @@ test('release candidate workflow preserves immutable candidate authority and cus
   assert.equal((workflow.match(/uses: actions\/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3\.2\.0/gmu) ?? []).length, 2);
 
   assert.match(workflow, /^        run: \|\n          set -euo pipefail\n          WORKFLOW_COMMIT="\$\{\{ github\.sha \}\}"\n          DISPATCH_TRIGGER_COMMIT="\$\{\{ github\.sha \}\}"$/mu);
+  assert.match(workflow, /^          INPUT_VERSION: \$\{\{ inputs\.version \}\}\n          INPUT_SOURCE_COMMIT: \$\{\{ inputs\.source_commit \}\}$/mu);
+  assert.match(workflow, /^          VERSION="\$INPUT_VERSION"\n          SOURCE_COMMIT="\$INPUT_SOURCE_COMMIT"$/mu);
+  assert.doesNotMatch(workflow, /^\s+(?:VERSION|SOURCE_COMMIT)="\$\{\{ inputs\./mu);
   assert.match(workflow, /\[ "\$WORKFLOW_COMMIT" = "\$DISPATCH_TRIGGER_COMMIT" \]/u);
   assert.match(workflow, /\[ "\$WORKFLOW_COMMIT" = "\$MAIN_ANCHOR_COMMIT" \]/u);
   assert.match(workflow, /gh api "repos\/\$GITHUB_REPOSITORY\/git\/ref\/heads\/main"/u);
@@ -158,6 +161,9 @@ test('release workflow is protected manual promotion of proof-bound candidate by
   assertBefore(workflow, 'Verify proof checkout and bytes', 'Promote exact candidate bytes');
   assert.match(workflow, /repos\/\$GITHUB_REPOSITORY\/actions\/runs\/\$CANDIDATE_RUN_ID/u);
   assert.match(workflow, /repos\/\$GITHUB_REPOSITORY\/actions\/artifacts\/\$CANDIDATE_ARTIFACT_ID/u);
+  assert.doesNotMatch(workflow, /--jq\s+-e\b/u);
+  assert.match(workflow, /ENVIRONMENT_VALID="\$\(gh api [^\n]+ --jq '[^']+'\)"\n          test "\$ENVIRONMENT_VALID" = true/u);
+  assert.match(workflow, /RULESET_ID="\$\(gh api [^\n]+\)"[\s\S]*RULESET_VALID="\$\(gh api [^\n]+\/\$RULESET_ID[^\n]+ --jq '[^']+'\)"\n          test "\$RULESET_VALID" = true/u);
   assert.match(workflow, /immutable-release-tags/u);
   assert.match(workflow, /release-production/u);
   assert.match(workflow, /test "\$\(git -C "\$\{\{ github\.workspace \}\}\/control" rev-parse HEAD\)" = "\$PROOF_COMMIT"/u);

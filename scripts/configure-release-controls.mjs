@@ -1,7 +1,4 @@
-import { execFile as execFileCallback } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const execFile = promisify(execFileCallback);
+import { execFile } from 'node:child_process';
 const REPOSITORY = 'dsifry/swift-mutation-testing';
 const ENVIRONMENT = 'release-production';
 const RULESET = 'immutable-release-tags';
@@ -90,14 +87,24 @@ export async function configureReleaseControls({ repository, mode = 'check', mai
   return { repository, environment: 'exact', ruleset: 'exact', changed };
 }
 
-async function ghJSON(method, route, body, runCommand = execFile) {
+export function nativeRunCommand(executable, argv, input, execFileImpl = execFile) {
+  return new Promise((resolve, reject) => {
+    const child = execFileImpl(executable, argv, { encoding: 'utf8' }, (error, stdout, stderr) => {
+      if (error) reject(error);
+      else resolve({ stdout, stderr });
+    });
+    child.stdin.end(input);
+  });
+}
+
+async function ghJSON(method, route, body, runCommand = nativeRunCommand) {
   const argv = ['api', '--method', method, route];
   if (body !== undefined) argv.push('--input', '-');
-  const { stdout } = await runCommand('gh', argv, { encoding: 'utf8', input: body === undefined ? undefined : `${JSON.stringify(body)}\n` });
+  const { stdout } = await runCommand('gh', argv, body === undefined ? undefined : `${JSON.stringify(body)}\n`);
   return stdout.trim() === '' ? null : JSON.parse(stdout);
 }
 
-export function createNativeGitHubAdapter(repository, maintainer, { runCommand = execFile } = {}) {
+export function createNativeGitHubAdapter(repository, maintainer, { runCommand = nativeRunCommand } = {}) {
   const environmentRoute = `repos/${repository}/environments/${ENVIRONMENT}`;
   return {
     async getEnvironment() {

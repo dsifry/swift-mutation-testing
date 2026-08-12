@@ -125,9 +125,11 @@ jobs:
           test "$RUN_STATE" = ".github/workflows/release-candidate.yml|main|$CANDIDATE_WORKFLOW_COMMIT|workflow_dispatch|completed|success|$CANDIDATE_RUN_ATTEMPT"
           ARTIFACT_STATE="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID" --jq '[.name,(.workflow_run.id|tostring),(.expired|tostring),(.deleted_at == null|tostring)]|join("|")')"
           test "$ARTIFACT_STATE" = "$CANDIDATE_ARTIFACT_NAME|$CANDIDATE_RUN_ID|false|true"
-          gh api "repos/$GITHUB_REPOSITORY/environments/release-production" --jq -e '.name == "release-production" and any(.protection_rules[]?; .type == "required_reviewers" and (.reviewers | length) == 1 and .prevent_self_review == true)' >/dev/null
-          RULESET_IDS="$(gh api "repos/$GITHUB_REPOSITORY/rulesets" --jq '[.[] | select(.name == "immutable-release-tags" and .enforcement == "active") | .id] | if length == 1 then .[0] else error("exactly one active immutable-release-tags ruleset is required") end')"
-          gh api "repos/$GITHUB_REPOSITORY/rulesets/$RULESET_IDS" --jq -e '.target == "tag" and (.bypass_actors | length) == 0 and (.conditions.ref_name.include == ["refs/tags/v*"]) and any(.rules[]; .type == "update") and any(.rules[]; .type == "deletion")' >/dev/null
+          ENVIRONMENT_VALID="$(gh api "repos/$GITHUB_REPOSITORY/environments/release-production" --jq '.name == "release-production" and any(.protection_rules[]?; .type == "required_reviewers" and (.reviewers | length) == 1 and .prevent_self_review == true)')"
+          test "$ENVIRONMENT_VALID" = true
+          RULESET_ID="$(gh api "repos/$GITHUB_REPOSITORY/rulesets" --jq '[.[] | select(.name == "immutable-release-tags" and .enforcement == "active") | .id] | if length == 1 then .[0] else error("exactly one active immutable-release-tags ruleset is required") end')"
+          RULESET_VALID="$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$RULESET_ID" --jq '.target == "tag" and (.bypass_actors | length) == 0 and (.conditions.ref_name.include == ["refs/tags/v*"]) and any(.rules[]; .type == "update") and any(.rules[]; .type == "deletion")')"
+          test "$RULESET_VALID" = true
 
       - name: Checkout proof-bearing control tree
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
