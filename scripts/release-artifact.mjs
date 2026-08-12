@@ -374,7 +374,7 @@ export function verifyAttestationBundle(bundle, expected) {
   return deepFreeze(statement);
 }
 
-const GUIDE_PROOF_KEYS = Object.freeze(['schemaVersion', 'guideCommit', 'candidate', 'result']);
+const GUIDE_PROOF_KEYS = Object.freeze(['schemaVersion', 'repository', 'guideCommit', 'candidate', 'result']);
 
 function promotionFail(message) {
   fail('promotion', message);
@@ -405,11 +405,13 @@ export function parseGuideReleaseProof(bytes) {
   requirePromotion(exactKeys(value, GUIDE_PROOF_KEYS), 'Guide proof schema is not closed');
   requirePromotion(bytes.equals(canonicalJSONBytes(value)), 'Guide proof bytes are not canonical');
   requirePromotion(value.schemaVersion === 'guide-release-proof-v1', 'Guide proof schema version is invalid');
+  requirePromotion(value.repository === 'dsifry/theguide', 'Guide proof repository is invalid');
   requirePromotion(COMMIT.test(value.guideCommit), 'Guide proof commit is invalid');
   requirePromotion(exactKeys(value.candidate, [
-    'version', 'repository', 'run', 'artifact', 'sourceCommit',
+    'descriptorSHA256', 'version', 'repository', 'run', 'artifact', 'sourceCommit',
     'manifestSHA256', 'archiveSHA256', 'executableSHA256',
   ]), 'Guide proof candidate schema is not closed');
+  requirePromotion(SHA256.test(value.candidate.descriptorSHA256), 'Guide proof candidate descriptor digest is invalid');
   requirePromotion(value.candidate.version === '1.3.1', 'Guide proof candidate version is invalid');
   requirePromotion(value.candidate.repository === 'dsifry/swift-mutation-testing', 'Guide proof candidate repository is invalid');
   requirePromotion(exactKeys(value.candidate.run, ['id', 'attempt'])
@@ -425,16 +427,17 @@ export function parseGuideReleaseProof(bytes) {
     requirePromotion(SHA256.test(value.candidate[key]), `Guide proof candidate ${key} is invalid`);
   }
   requirePromotion(exactKeys(value.result, ['status', 'selectors', 'performance', 'drills']), 'Guide proof result schema is not closed');
-  requirePromotion(value.result.status === 'passed', 'Guide proof result did not pass');
+  requirePromotion(value.result.status === 'pass', 'Guide proof result did not pass');
   requirePromotion(exactKeys(value.result.selectors, ['count', 'coldTupleSHA256', 'warmTupleSHA256']), 'Guide proof selectors schema is not closed');
   requirePromotion(value.result.selectors.count === 103, 'Guide proof selector count is not 103');
   requirePromotion(SHA256.test(value.result.selectors.coldTupleSHA256)
     && value.result.selectors.coldTupleSHA256 === value.result.selectors.warmTupleSHA256,
   'Guide proof selector tuples are not equal');
   requirePromotion(exactKeys(value.result.performance, [
-    'uncachedElapsedSeconds', 'warmElapsedSeconds', 'uncachedBuilds', 'warmFallbackBuilds',
+    'uncachedElapsedSeconds', 'warmElapsedSeconds', 'uncachedBuilds', 'warmFallbackBuilds', 'receiptSHA256',
   ]), 'Guide proof performance schema is not closed');
   const performance = value.result.performance;
+  requirePromotion(SHA256.test(performance.receiptSHA256), 'Guide proof benchmark receipt digest is invalid');
   requirePromotion(Number.isFinite(performance.uncachedElapsedSeconds) && performance.uncachedElapsedSeconds > 0
     && Number.isFinite(performance.warmElapsedSeconds) && performance.warmElapsedSeconds >= 0
     && performance.warmElapsedSeconds / performance.uncachedElapsedSeconds <= 0.80,
@@ -444,7 +447,8 @@ export function parseGuideReleaseProof(bytes) {
     && performance.warmFallbackBuilds / performance.uncachedBuilds <= 0.10,
   'Guide proof warm fallback ratio exceeds 0.10');
   requirePromotion(exactKeys(value.result.drills, ['recovery', 'privacy', 'retention'])
-    && Object.values(value.result.drills).every((result) => result === 'passed'),
+    && Object.values(value.result.drills).every((result) => exactKeys(result, ['receiptSHA256', 'passed'])
+      && SHA256.test(result.receiptSHA256) && result.passed === true),
   'Guide proof drills did not all pass');
   return deepFreeze(value);
 }
@@ -458,16 +462,17 @@ function assertPromotionInput(input) {
     && Number.isSafeInteger(input.artifactId) && input.artifactId > 0,
   'input run or artifact identity is invalid');
   requirePromotion(typeof input.artifactName === 'string' && input.artifactName.length > 0, 'input artifact name is invalid');
-  requirePromotion(COMMIT.test(input.sourceCommit) && COMMIT.test(input.controlCommit), 'input commit is invalid');
-  for (const key of ['manifestSHA256', 'archiveSHA256', 'executableSHA256', 'guideProofSHA256']) {
+  requirePromotion(COMMIT.test(input.sourceCommit) && COMMIT.test(input.controlCommit) && COMMIT.test(input.guideCommit), 'input commit is invalid');
+  for (const key of ['manifestSHA256', 'archiveSHA256', 'executableSHA256', 'candidateDescriptorSHA256', 'guideProofSHA256']) {
     requirePromotion(SHA256.test(input[key]), `input ${key} is invalid`);
   }
   requirePromotion(!Object.hasOwn(input, 'downloadUrl') && !Object.hasOwn(input, 'downloadURL'), 'untrusted download URL is forbidden');
 }
 
 function verifyProofBinding(input, proof) {
-  requirePromotion(proof.guideCommit === input.controlCommit, 'Guide proof commit does not match the promotion control commit');
+  requirePromotion(proof.repository === 'dsifry/theguide' && proof.guideCommit === input.guideCommit, 'Guide proof repository or commit does not match promotion input');
   const expected = {
+    descriptorSHA256: input.candidateDescriptorSHA256,
     version: input.version,
     repository: input.repository,
     run: { id: input.runId, attempt: input.runAttempt },
@@ -687,6 +692,39 @@ function nativeGit() {
       } catch {
         return false;
       }
+    },
+  };
+}
+
+export function createNativeCandidateVerificationInput({
+  controlRoot,
+  sourceRoot,
+  artifactRoot,
+  archivePath,
+  manifestPath,
+  privateDirectory,
+  runCommand = run,
+} = {}) {
+  return {
+    controlRoot,
+    sourceRoot,
+    artifactRoot,
+    archivePath,
+    manifestPath,
+    privateDirectory,
+    fs: { readOwnedRegularFile, mkdirFreshPrivate, stageOwnedArchive },
+    commands: createNativeCommands({ runCommand }),
+    git: {
+      controlHead: async (root) => (await runCommand('git', ['rev-parse', 'HEAD'], { cwd: root })).trim(),
+      sourceHead: async (root) => (await runCommand('git', ['rev-parse', 'HEAD'], { cwd: root })).trim(),
+      isAncestor: async (ancestor, descendant, root) => {
+        try {
+          await runCommand('git', ['merge-base', '--is-ancestor', ancestor, descendant], { cwd: root });
+          return true;
+        } catch {
+          return false;
+        }
+      },
     },
   };
 }

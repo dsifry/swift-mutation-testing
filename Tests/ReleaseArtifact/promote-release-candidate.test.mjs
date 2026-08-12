@@ -12,6 +12,7 @@ import {
   verifyTagTuple,
 } from '../../scripts/release-artifact.mjs';
 import { promoteReleaseCandidate } from '../../scripts/promote-release-candidate.mjs';
+import * as promotionOwner from '../../scripts/promote-release-candidate.mjs';
 
 const fixtures = path.join(import.meta.dirname, 'fixtures');
 const candidateBytes = await readFile(path.join(fixtures, 'candidate-valid.json'));
@@ -25,6 +26,9 @@ candidate.executable.sha256 = executableSHA256;
 const manifestBytes = Buffer.from(`${JSON.stringify(candidate, null, 2)}\n`);
 const manifestSHA256 = sha256(manifestBytes);
 const commit = candidate.sourceCommit;
+const controlCommit = 'e'.repeat(40);
+const guideCommit = 'b'.repeat(40);
+const candidateDescriptorSHA256 = 'f'.repeat(64);
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -33,8 +37,10 @@ function clone(value) {
 function canonicalProof(overrides = {}) {
   const value = {
     schemaVersion: 'guide-release-proof-v1',
-    guideCommit: commit,
+    repository: 'dsifry/theguide',
+    guideCommit,
     candidate: {
+      descriptorSHA256: candidateDescriptorSHA256,
       version: '1.3.1',
       repository: candidate.repository,
       run: { id: candidate.run.id, attempt: candidate.run.attempt },
@@ -45,10 +51,14 @@ function canonicalProof(overrides = {}) {
       executableSHA256,
     },
     result: {
-      status: 'passed',
+      status: 'pass',
       selectors: { count: 103, coldTupleSHA256: 'a'.repeat(64), warmTupleSHA256: 'a'.repeat(64) },
-      performance: { uncachedElapsedSeconds: 100, warmElapsedSeconds: 80, uncachedBuilds: 10, warmFallbackBuilds: 1 },
-      drills: { recovery: 'passed', privacy: 'passed', retention: 'passed' },
+      performance: { uncachedElapsedSeconds: 100, warmElapsedSeconds: 80, uncachedBuilds: 10, warmFallbackBuilds: 1, receiptSHA256: '1'.repeat(64) },
+      drills: {
+        recovery: { receiptSHA256: '2'.repeat(64), passed: true },
+        privacy: { receiptSHA256: '3'.repeat(64), passed: true },
+        retention: { receiptSHA256: '4'.repeat(64), passed: true },
+      },
     },
   };
   return Object.assign(value, overrides);
@@ -71,7 +81,9 @@ function promotionInput(overrides = {}) {
     manifestSHA256,
     archiveSHA256,
     executableSHA256,
-    controlCommit: commit,
+    candidateDescriptorSHA256,
+    controlCommit,
+    guideCommit,
     guideProofSHA256: sha256(bytes),
     ...overrides,
   };
@@ -99,7 +111,7 @@ function attestation(subjectName, digest) {
 
 function state(overrides = {}) {
   return {
-    controlHead: commit,
+    controlHead: controlCommit,
     guideProofBytes: proofBytes(),
     run: {
       repository: candidate.repository,
@@ -140,10 +152,61 @@ function expectedAssets() {
   ];
 }
 
+function candidateVerificationInput(overrides = {}) {
+  const records = [];
+  const input = {
+    controlRoot: '/control',
+    sourceRoot: '/source',
+    artifactRoot: '/candidate',
+    archivePath: `/candidate/${candidate.archive.filename}`,
+    manifestPath: '/candidate/release-candidate-v1.json',
+    privateDirectory: '/private',
+    fs: {
+      readOwnedRegularFile: async (filePath) => {
+        records.push(`read:${filePath}`);
+        if (filePath.endsWith('.json')) return manifestBytes;
+        if (filePath.endsWith('.tar.gz') || filePath.endsWith('.candidate-archive')) return archiveBytes;
+        return executableBytes;
+      },
+      mkdirFreshPrivate: async (directory) => { records.push(`mkdir:${directory}`); },
+      stageOwnedArchive: async () => ({ path: '/private/.candidate-archive', bytes: archiveBytes }),
+    },
+    commands: {
+      tar: {
+        list: async () => [{ path: candidate.executable.filename, type: 'file', linkCount: 1, mode: candidate.executable.mode, size: candidate.executable.size }],
+        extract: async () => { records.push('extract'); },
+      },
+      codesign: { verify: async () => true },
+      file: { inspect: async () => ({ type: 'Mach-O 64-bit executable arm64' }) },
+      otool: { inspect: async () => ({ uuid: candidate.executable.uuid, cpuType: candidate.toolchain.cpuType, deploymentTarget: candidate.toolchain.deploymentTarget }) },
+      executable: { version: async () => candidate.release.versionOutput },
+    },
+    git: {
+      controlHead: async () => candidate.workflow.commit,
+      sourceHead: async () => candidate.sourceCommit,
+      isAncestor: async () => true,
+    },
+  };
+  return { input: Object.assign(input, overrides), records };
+}
+
 test('Guide proof accepts only canonical content-free evidence', () => {
   const bytes = proofBytes();
   assert.deepEqual(parseGuideReleaseProof(bytes), canonicalProof());
   assert.throws(() => parseGuideReleaseProof(Buffer.from(JSON.stringify(canonicalProof()))), /Guide proof.*canonical/i);
+});
+
+test('Guide proof binds a distinct Guide repository and commit plus all receipt digests', () => {
+  const proof = parseGuideReleaseProof(proofBytes());
+  assert.equal(proof.repository, 'dsifry/theguide');
+  assert.equal(proof.guideCommit, guideCommit);
+  assert.notEqual(proof.guideCommit, controlCommit);
+  assert.equal(proof.candidate.descriptorSHA256, candidateDescriptorSHA256);
+  assert.match(proof.result.performance.receiptSHA256, /^[a-f0-9]{64}$/u);
+  for (const drill of Object.values(proof.result.drills)) {
+    assert.match(drill.receiptSHA256, /^[a-f0-9]{64}$/u);
+    assert.equal(drill.passed, true);
+  }
 });
 
 for (const [name, mutate] of [
@@ -182,21 +245,25 @@ test('promotion authority rejects absent and malformed Guide proof', () => {
 
 for (const [name, mutate] of [
   ['wrong proof commit', (proof) => { proof.guideCommit = 'd'.repeat(40); }],
+  ['wrong Guide repository', (proof) => { proof.repository = 'dsifry/swift-mutation-testing'; }],
+  ['wrong candidate descriptor digest', (proof) => { proof.candidate.descriptorSHA256 = 'd'.repeat(64); }],
   ['wrong candidate descriptor', (proof) => { proof.candidate.artifact.id = 445; }],
   ['failed result', (proof) => { proof.result.status = 'failed'; }],
   ['wrong selector count', (proof) => { proof.result.selectors.count = 102; }],
   ['unequal tuple digests', (proof) => { proof.result.selectors.warmTupleSHA256 = 'b'.repeat(64); }],
   ['slow warm result', (proof) => { proof.result.performance.warmElapsedSeconds = 81; }],
   ['high fallback result', (proof) => { proof.result.performance.warmFallbackBuilds = 2; }],
-  ['failed recovery drill', (proof) => { proof.result.drills.recovery = 'failed'; }],
-  ['failed privacy drill', (proof) => { proof.result.drills.privacy = 'failed'; }],
-  ['failed retention drill', (proof) => { proof.result.drills.retention = 'failed'; }],
+  ['missing benchmark receipt digest', (proof) => { delete proof.result.performance.receiptSHA256; }],
+  ['failed recovery drill', (proof) => { proof.result.drills.recovery.passed = false; }],
+  ['failed privacy drill', (proof) => { proof.result.drills.privacy.passed = false; }],
+  ['failed retention drill', (proof) => { proof.result.drills.retention.passed = false; }],
+  ['malformed recovery receipt digest', (proof) => { proof.result.drills.recovery.receiptSHA256 = 'invalid'; }],
 ]) {
   test(`promotion authority rejects ${name}`, () => {
     const proof = canonicalProof();
     mutate(proof);
     const bytes = proofBytes(proof);
-    const input = promotionInput({ guideProofSHA256: sha256(bytes) });
+    const input = promotionInput({ guideProofSHA256: sha256(bytes), ...(name === 'wrong proof commit' ? { guideCommit: 'a'.repeat(40) } : {}) });
     assert.throws(() => verifyPromotionAuthority(input, state({ guideProofBytes: bytes })), /Guide proof|promotion/i);
   });
 }
@@ -244,7 +311,7 @@ function githubFor(value, mutations) {
     downloadCandidate: async ({ repository, artifactId }) => {
       assert.equal(repository, candidate.repository);
       assert.equal(artifactId, 444);
-      return { archiveBytes, manifestBytes };
+      return { archiveBytes, manifestBytes, verificationInput: candidateVerificationInput().input };
     },
     createDraft: async () => { mutations.push('create-draft'); return { draft: true, assets: [] }; },
     uploadAsset: async (_release, asset) => { mutations.push(`upload:${asset.name}`); },
@@ -286,6 +353,17 @@ test('candidate download mismatch stops before the first GitHub mutation', async
   assert.deepEqual(mutations, []);
 });
 
+test('Task 1 candidate bundle verification rejects a bad executable before the first GitHub mutation', async () => {
+  const value = state();
+  const mutations = [];
+  const github = githubFor(value, mutations);
+  const verification = candidateVerificationInput();
+  verification.input.commands.codesign.verify = async () => false;
+  github.downloadCandidate = async () => ({ archiveBytes, manifestBytes, verificationInput: verification.input });
+  await assert.rejects(() => promoteReleaseCandidate(promotionInput(), github), /signature|candidate bundle/i);
+  assert.deepEqual(mutations, []);
+});
+
 test('absent release uploads the unchanged candidate and canonical checksums before publishing', async () => {
   const value = state();
   const mutations = [];
@@ -322,7 +400,7 @@ test('mismatched draft and any public collision fail closed', async () => {
 });
 
 test('tag substitution before upload, publish, or public verification fails closed', async () => {
-  for (const position of [1, 2, 3, 4]) {
+  for (const position of [1, 2, 3, 4, 5]) {
     const value = state();
     const mutations = [];
     const github = githubFor(value, mutations);
@@ -332,6 +410,64 @@ test('tag substitution before upload, publish, or public verification fails clos
       return reads === position ? { ...value.tagTuple, refSha: 'd'.repeat(40) } : value.tagTuple;
     };
     await assert.rejects(() => promoteReleaseCandidate(promotionInput(), github), /tag/i);
-    assert.equal(mutations.includes('publish-existing-draft'), position === 4);
+    assert.equal(mutations.includes('publish-existing-draft'), position === 5);
   }
+});
+
+test('tag substitution after draft creation stops before the first asset upload', async () => {
+  const value = state();
+  const mutations = [];
+  const github = githubFor(value, mutations);
+  let draftCreated = false;
+  github.createDraft = async () => {
+    draftCreated = true;
+    mutations.push('create-draft');
+    return { draft: true, assets: [] };
+  };
+  github.getTagTuple = async () => draftCreated
+    ? { ...value.tagTuple, refSha: 'd'.repeat(40) }
+    : value.tagTuple;
+  await assert.rejects(() => promoteReleaseCandidate(promotionInput(), github), /tag/i);
+  assert.deepEqual(mutations, ['create-draft']);
+});
+
+function validCliArguments() {
+  return [
+    '--version', '1.3.1', '--repository', candidate.repository,
+    '--run-id', String(candidate.run.id), '--run-attempt', String(candidate.run.attempt),
+    '--artifact-id', '444', '--artifact-name', candidate.artifactName,
+    '--source-commit', commit, '--manifest-sha256', manifestSHA256,
+    '--archive-sha256', archiveSHA256, '--executable-sha256', executableSHA256,
+    '--candidate-descriptor-sha256', candidateDescriptorSHA256,
+    '--control-commit', controlCommit, '--guide-commit', guideCommit,
+    '--guide-proof-sha256', sha256(proofBytes()),
+    '--control-root', '/control', '--source-root', '/source', '--work-root', '/work',
+  ];
+}
+
+test('CLI parses the exact proof-bound inputs and executes promotion with GH_TOKEN', async () => {
+  const output = [];
+  let observed;
+  await promotionOwner.runCli(validCliArguments(), {
+    env: { GH_TOKEN: 'secret' },
+    createNativeGitHubAdapter: (options) => ({ options }),
+    promoteReleaseCandidate: async (input, github) => {
+      observed = { input, github };
+      return { mutations: ['publish-existing-draft'] };
+    },
+    stdout: (value) => output.push(value),
+  });
+  assert.deepEqual(observed.input, promotionInput());
+  assert.equal(observed.github.options.token, 'secret');
+  assert.equal(observed.github.options.controlRoot, '/control');
+  assert.deepEqual(output, ['{"mutations":["publish-existing-draft"]}\n']);
+});
+
+test('CLI fails closed for absent auth or any missing, duplicate, or unknown input', async () => {
+  const valid = validCliArguments();
+  const dependencies = { env: { GH_TOKEN: 'secret' }, createNativeGitHubAdapter: () => ({}), promoteReleaseCandidate: async () => ({ mutations: [] }) };
+  await assert.rejects(() => promotionOwner.runCli(valid, { ...dependencies, env: {} }), /GH_TOKEN|auth/i);
+  await assert.rejects(() => promotionOwner.runCli(valid.slice(2), dependencies), /usage|input/i);
+  await assert.rejects(() => promotionOwner.runCli([...valid, '--version', '1.3.1'], dependencies), /usage|duplicate/i);
+  await assert.rejects(() => promotionOwner.runCli([...valid, '--unknown', 'value'], dependencies), /usage|unknown/i);
 });
