@@ -61,6 +61,10 @@ export async function configureReleaseControls({ repository, mode = 'check', mai
   if (!api) fail('GitHub adapter is required');
   if (typeof api.getRepositoryPermission !== 'function') fail('GitHub adapter must verify maintainer authority');
   if (mode === 'apply' && (typeof maintainer !== 'string' || maintainer.length === 0)) fail('apply requires an authenticated maintainer login');
+  if (mode === 'apply') {
+    const requestedPermission = await api.getRepositoryPermission(maintainer);
+    if (requestedPermission !== 'maintain' && requestedPermission !== 'admin') fail('requested approval reviewer lacks maintainer/admin authority');
+  }
 
   const before = await observe(api, mode === 'apply' ? maintainer : undefined);
   if (before.environment && before.reviewerAuthorized === false && before.environment.protection_rules?.[0]?.reviewers?.[0]?.reviewer?.login) fail('configured approval reviewer lacks maintainer/admin authority');

@@ -51,6 +51,11 @@ VERSION="1.3.1"
 BASE="https://github.com/dsifry/swift-mutation-testing/releases/download/v${VERSION}"
 curl -fLO "$BASE/swift-mutation-testing-v${VERSION}-macos.tar.gz"
 curl -fLO "$BASE/swift-mutation-testing-v${VERSION}-SHA256SUMS"
+awk -v archive="swift-mutation-testing-v${VERSION}-macos.tar.gz" \
+  '$2 == archive { print }' "swift-mutation-testing-v${VERSION}-SHA256SUMS" \
+  > "swift-mutation-testing-v${VERSION}-archive-SHA256SUMS"
+test "$(wc -l < "swift-mutation-testing-v${VERSION}-archive-SHA256SUMS" | tr -d ' ')" = 1
+shasum -a 256 -c "swift-mutation-testing-v${VERSION}-archive-SHA256SUMS"
 tar -xzf "swift-mutation-testing-v${VERSION}-macos.tar.gz"
 shasum -a 256 -c "swift-mutation-testing-v${VERSION}-SHA256SUMS"
 

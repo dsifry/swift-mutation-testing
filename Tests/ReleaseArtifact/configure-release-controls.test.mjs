@@ -181,9 +181,20 @@ test('check and apply reject an approval reviewer without maintainer authority b
   }
 });
 
+test('apply authenticates the requested replacement reviewer before any environment mutation', async () => {
+  const { configureReleaseControls } = await owner();
+  const fixture = adapter();
+  fixture.api.getRepositoryPermission = async (login) => login === 'release-maintainer' ? 'maintain' : 'push';
+  await assert.rejects(() => configureReleaseControls({ repository: 'dsifry/swift-mutation-testing', mode: 'apply', maintainer: 'unprivileged-user', api: fixture.api }), /maintainer|admin|authority/i);
+  assert.equal(fixture.calls.some(([name]) => name.startsWith('put') || name.startsWith('create') || name.startsWith('update')), false);
+});
+
 test('release docs order checksum verification after extraction and provide executable lifecycle commands', async () => {
   const installation = await readFile(path.join(root, 'Docs/INSTALLATION.MD'), 'utf8');
-  assert.ok(installation.indexOf('tar -xzf') < installation.indexOf('shasum -a 256 -c'));
+  const archiveCheck = installation.indexOf('shasum -a 256 -c "swift-mutation-testing-v${VERSION}-archive-SHA256SUMS"');
+  const extraction = installation.indexOf('tar -xzf');
+  const fullCheck = installation.indexOf('shasum -a 256 -c "swift-mutation-testing-v${VERSION}-SHA256SUMS"');
+  assert.ok(archiveCheck >= 0 && archiveCheck < extraction && extraction < fullCheck);
   const building = await readFile(path.join(root, 'Docs/BUILDING.md'), 'utf8');
   for (const command of ['gh workflow run release-candidate.yml', 'gh run download', 'git tag -s', 'gh workflow run release.yml', 'gh run rerun']) assert.match(building, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
