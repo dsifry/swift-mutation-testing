@@ -1,0 +1,195 @@
+name: Release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Canonical release version (X.Y.Z)
+        required: true
+        type: string
+      source_commit:
+        description: Reviewed source commit SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  candidate:
+    runs-on: macos-26
+    steps:
+      - name: Resolve immutable main anchor
+        id: authority
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -euo pipefail
+          WORKFLOW_COMMIT="${{ github.sha }}"
+          DISPATCH_TRIGGER_COMMIT="${{ github.sha }}"
+          VERSION="$INPUT_VERSION"
+          SOURCE_COMMIT="$INPUT_SOURCE_COMMIT"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          MAIN_ANCHOR_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          SOURCE_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_COMMIT" --jq '.sha')"
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [ "$WORKFLOW_COMMIT" = "$DISPATCH_TRIGGER_COMMIT" ]
+          [ "$WORKFLOW_COMMIT" = "$MAIN_ANCHOR_COMMIT" ]
+          ANCESTRY="$(gh api "repos/$GITHUB_REPOSITORY/compare/$SOURCE_COMMIT...$MAIN_ANCHOR_COMMIT" --jq '.status')"
+          [ "$ANCESTRY" = ahead ] || [ "$ANCESTRY" = identical ]
+          ARTIFACT_NAME="swift-mutation-testing-v${VERSION}-candidate-${{ github.run_id }}-${{ github.run_attempt }}"
+          {
+            echo "workflow_commit=$WORKFLOW_COMMIT"
+            echo "dispatch_trigger_commit=$DISPATCH_TRIGGER_COMMIT"
+            echo "main_anchor_commit=$MAIN_ANCHOR_COMMIT"
+            echo "source_commit=$SOURCE_COMMIT"
+            echo "version=$VERSION"
+            echo "artifact_name=$ARTIFACT_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout immutable control tree
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ steps.authority.outputs.workflow_commit }}
+          path: ${{ github.workspace }}/control
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout immutable source tree
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ steps.authority.outputs.source_commit }}
+          path: ${{ github.workspace }}/source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Provision Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      - name: Validate source ancestry
+        env:
+          WORKFLOW_COMMIT: ${{ steps.authority.outputs.workflow_commit }}
+          SOURCE_COMMIT: ${{ steps.authority.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          test "$(git -C "${{ github.workspace }}/control" rev-parse HEAD)" = "$WORKFLOW_COMMIT"
+          test "$(git -C "${{ github.workspace }}/source" rev-parse HEAD)" = "$SOURCE_COMMIT"
+          git -C "${{ github.workspace }}/control" merge-base --is-ancestor "$SOURCE_COMMIT" "$WORKFLOW_COMMIT"
+
+      - name: Test reviewed source
+        run: |
+          set -euo pipefail
+          bash "${{ github.workspace }}/control/scripts/check-focused-coverage.sh" --package-path "${{ github.workspace }}/source"
+          node "${{ github.workspace }}/control/scripts/check-exact-test-replay.mjs" --package-path "${{ github.workspace }}/source"
+
+      - name: Build candidate once
+        id: build
+        env:
+          WORKFLOW_COMMIT: ${{ steps.authority.outputs.workflow_commit }}
+          SOURCE_COMMIT: ${{ steps.authority.outputs.source_commit }}
+          VERSION: ${{ steps.authority.outputs.version }}
+          ARTIFACT_NAME: ${{ steps.authority.outputs.artifact_name }}
+          OUTPUT_ROOT: ${{ runner.temp }}/release-candidate
+        run: |
+          set -euo pipefail
+          RECEIPT="$(node "${{ github.workspace }}/control/scripts/build-release-candidate.mjs" --control-root "${{ github.workspace }}/control" --source-root "${{ github.workspace }}/source" --output-root "$OUTPUT_ROOT" --version "$VERSION" --source-commit "$SOURCE_COMMIT" --workflow-commit "$WORKFLOW_COMMIT" --run-id "${{ github.run_id }}" --run-attempt "${{ github.run_attempt }}" --artifact-name "$ARTIFACT_NAME")"
+          MANIFEST_SHA256="$(shasum -a 256 "$OUTPUT_ROOT/release-candidate-v1.json" | awk '{print $1}')"
+          ARCHIVE_SHA256="$(shasum -a 256 "$OUTPUT_ROOT/swift-mutation-testing-v${VERSION}-macos.tar.gz" | awk '{print $1}')"
+          EXECUTABLE_SHA256="$(printf '%s' "$RECEIPT" | plutil -extract executable.sha256 raw -o - -)"
+          {
+            echo "manifest_sha256=$MANIFEST_SHA256"
+            echo "archive_sha256=$ARCHIVE_SHA256"
+            echo "executable_sha256=$EXECUTABLE_SHA256"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest candidate archive
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: ${{ runner.temp }}/release-candidate/swift-mutation-testing-v${{ steps.authority.outputs.version }}-macos.tar.gz
+
+      - name: Attest candidate manifest
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: ${{ runner.temp }}/release-candidate/release-candidate-v1.json
+
+      - name: Bundle attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTPUT_ROOT: ${{ runner.temp }}/release-candidate
+          VERSION: ${{ steps.authority.outputs.version }}
+          WORKFLOW_COMMIT: ${{ steps.authority.outputs.workflow_commit }}
+          ARCHIVE_SHA256: ${{ steps.build.outputs.archive_sha256 }}
+          MANIFEST_SHA256: ${{ steps.build.outputs.manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/candidate-upload"
+          cp "$OUTPUT_ROOT/swift-mutation-testing-v${VERSION}-macos.tar.gz" "$RUNNER_TEMP/candidate-upload/"
+          cp "$OUTPUT_ROOT/release-candidate-v1.json" "$RUNNER_TEMP/candidate-upload/"
+          ARCHIVE_BUNDLE_DIR="$RUNNER_TEMP/archive-attestation-download"
+          MANIFEST_BUNDLE_DIR="$RUNNER_TEMP/manifest-attestation-download"
+          mkdir "$ARCHIVE_BUNDLE_DIR" "$MANIFEST_BUNDLE_DIR"
+          (cd "$ARCHIVE_BUNDLE_DIR" && gh attestation download "$OUTPUT_ROOT/swift-mutation-testing-v${VERSION}-macos.tar.gz" --repo "$GITHUB_REPOSITORY")
+          (cd "$MANIFEST_BUNDLE_DIR" && gh attestation download "$OUTPUT_ROOT/release-candidate-v1.json" --repo "$GITHUB_REPOSITORY")
+          test -s "$ARCHIVE_BUNDLE_DIR/sha256:$ARCHIVE_SHA256.jsonl"
+          test -s "$MANIFEST_BUNDLE_DIR/sha256:$MANIFEST_SHA256.jsonl"
+          mv "$ARCHIVE_BUNDLE_DIR/sha256:$ARCHIVE_SHA256.jsonl" "$RUNNER_TEMP/candidate-upload/archive-attestation-bundle-v1.jsonl"
+          mv "$MANIFEST_BUNDLE_DIR/sha256:$MANIFEST_SHA256.jsonl" "$RUNNER_TEMP/candidate-upload/manifest-attestation-bundle-v1.jsonl"
+          gh attestation verify "$OUTPUT_ROOT/swift-mutation-testing-v${VERSION}-macos.tar.gz" --repo "$GITHUB_REPOSITORY" --bundle "$RUNNER_TEMP/candidate-upload/archive-attestation-bundle-v1.jsonl" --signer-workflow "github.com/$GITHUB_REPOSITORY/.github/workflows/release-candidate.yml" --signer-digest "$WORKFLOW_COMMIT" --source-digest "$WORKFLOW_COMMIT" --source-ref refs/heads/main --deny-self-hosted-runners --format json > "$RUNNER_TEMP/archive-attestation-verification-v1.json"
+          gh attestation verify "$OUTPUT_ROOT/release-candidate-v1.json" --repo "$GITHUB_REPOSITORY" --bundle "$RUNNER_TEMP/candidate-upload/manifest-attestation-bundle-v1.jsonl" --signer-workflow "github.com/$GITHUB_REPOSITORY/.github/workflows/release-candidate.yml" --signer-digest "$WORKFLOW_COMMIT" --source-digest "$WORKFLOW_COMMIT" --source-ref refs/heads/main --deny-self-hosted-runners --format json > "$RUNNER_TEMP/manifest-attestation-verification-v1.json"
+          printf '{"subjectName":"swift-mutation-testing-v%s-macos.tar.gz","subjectSHA256":"%s","repository":"%s","runId":%s,"runAttempt":%s}\n' "$VERSION" "$ARCHIVE_SHA256" "$GITHUB_REPOSITORY" "${{ github.run_id }}" "${{ github.run_attempt }}" > "$RUNNER_TEMP/archive-attestation-expected-v1.json"
+          printf '{"subjectName":"release-candidate-v1.json","subjectSHA256":"%s","repository":"%s","runId":%s,"runAttempt":%s}\n' "$MANIFEST_SHA256" "$GITHUB_REPOSITORY" "${{ github.run_id }}" "${{ github.run_attempt }}" > "$RUNNER_TEMP/manifest-attestation-expected-v1.json"
+          node "${{ github.workspace }}/control/scripts/release-artifact.mjs" attestation "$RUNNER_TEMP/archive-attestation-verification-v1.json" "$RUNNER_TEMP/archive-attestation-expected-v1.json" >/dev/null
+          node "${{ github.workspace }}/control/scripts/release-artifact.mjs" attestation "$RUNNER_TEMP/manifest-attestation-verification-v1.json" "$RUNNER_TEMP/manifest-attestation-expected-v1.json" >/dev/null
+
+      - name: Upload immutable candidate
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.authority.outputs.artifact_name }}
+          path: ${{ runner.temp }}/candidate-upload
+          retention-days: 30
+          overwrite: false
+
+      - name: Download immutable candidate by artifact ID
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ steps.upload.outputs.artifact-id }}
+          path: ${{ runner.temp }}/downloaded-candidate
+
+      - name: Reverify downloaded candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_COMMIT: ${{ steps.authority.outputs.workflow_commit }}
+          SOURCE_COMMIT: ${{ steps.authority.outputs.source_commit }}
+          VERSION: ${{ steps.authority.outputs.version }}
+        run: |
+          set -euo pipefail
+          INPUT_PATH="$RUNNER_TEMP/reverify-candidate-input.json"
+          cat > "$INPUT_PATH" <<EOF
+          {"controlRoot":"${{ github.workspace }}/control","sourceRoot":"${{ github.workspace }}/source","artifactRoot":"$RUNNER_TEMP/downloaded-candidate","archivePath":"$RUNNER_TEMP/downloaded-candidate/swift-mutation-testing-v${VERSION}-macos.tar.gz","manifestPath":"$RUNNER_TEMP/downloaded-candidate/release-candidate-v1.json","privateDirectory":"$RUNNER_TEMP/downloaded-candidate/.verification"}
+          EOF
+          node "${{ github.workspace }}/control/scripts/release-artifact.mjs" candidate-bundle "$INPUT_PATH" >/dev/null
+          gh attestation verify "$RUNNER_TEMP/downloaded-candidate/swift-mutation-testing-v${VERSION}-macos.tar.gz" --repo "$GITHUB_REPOSITORY" --bundle "$RUNNER_TEMP/downloaded-candidate/archive-attestation-bundle-v1.jsonl" --signer-workflow "github.com/$GITHUB_REPOSITORY/.github/workflows/release-candidate.yml" --signer-digest "$WORKFLOW_COMMIT" --source-digest "$WORKFLOW_COMMIT" --source-ref refs/heads/main --deny-self-hosted-runners --format json > "$RUNNER_TEMP/downloaded-archive-attestation-verification-v1.json"
+          gh attestation verify "$RUNNER_TEMP/downloaded-candidate/release-candidate-v1.json" --repo "$GITHUB_REPOSITORY" --bundle "$RUNNER_TEMP/downloaded-candidate/manifest-attestation-bundle-v1.jsonl" --signer-workflow "github.com/$GITHUB_REPOSITORY/.github/workflows/release-candidate.yml" --signer-digest "$WORKFLOW_COMMIT" --source-digest "$WORKFLOW_COMMIT" --source-ref refs/heads/main --deny-self-hosted-runners --format json > "$RUNNER_TEMP/downloaded-manifest-attestation-verification-v1.json"
+          node "${{ github.workspace }}/control/scripts/release-artifact.mjs" attestation "$RUNNER_TEMP/downloaded-archive-attestation-verification-v1.json" "$RUNNER_TEMP/archive-attestation-expected-v1.json" >/dev/null
+          node "${{ github.workspace }}/control/scripts/release-artifact.mjs" attestation "$RUNNER_TEMP/downloaded-manifest-attestation-verification-v1.json" "$RUNNER_TEMP/manifest-attestation-expected-v1.json" >/dev/null
+
+      - name: Publish candidate summary
+        run: |
+          {
+            echo "Artifact ID: ${{ steps.upload.outputs.artifact-id }}"
+            echo "Service digest: ${{ steps.upload.outputs.artifact-digest }}"
+            echo "Run ID: ${{ github.run_id }}"
+            echo "Run attempt: ${{ github.run_attempt }}"
+            echo "Manifest SHA-256: ${{ steps.build.outputs.manifest_sha256 }}"
+            echo "Archive SHA-256: ${{ steps.build.outputs.archive_sha256 }}"
+            echo "Executable SHA-256: ${{ steps.build.outputs.executable_sha256 }}"
+          } >> "$GITHUB_STEP_SUMMARY"

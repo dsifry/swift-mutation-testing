@@ -11,6 +11,7 @@
 | [03 — Execution Pipeline](03-execution.md) | Sandbox, build, simulators, test execution, result parsing, caching, reporting |
 | [04 — Configuration](04-configuration.md) | Configuration model, YAML format, CLI arguments, project detection |
 | [05 — Schematization](05-schematization.md) | Embedding mutants into a single binary, support file injection, runtime activation |
+| [06 — Immutable Release Artifact Promotion](06-immutable-release-artifact-promotion.md) | Build-once candidate custody, Guide proof, protected promotion, recovery |
 
 ## Quick Reference
 

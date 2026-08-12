@@ -1,0 +1,11 @@
+{
+  "includes": [
+    "scripts/release-artifact.mjs",
+    "scripts/build-release-candidate.mjs",
+    "scripts/promote-release-candidate.mjs",
+    "scripts/check-exact-test-replay.mjs",
+    "scripts/configure-release-controls.mjs"
+  ],
+  "thresholds": {"lines": 100, "branches": 100, "functions": 100},
+  "excludes": []
+}

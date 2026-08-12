@@ -1,0 +1,38 @@
+[
+  {
+    "attestation": {
+      "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json"
+    },
+    "verificationResult": {
+      "signature": {
+        "certificate": {
+          "sourceRepository": "https://github.com/dsifry/swift-mutation-testing"
+        }
+      },
+      "verifiedTimestamps": [
+        {
+          "type": "transparency-log"
+        }
+      ],
+      "statement": {
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [
+          {
+            "name": "swift-mutation-testing-v1.3.1-macos.tar.gz",
+            "digest": {
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ],
+        "predicateType": "https://slsa.dev/provenance/v1",
+        "predicate": {
+          "runDetails": {
+            "metadata": {
+              "invocationId": "https://github.com/dsifry/swift-mutation-testing/actions/runs/123456789/attempts/2"
+            }
+          }
+        }
+      }
+    }
+  }
+]

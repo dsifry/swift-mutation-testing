@@ -1,8 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
-repository_root="$(cd "$(dirname "$0")/.." && pwd -P)"
-manifest="$repository_root/scripts/focused-coverage-manifest.json"
+control_root="$(cd "$(dirname "$0")/.." && pwd -P)"
+repository_root="$control_root"
+if [[ "${1:-}" == "--package-path" && -n "${2:-}" && "$#" == 2 ]]; then
+  repository_root="$(cd "$2" && pwd -P)"
+elif [[ "$#" != 0 ]]; then
+  echo "usage: check-focused-coverage.sh [--package-path SOURCE_ROOT]" >&2
+  exit 2
+fi
+manifest="$control_root/scripts/focused-coverage-manifest.json"
 developer_directory="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 
 cd "$repository_root"
