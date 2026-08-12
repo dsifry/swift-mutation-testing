@@ -108,10 +108,11 @@ struct SwiftMutationTestingExecutionPathTests {
             registrationURL: registration, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV",
             guideLockInode: UInt64(metadata.st_ino))
         let evidence = root.appendingPathComponent("build-count.json")
+        let report = root.appendingPathComponent("selector-report.json")
         let parsed = ParsedArguments(
             projectPath: root.path,
             build: .init(scheme: "App", destination: "platform=iOS Simulator,name=iPhone 16", testTarget: "AppTests/One", noCache: true),
-            reporting: .init(quiet: true),
+            reporting: .init(output: report.path, quiet: true),
             cache: .init(
                 mode: .legacyBenchmark, buildCacheRoot: root.path,
                 invocationNonce: "ABCDEFGHIJKLMNOPQRSTUV", simulatorRegistration: registration.path,
@@ -123,6 +124,9 @@ struct SwiftMutationTestingExecutionPathTests {
         #expect(receipt.attemptOrdinal == 1)
         #expect(receipt.counters.fullBuilds == 1)
         #expect(receipt.counters.testWithoutBuildingRuns == 0)
+        let reportPayload = try JSONSerialization.jsonObject(with: Data(contentsOf: report)) as? [String: Any]
+        #expect(reportPayload?["schemaVersion"] as? String == "1")
+        #expect(reportPayload?["projectRoot"] as? String == root.resolvingSymlinksInPath().path)
     }
 
     @Test("A post-finish receipt failure preserves the idle shared simulator")

@@ -34,12 +34,57 @@ struct CommandLineParserTests {
             "--no-cache", "--target", "AppTests/One",
             "--build-cache-root", root, "--simulator-registration", registration,
             "--build-count-evidence-output", "/tmp/build-count.json",
+            "--output", root + "/reports/selector-report.json",
             "--run-ordinal", "7", "--attempt-ordinal", "1",
             "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
         ])
         #expect(legacy.cache.mode == .legacyBenchmark)
         #expect(legacy.cache.runOrdinal == 7)
         #expect(legacy.cache.attemptOrdinal == 1)
+        #expect(legacy.reporting.output == root + "/reports/selector-report.json")
+
+        #expect(throws: UsageError.self) {
+            _ = try parser.parse([
+                "run", "--scheme", "App", "--destination", "platform=iOS Simulator,name=iPhone 16",
+                "--no-cache", "--target", "AppTests/One",
+                "--build-cache-root", root, "--simulator-registration", registration,
+                "--build-count-evidence-output", "/tmp/build-count.json",
+                "--run-ordinal", "7", "--attempt-ordinal", "1",
+                "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
+            ])
+        }
+        #expect(throws: UsageError.self) {
+            _ = try parser.parse([
+                "run", "--scheme", "App", "--destination", "platform=iOS Simulator,name=iPhone 16",
+                "--no-cache", "--target", "AppTests/One",
+                "--build-cache-root", root, "--simulator-registration", registration,
+                "--build-count-evidence-output", "/tmp/build-count.json",
+                "--output", "/tmp/outside-selector-report.json",
+                "--run-ordinal", "7", "--attempt-ordinal", "1",
+                "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
+            ])
+        }
+        #expect(throws: UsageError.self) {
+            _ = try parser.parse([
+                "run", "--scheme", "App", "--destination", "platform=iOS Simulator,name=iPhone 16",
+                "--no-cache", "--target", "AppTests/One",
+                "--build-cache-root", root, "--simulator-registration", registration,
+                "--build-count-evidence-output", "/tmp/build-count.json", "--output", "selector-report.json",
+                "--run-ordinal", "7", "--attempt-ordinal", "1",
+                "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
+            ])
+        }
+        #expect(throws: UsageError.self) {
+            _ = try parser.parse([
+                "run", "--scheme", "App", "--destination", "platform=iOS Simulator,name=iPhone 16",
+                "--no-cache", "--target", "AppTests/One",
+                "--build-cache-root", root, "--simulator-registration", registration,
+                "--build-count-evidence-output", root + "/results/../build-count.json",
+                "--output", root + "/build-count.json",
+                "--run-ordinal", "7", "--attempt-ordinal", "1",
+                "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
+            ])
+        }
 
         #expect(throws: UsageError.self) {
             _ = try parser.parse([

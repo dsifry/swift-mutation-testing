@@ -451,6 +451,7 @@ struct CommandLineParser: Sendable {
             let root = flags.buildCacheRoot,
             let registration = flags.simulatorRegistration,
             let evidence = flags.buildCountEvidenceOutput,
+            let output = flags.output,
             let nonce = flags.invocationNonce,
             let guideLockFD = flags.guideLockFD, guideLockFD == 4,
             let wrapperLeaseFD = flags.wrapperLeaseFD, wrapperLeaseFD == 5,
@@ -464,12 +465,23 @@ struct CommandLineParser: Sendable {
             flags.testTarget != nil,
             flags.testEnumerationOutput == nil,
             flags.mutantInventoryOutput == nil,
-            flags.cacheEvidenceOutput == nil,
-            flags.output == nil
+            flags.cacheEvidenceOutput == nil
         else { throw UsageError(message: "legacy build-count mode has invalid or missing protocol options") }
         try validateAbsolutePath(root, flag: "--build-cache-root")
         try validateAbsolutePath(registration, flag: "--simulator-registration")
         try validateAbsolutePath(evidence, flag: "--build-count-evidence-output")
+        try validateAbsolutePath(output, flag: "--output")
+        let rootURL = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
+        let outputURL = URL(fileURLWithPath: output).standardizedFileURL
+        let safeOutputURL = outputURL.deletingLastPathComponent().resolvingSymlinksInPath()
+            .appendingPathComponent(outputURL.lastPathComponent)
+        guard safeOutputURL.path.hasPrefix(rootURL.path + "/") else {
+            throw UsageError(message: "--output must be beneath --build-cache-root")
+        }
+        try validateDistinctPaths([
+            ("--build-count-evidence-output", evidence),
+            ("--output", output),
+        ])
         try validateInvocationNonce(nonce)
         return .init(
             mode: .legacyBenchmark,
