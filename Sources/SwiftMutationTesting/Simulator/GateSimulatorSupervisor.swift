@@ -70,7 +70,7 @@ enum GateSimulatorSupervisor {
             .resolvingSymlinksInPath().standardizedFileURL == expected
     }
 
-    private static func deviceExists(
+    static func deviceExists(
         _ registration: GateSimulatorRegistration, manager: SimulatorManager
     ) async -> Bool {
         guard let result = try? await manager.launcher.launchCapturing(ProcessRequest(
@@ -78,10 +78,14 @@ enum GateSimulatorSupervisor {
             arguments: ["simctl", "--set", registration.deviceSetPath, "list", "devices", "--json"],
             environment: nil, additionalEnvironment: [:],
             workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 30)),
-            result.exitCode == 0
+            result.exitCode == 0,
+            let data = result.output.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let devices = object["devices"] as? [String: [[String: Any]]]
         else { return false }
-        return result.output.contains("\"udid\":\"\(registration.udid)\"")
-            || result.output.contains("\"udid\": \"\(registration.udid)\"")
+        return devices.values.flatMap({ $0 }).contains(where: {
+            $0["udid"] as? String == registration.udid
+        })
     }
 
     private static func cleanup(
