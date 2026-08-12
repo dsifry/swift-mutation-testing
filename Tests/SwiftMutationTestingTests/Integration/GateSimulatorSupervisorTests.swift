@@ -6,6 +6,38 @@ import Testing
 
 @Suite("Gate simulator custody supervisor")
 struct GateSimulatorSupervisorTests {
+    private static let registeredSimulator = GateSimulatorRegistration(
+        schemaVersion: 1, gateRunNonce: "GATEABCDEFGHIJKLMNOPQR",
+        guideLockInode: 1, deviceSetPath: "/tmp/gate-simulator-GATEABCDEFGHIJKLMNOPQR",
+        udid: "GATE-UDID", runtimeIdentifier: "runtime", deviceTypeIdentifier: "type",
+        generation: 1, state: .active, activeInvocationNonce: "INVOCATIONABCDEFGHIJKLMNOP")
+
+    @Test("Device lookup fails closed when the exact registered UDID is missing")
+    func missingRegisteredDeviceFailsClosed() async {
+        let manager = SimulatorManager(launcher: MockProcessLauncher(
+            exitCode: 0,
+            output: #"{"devices":{"runtime":[{"udid":"GATE-UDID-SUFFIX"}]}}"#))
+
+        #expect(await !GateSimulatorSupervisor.deviceExists(Self.registeredSimulator, manager: manager))
+    }
+
+    @Test("Device lookup fails closed when simctl returns malformed JSON")
+    func malformedDeviceListFailsClosed() async {
+        let manager = SimulatorManager(launcher: MockProcessLauncher(
+            exitCode: 0, output: #"{"devices":"#))
+
+        #expect(await !GateSimulatorSupervisor.deviceExists(Self.registeredSimulator, manager: manager))
+    }
+
+    @Test("Device lookup fails closed when simctl exits unsuccessfully")
+    func unsuccessfulDeviceListFailsClosed() async {
+        let manager = SimulatorManager(launcher: MockProcessLauncher(
+            exitCode: 1,
+            output: #"{"devices":{"runtime":[{"udid":"GATE-UDID"}]}}"#))
+
+        #expect(await !GateSimulatorSupervisor.deviceExists(Self.registeredSimulator, manager: manager))
+    }
+
     @Test("Engine kill helper")
     func engineKillHelper() throws {
         let environment = ProcessInfo.processInfo.environment
@@ -67,7 +99,18 @@ struct GateSimulatorSupervisorTests {
         if echo "$*" | grep -q ' delete '; then : > '\(deletedMarker.path)'; exit 0; fi
         if echo "$*" | grep -q 'list devices'; then
           if [ -f '\(deletedMarker.path)' ]; then echo '{"devices":{}}';
-          else echo '{"devices":{"runtime":[{"udid":"GATE-UDID"}]}}'; fi
+          else echo '{
+            "devices" : {
+              "com.apple.CoreSimulator.SimRuntime.iOS-26-0" : [
+                {
+                  "state" : "Booted",
+                  "isAvailable" : true,
+                  "name" : "SwiftMutationGate",
+                  "udid" : "GATE-UDID"
+                }
+              ]
+            }
+          }'; fi
           exit 0
         fi
         exit 0
