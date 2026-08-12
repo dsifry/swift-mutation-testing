@@ -52,8 +52,22 @@ A manually dispatched `release-candidate.yml` accepts `version` and
 required by the checksum-pinned `actions/attest` action used for provenance.
 It validates canonical `X.Y.Z` version syntax, resolves the commit through the
 GitHub API, records the dispatch-time `main` head as `main_anchor_commit`, and
-requires `source_commit` to be its ancestor. It then checks out that exact
-source commit with full history and requires post-checkout `HEAD` equality.
+requires `source_commit` to be its ancestor. It uses two separate immutable
+checkouts with no shared build or output paths:
+
+- a read-only **control tree** pinned to `workflow_commit`, which must equal the
+  dispatch trigger and immutable main-anchor commit, and from which every
+  checked-in verification, orchestration, workflow-contract, and packaging
+  script executes; and
+- a disposable **source tree** pinned to `source_commit` with full history,
+  used only for Swift tests, the one-time version injection, and compilation.
+
+Both trees require exact post-checkout `HEAD` equality before use. The control
+tree never executes release code from the source tree, even when the requested
+source is an older authenticated ancestor that does not contain the current
+release owners. The source tree cannot write into or replace the control tree;
+the control scripts receive its canonical path as data and constrain every
+source mutation and build output beneath that path.
 
 The job runs on `macos-26`, uses the full Xcode developer directory, performs no
 SwiftPM build-cache restore, and requires Xcode 26.6 build 17F113, Apple Swift
@@ -99,6 +113,11 @@ It then creates GitHub artifact attestations for the archive and manifest and
 uploads both as one immutable Actions artifact with 30-day retention. The
 workflow reports the Actions artifact ID and service-provided artifact digest.
 It does not create a tag or release.
+
+The Actions artifact name includes the run ID and attempt, while the public
+archive filename remains stable. Exact-attempt authority comes from the
+artifact object's workflow-run ID together with each attestation's Runner
+Invocation URI; the artifact REST object alone does not expose a run attempt.
 
 Each attestation is retained as a bundle and its predicate must carry the exact
 repository, workflow path/ref, workflow commit, event, and Runner Invocation URI
@@ -187,9 +206,9 @@ public, and in the final public-release assertion. Any change fails closed.
 ## Trust boundaries
 
 - **Trusted:** the reviewed source commit under the immutable main anchor;
-  repository-controlled
-  workflows on the default branch; the protected release environment and its
-  approver; GitHub Actions immutable artifact identity and attestations; the
+  release control code from the exact workflow-commit checkout;
+  repository-controlled workflows on the default branch; the protected release
+  environment and its approver; GitHub Actions immutable artifact identity and attestations; the
   `immutable-release-tags` ruleset; the GitHub-verified annotated tag; SHA-256
   comparisons performed by checked-in verification code.
 - **Untrusted until verified:** manual inputs, tag names, downloaded bytes,
@@ -259,7 +278,10 @@ Implementation proceeds in independently reviewable RED/GREEN batches:
    The verifier requires exact 100% line, branch, and function coverage.
 2. **Build-once candidate:** RED workflow-contract tests proving no candidate
    artifact can be uploaded before tests, version, archive, manifest, and
-   attestation checks; GREEN candidate workflow and build script. A fixture
+   attestation checks; GREEN candidate workflow and build script. Tests prove
+   an older allowed source commit cannot supply or replace control scripts,
+   that both checkout heads are exact, and that source writes/build outputs are
+   confined to the disposable source tree. A fixture
    records that the archive is created once and its digest is unchanged through
    upload/download verification.
 3. **Promotion:** RED tests for another repository/workflow/commit, failed or
