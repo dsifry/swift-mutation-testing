@@ -9,8 +9,10 @@ struct CommandLineParserTests {
     @Test("Gate simulator modes and benchmark evidence use the closed descriptor matrix")
     func gateSimulatorDescriptorMatrix() throws {
         let parser = CommandLineParser()
-        let root = "/tmp/swift-mutation-gate"
-        let registration = "/tmp/swift-mutation-gate-registration.json"
+        let temporaryRoot = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(temporaryRoot) }
+        let root = temporaryRoot.path.hasPrefix("/var/") ? "/private" + temporaryRoot.path : temporaryRoot.path
+        let registration = root + "/simulator-registration.json"
         let nonce = "ABCDEFGHIJKLMNOPQRSTUV"
 
         let prepare = try parser.parse([
@@ -49,6 +51,29 @@ struct CommandLineParserTests {
                 "--no-cache", "--target", "AppTests/One",
                 "--build-cache-root", root, "--simulator-registration", registration,
                 "--build-count-evidence-output", "/tmp/build-count.json",
+                "--run-ordinal", "7", "--attempt-ordinal", "1",
+                "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
+            ])
+        }
+        #expect(throws: UsageError.self) {
+            let missingRoot = root + "/missing-root"
+            _ = try parser.parse([
+                "run", "--scheme", "App", "--destination", "platform=iOS Simulator,name=iPhone 16",
+                "--no-cache", "--target", "AppTests/One",
+                "--build-cache-root", missingRoot,
+                "--simulator-registration", missingRoot + "/simulator-registration.json",
+                "--build-count-evidence-output", missingRoot + "/build-count.json",
+                "--output", missingRoot + "/selector-report.json",
+                "--run-ordinal", "7", "--attempt-ordinal", "1",
+                "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
+            ])
+        }
+        #expect(throws: UsageError.self) {
+            _ = try parser.parse([
+                "run", "--scheme", "App", "--destination", "platform=iOS Simulator,name=iPhone 16",
+                "--no-cache", "--target", "AppTests/One",
+                "--build-cache-root", root, "--simulator-registration", registration,
+                "--build-count-evidence-output", root + "/build-count.json", "--output", registration,
                 "--run-ordinal", "7", "--attempt-ordinal", "1",
                 "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
             ])

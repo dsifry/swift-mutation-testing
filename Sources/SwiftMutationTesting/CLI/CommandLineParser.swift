@@ -471,14 +471,23 @@ struct CommandLineParser: Sendable {
         try validateAbsolutePath(registration, flag: "--simulator-registration")
         try validateAbsolutePath(evidence, flag: "--build-count-evidence-output")
         try validateAbsolutePath(output, flag: "--output")
-        let rootURL = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
+        guard let rootURL = CachePathGuard.canonicalURL(URL(fileURLWithPath: root, isDirectory: true)) else {
+            throw UsageError(message: "--build-cache-root must be an existing canonical directory")
+        }
         let outputURL = URL(fileURLWithPath: output).standardizedFileURL
-        let safeOutputURL = outputURL.deletingLastPathComponent().resolvingSymlinksInPath()
-            .appendingPathComponent(outputURL.lastPathComponent)
-        guard safeOutputURL.path.hasPrefix(rootURL.path + "/") else {
+        var outputAncestor = outputURL.deletingLastPathComponent()
+        var outputSuffix = [outputURL.lastPathComponent]
+        while CachePathGuard.canonicalURL(outputAncestor) == nil, outputAncestor.path != "/" {
+            outputSuffix.insert(outputAncestor.lastPathComponent, at: 0)
+            outputAncestor.deleteLastPathComponent()
+        }
+        var safeOutputURL = CachePathGuard.canonicalURL(outputAncestor)!
+        for component in outputSuffix { safeOutputURL.appendPathComponent(component) }
+        guard CachePathGuard.isContained(safeOutputURL, in: rootURL), safeOutputURL != rootURL else {
             throw UsageError(message: "--output must be beneath --build-cache-root")
         }
         try validateDistinctPaths([
+            ("--simulator-registration", registration),
             ("--build-count-evidence-output", evidence),
             ("--output", output),
         ])
