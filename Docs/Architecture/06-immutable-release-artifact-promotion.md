@@ -47,11 +47,13 @@ Success means all of the following are mechanically verified:
 ### 1. Candidate build workflow
 
 A manually dispatched `release-candidate.yml` accepts `version` and
-`source_commit`. It has read-only repository permissions plus only the
-`id-token: write` and `attestations: write` permissions needed for provenance.
+`source_commit`. It has read-only repository permissions plus only
+`id-token: write`, `attestations: write`, and `artifact-metadata: write`, as
+required by the checksum-pinned `actions/attest` action used for provenance.
 It validates canonical `X.Y.Z` version syntax, resolves the commit through the
-GitHub API, and requires the commit to be reachable from current `main`. It then
-checks out that exact commit with full history.
+GitHub API, records the dispatch-time `main` head as `main_anchor_commit`, and
+requires `source_commit` to be its ancestor. It then checks out that exact
+source commit with full history and requires post-checkout `HEAD` equality.
 
 The job runs on `macos-26`, uses the full Xcode developer directory, performs no
 SwiftPM build-cache restore, and requires Xcode 26.6 build 17F113, Apple Swift
@@ -61,8 +63,11 @@ target. The compiler's observed build-host target triple
 or raise the Mach-O deployment minimum. This preserves the existing
 `-macos.tar.gz` arm64 artifact produced by the current `macos-26` workflow and
 the source-build path for other architectures. It also records the runner
-image, workflow identity, workflow commit, dispatch trigger commit, run ID, and
-run attempt. A toolchain or deployment policy change therefore requires a
+image, workflow identity, workflow commit, dispatch trigger/main-anchor commit,
+run ID, and run attempt. For this non-reusable default-branch workflow,
+`workflow_commit`, `dispatch_trigger_commit`, and `main_anchor_commit` must be
+equal; `source_commit` may be that commit or an authenticated ancestor. A
+toolchain or deployment policy change therefore requires a
 reviewed design update rather than silently producing another candidate.
 
 The full focused coverage and exact-union suite replay run against the unchanged
@@ -80,7 +85,8 @@ Packaging occurs once. The archive has the existing public filename
 its root. A closed `release-candidate-v1.json` manifest records:
 
 - schema version, repository, workflow path/ref, workflow commit, dispatch
-  trigger commit, run ID, run attempt, and Actions artifact name;
+  trigger commit, immutable main-anchor commit, run ID, run attempt, and Actions
+  artifact name;
 - source commit, version, tag, and exact version output;
 - runner image/architecture, Xcode version/build, Swift version, compiler target,
   Mach-O CPU type, and deployment minimum;
@@ -94,6 +100,12 @@ uploads both as one immutable Actions artifact with 30-day retention. The
 workflow reports the Actions artifact ID and service-provided artifact digest.
 It does not create a tag or release.
 
+Each attestation is retained as a bundle and its predicate must carry the exact
+repository, workflow path/ref, workflow commit, event, and Runner Invocation URI
+ending in `/actions/runs/{run_id}/attempts/{run_attempt}`. The checked-in
+verifier parses these fields directly; matching only subject digests or the
+artifact REST object's run ID is insufficient.
+
 ### 2. Guide proof consumption
 
 The Guide-side candidate fetch is given the candidate workflow run ID, run
@@ -102,9 +114,13 @@ using any bytes, it verifies through GitHub APIs that the run belongs to this
 repository, used the candidate workflow from the default branch, was manually
 dispatched, completed successfully, and has the manifest's dispatch trigger
 commit and run attempt. The manifest's separate workflow commit must equal the
-trusted default-branch revision of the candidate workflow. The separate source
-commit is authenticated by the workflow's recorded ancestry check and exact
-post-checkout `HEAD`; it is not compared to the workflow run's `head_sha`. The
+attestation-authenticated revision of the candidate workflow at candidate
+creation, not the later moving branch tip. The consumer fetches the immutable
+main-anchor and source commits and independently repeats the ancestry check.
+The separate source commit is authenticated by that check and exact
+post-checkout `HEAD`; it is not compared to the workflow run's `head_sha`. Both
+archive and manifest attestation Runner Invocation URIs must match the supplied
+run ID and attempt. The
 consumer requires the requested artifact ID/name to belong to that exact run
 attempt. It downloads that artifact without following an
 operator-supplied URL and verifies both GitHub attestations.
@@ -116,8 +132,8 @@ and path, file type, link count, mode, size, digest, version output, Mach-O UUID
 and signature are revalidated afterward.
 
 The Guide release-candidate descriptor advances to a closed schema that binds
-the source commit, workflow commit, dispatch trigger commit, candidate workflow
-run/attempt and artifact ID/name, candidate
+the source commit, workflow commit, dispatch trigger/main-anchor commit,
+candidate workflow run/attempt and artifact ID/name, candidate
 manifest SHA-256, archive SHA-256, executable SHA-256, version output, and
 capability. The cold/warm proof receipt binds that descriptor digest. Copying the
 executable without its authenticated manifest is not a valid candidate.
@@ -129,15 +145,22 @@ pushes no longer build or publish. Inputs are the canonical version, candidate
 workflow run ID, run attempt, artifact ID/name, candidate manifest SHA-256,
 archive SHA-256, and executable SHA-256 copied from the accepted Guide proof.
 
-Promotion has `actions: read`, `contents: write`, `attestations: read`, and
-`id-token: write` permissions. It downloads the candidate artifact from this
+Promotion has `actions: read`, `contents: write`, and `attestations: read`
+permissions; it creates no new identity or attestation and therefore has no
+`id-token: write`. The job declares `environment: release-production` and uses
+the concurrency group `release-${canonical_tag}` with cancellation disabled.
+The repository environment must require one maintainer approval and prevent the
+workflow initiator from self-approving. It downloads the candidate artifact from this
 repository and repeats all run-provenance, attestation, manifest, archive, and
 executable checks. It additionally requires:
 
 - `refs/tags/vX.Y.Z` already exists and resolves to an annotated tag object;
 - the GitHub Git Tags API reports the tag signature as verified with reason
   `valid`;
-- the tag's peeled commit equals the manifest source commit;
+- the tag object's direct target has type `commit` and equals the manifest
+  source commit; tag-to-tag chains are rejected;
+- an active repository ruleset named `immutable-release-tags` targets
+  `refs/tags/v*`, restricts updates and deletions, and has no bypass actors;
 - the candidate version, manifest digest, archive digest, and binary digest
   equal the explicit promotion inputs;
 - no public release exists for the tag and no public asset with the release
@@ -156,13 +179,19 @@ asset. The final workflow assertion downloads the public archive and requires
 its SHA-256 and extracted executable SHA-256 to equal the manifest and Guide
 proof inputs.
 
+The workflow records the tag ref SHA, annotated tag object SHA, signature state,
+direct target type, and target commit. It re-reads and requires that exact tuple
+immediately before draft asset upload, immediately before changing the draft to
+public, and in the final public-release assertion. Any change fails closed.
+
 ## Trust boundaries
 
-- **Trusted:** the reviewed source commit on `main`; repository-controlled
+- **Trusted:** the reviewed source commit under the immutable main anchor;
+  repository-controlled
   workflows on the default branch; the protected release environment and its
   approver; GitHub Actions immutable artifact identity and attestations; the
-  GitHub-verified annotated tag; SHA-256 comparisons performed by checked-in
-  verification code.
+  `immutable-release-tags` ruleset; the GitHub-verified annotated tag; SHA-256
+  comparisons performed by checked-in verification code.
 - **Untrusted until verified:** manual inputs, tag names, downloaded bytes,
   archive metadata, manifest JSON, workflow-run IDs, draft assets, cache state,
   filenames, and command output.
@@ -202,6 +231,9 @@ The implementation is limited to:
   overlap;
 - fixture-driven tests for those scripts and static workflow-contract tests;
 - documentation of the operator commands and evidence handoff;
+- one documented repository setup step for the `release-production` protected
+  environment and no-bypass `immutable-release-tags` ruleset, plus API preflight
+  checks that reject missing or weaker settings;
 - the corresponding closed Guide candidate descriptor and verifier update.
 
 No compiler, linker, mutation engine, cache protocol, Homebrew, or general CI
@@ -232,9 +264,11 @@ Implementation proceeds in independently reviewable RED/GREEN batches:
    upload/download verification.
 3. **Promotion:** RED tests for another repository/workflow/commit, failed or
    expired run, unverifiable/lightweight/wrong-target tag, input mismatch,
-   missing attestation, public collision, mismatched draft, and any build or
-   repackaging command; GREEN promotion-only workflow. A success fixture proves
-   the published archive bytes are the downloaded candidate bytes.
+   another run attempt's invocation URI, missing attestation, absent/weak tag
+   ruleset, tag substitution at each revalidation point, concurrent dispatch,
+   missing protected environment, public collision, mismatched draft, and any
+   build or repackaging command; GREEN promotion-only workflow. A success fixture
+   proves the published archive bytes are the downloaded candidate bytes.
 4. **Failure recovery:** RED/GREEN tests for no-artifact candidate failure,
    pre-draft promotion failure, exact draft retry, mismatched draft refusal, and
    post-public verification failure reporting.
