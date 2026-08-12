@@ -19,9 +19,9 @@ import {
 const execFile = promisify(execFileCallback);
 const CLI_KEYS = Object.freeze([
   'version', 'repository', 'run-id', 'run-attempt', 'artifact-id', 'artifact-name',
-  'source-commit', 'manifest-sha256', 'archive-sha256', 'executable-sha256',
+  'source-commit', 'candidate-workflow-commit', 'manifest-sha256', 'archive-sha256', 'executable-sha256',
   'candidate-descriptor-sha256', 'control-commit', 'guide-commit', 'guide-proof-sha256',
-  'control-root', 'source-root', 'work-root',
+  'control-root', 'candidate-control-root', 'source-root', 'work-root',
 ]);
 
 function promotionFail(message) {
@@ -109,6 +109,7 @@ function parseAttestationFile(bytes) {
 export function createNativeGitHubAdapter({
   token,
   controlRoot,
+  candidateControlRoot,
   sourceRoot,
   workRoot,
   input,
@@ -120,7 +121,7 @@ export function createNativeGitHubAdapter({
   rmImpl = rm,
 } = {}) {
   if (typeof token !== 'string' || token.length === 0) promotionFail('GH_TOKEN authentication is required');
-  if (![controlRoot, sourceRoot, workRoot].every((root) => typeof root === 'string' && path.isAbsolute(root))) {
+  if (![controlRoot, candidateControlRoot, sourceRoot, workRoot].every((root) => typeof root === 'string' && path.isAbsolute(root))) {
     promotionFail('native GitHub adapter roots must be absolute');
   }
   const ghEnvironment = { ...process.env, GH_TOKEN: token };
@@ -154,7 +155,7 @@ export function createNativeGitHubAdapter({
       archiveBytes: await readFileImpl(archivePath),
       manifestBytes: await readFileImpl(manifestPath),
       verificationInput: createNativeCandidateVerificationInput({
-        controlRoot,
+        controlRoot: candidateControlRoot,
         sourceRoot,
         artifactRoot,
         archivePath,
@@ -379,7 +380,7 @@ function parseCliArguments(argv) {
     values[key] = value;
   }
   if (CLI_KEYS.some((key) => !Object.hasOwn(values, key))) promotionFail('usage: exact promotion inputs are required');
-  for (const key of ['control-root', 'source-root', 'work-root']) {
+  for (const key of ['control-root', 'candidate-control-root', 'source-root', 'work-root']) {
     if (!path.isAbsolute(values[key])) promotionFail(`${key} must be an absolute path`);
   }
   const parseInteger = (key) => {
@@ -397,6 +398,7 @@ function parseCliArguments(argv) {
       artifactId: parseInteger('artifact-id'),
       artifactName: values['artifact-name'],
       sourceCommit: values['source-commit'],
+      candidateWorkflowCommit: values['candidate-workflow-commit'],
       manifestSHA256: values['manifest-sha256'],
       archiveSHA256: values['archive-sha256'],
       executableSHA256: values['executable-sha256'],
@@ -405,7 +407,7 @@ function parseCliArguments(argv) {
       guideCommit: values['guide-commit'],
       guideProofSHA256: values['guide-proof-sha256'],
     },
-    roots: { controlRoot: values['control-root'], sourceRoot: values['source-root'], workRoot: values['work-root'] },
+    roots: { controlRoot: values['control-root'], candidateControlRoot: values['candidate-control-root'], sourceRoot: values['source-root'], workRoot: values['work-root'] },
   };
 }
 

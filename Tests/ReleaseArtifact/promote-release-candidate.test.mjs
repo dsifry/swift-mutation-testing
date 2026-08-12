@@ -29,6 +29,7 @@ const commit = candidate.sourceCommit;
 const controlCommit = 'e'.repeat(40);
 const guideCommit = 'b'.repeat(40);
 const candidateDescriptorSHA256 = 'f'.repeat(64);
+const candidateWorkflowCommit = candidate.workflow.commit;
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -78,6 +79,7 @@ function promotionInput(overrides = {}) {
     artifactId: 444,
     artifactName: candidate.artifactName,
     sourceCommit: commit,
+    candidateWorkflowCommit,
     manifestSHA256,
     archiveSHA256,
     executableSHA256,
@@ -155,7 +157,7 @@ function expectedAssets() {
 function candidateVerificationInput(overrides = {}) {
   const records = [];
   const input = {
-    controlRoot: '/control',
+    controlRoot: '/candidate-control',
     sourceRoot: '/source',
     artifactRoot: '/candidate',
     archivePath: `/candidate/${candidate.archive.filename}`,
@@ -436,12 +438,14 @@ function validCliArguments() {
     '--version', '1.3.1', '--repository', candidate.repository,
     '--run-id', String(candidate.run.id), '--run-attempt', String(candidate.run.attempt),
     '--artifact-id', '444', '--artifact-name', candidate.artifactName,
-    '--source-commit', commit, '--manifest-sha256', manifestSHA256,
+    '--source-commit', commit, '--candidate-workflow-commit', candidateWorkflowCommit,
+    '--manifest-sha256', manifestSHA256,
     '--archive-sha256', archiveSHA256, '--executable-sha256', executableSHA256,
     '--candidate-descriptor-sha256', candidateDescriptorSHA256,
     '--control-commit', controlCommit, '--guide-commit', guideCommit,
     '--guide-proof-sha256', sha256(proofBytes()),
-    '--control-root', '/control', '--source-root', '/source', '--work-root', '/work',
+    '--control-root', '/control', '--candidate-control-root', '/candidate-control',
+    '--source-root', '/source', '--work-root', '/work',
   ];
 }
 
@@ -460,6 +464,7 @@ test('CLI parses the exact proof-bound inputs and executes promotion with GH_TOK
   assert.deepEqual(observed.input, promotionInput());
   assert.equal(observed.github.options.token, 'secret');
   assert.equal(observed.github.options.controlRoot, '/control');
+  assert.equal(observed.github.options.candidateControlRoot, '/candidate-control');
   assert.deepEqual(output, ['{"mutations":["publish-existing-draft"]}\n']);
 });
 
@@ -470,4 +475,50 @@ test('CLI fails closed for absent auth or any missing, duplicate, or unknown inp
   await assert.rejects(() => promotionOwner.runCli(valid.slice(2), dependencies), /usage|input/i);
   await assert.rejects(() => promotionOwner.runCli([...valid, '--version', '1.3.1'], dependencies), /usage|duplicate/i);
   await assert.rejects(() => promotionOwner.runCli([...valid, '--unknown', 'value'], dependencies), /usage|unknown/i);
+});
+
+test('native adapter authenticates distinct promotion and candidate control checkouts', async () => {
+  const heads = [];
+  const files = new Map([
+    ['/control/Docs/ReleaseEvidence/v1.3.1-guide-proof.json', proofBytes()],
+    [`/work/candidate/${candidate.archive.filename}`, archiveBytes],
+    ['/work/candidate/release-candidate-v1.json', manifestBytes],
+    ['/work/candidate/archive-attestation-bundle-v1.jsonl', Buffer.from(`${JSON.stringify(attestation(candidate.archive.filename, archiveSHA256))}\n`)],
+    ['/work/candidate/manifest-attestation-bundle-v1.jsonl', Buffer.from(`${JSON.stringify(attestation('release-candidate-v1.json', manifestSHA256))}\n`)],
+  ]);
+  const api = new Map([
+    [`repos/${candidate.repository}/actions/runs/${candidate.run.id}`, { repository: { full_name: candidate.repository }, path: candidate.workflow.path, head_branch: 'main', head_sha: candidateWorkflowCommit, event: 'workflow_dispatch', status: 'completed', conclusion: 'success', run_attempt: candidate.run.attempt }],
+    [`repos/${candidate.repository}/actions/artifacts/444`, { id: 444, name: candidate.artifactName, workflow_run: { id: candidate.run.id }, expired: false, deleted_at: null }],
+    [`repos/${candidate.repository}/git/ref/tags/v1.3.1`, { ref: 'refs/tags/v1.3.1', object: { sha: 'c'.repeat(40) } }],
+    [`repos/${candidate.repository}/git/tags/${'c'.repeat(40)}`, state().tagTuple.tag],
+    [`repos/${candidate.repository}/rulesets`, [{ name: 'immutable-release-tags', enforcement: 'active', conditions: { ref_name: { include: ['refs/tags/v*'] } }, rules: [{ type: 'update' }, { type: 'deletion' }], bypass_actors: [] }]],
+    [`repos/${candidate.repository}/environments/release-production`, { name: 'release-production', protection_rules: [{ type: 'required_reviewers', prevent_self_review: true, reviewers: [{}] }] }],
+  ]);
+  const adapter = promotionOwner.createNativeGitHubAdapter({
+    token: 'secret', input: promotionInput(), controlRoot: '/control', candidateControlRoot: '/candidate-control', sourceRoot: '/source', workRoot: '/work',
+    runCommand: async (executable, argv, options = {}) => {
+      if (executable === 'git' && argv[0] === 'rev-parse') {
+        heads.push(options.cwd);
+        if (options.cwd === '/control') return `${controlCommit}\n`;
+        if (options.cwd === '/candidate-control') return `${candidateWorkflowCommit}\n`;
+        if (options.cwd === '/source') return `${commit}\n`;
+      }
+      if (executable === 'git' && argv[0] === 'merge-base') return '';
+      if (executable === 'gh') {
+        const endpoint = argv[1];
+        if (endpoint.endsWith('/zip')) return Buffer.from('zip');
+        if (endpoint.includes('/releases/tags/')) throw Object.assign(new Error('404 Not Found'), { stderr: '404' });
+        return JSON.stringify(api.get(endpoint));
+      }
+      if (executable === 'unzip') return '';
+      throw new Error(`unexpected command ${executable} ${argv.join(' ')}`);
+    },
+    readFileImpl: async (filePath) => files.get(filePath),
+    writeFileImpl: async () => {}, mkdirImpl: async () => {}, chmodImpl: async () => {}, rmImpl: async () => {},
+  });
+  const githubState = await adapter.readState();
+  assert.equal(githubState.controlHead, controlCommit);
+  const downloaded = await adapter.downloadCandidate();
+  assert.equal(await downloaded.verificationInput.git.controlHead(downloaded.verificationInput.controlRoot), candidateWorkflowCommit);
+  assert.deepEqual(heads, ['/control', '/candidate-control']);
 });

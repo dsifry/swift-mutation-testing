@@ -462,7 +462,8 @@ function assertPromotionInput(input) {
     && Number.isSafeInteger(input.artifactId) && input.artifactId > 0,
   'input run or artifact identity is invalid');
   requirePromotion(typeof input.artifactName === 'string' && input.artifactName.length > 0, 'input artifact name is invalid');
-  requirePromotion(COMMIT.test(input.sourceCommit) && COMMIT.test(input.controlCommit) && COMMIT.test(input.guideCommit), 'input commit is invalid');
+  requirePromotion(COMMIT.test(input.sourceCommit) && COMMIT.test(input.candidateWorkflowCommit)
+    && COMMIT.test(input.controlCommit) && COMMIT.test(input.guideCommit), 'input commit is invalid');
   for (const key of ['manifestSHA256', 'archiveSHA256', 'executableSHA256', 'candidateDescriptorSHA256', 'guideProofSHA256']) {
     requirePromotion(SHA256.test(input[key]), `input ${key} is invalid`);
   }
@@ -497,6 +498,7 @@ export function verifyPromotionAuthority(input, githubState) {
   const manifest = parseCandidateManifest(githubState.manifestBytes);
   requirePromotion(sha256(githubState.manifestBytes) === input.manifestSHA256, 'candidate manifest digest does not match input');
   requirePromotion(manifest.repository === input.repository
+    && manifest.workflow.commit === input.candidateWorkflowCommit
     && manifest.workflow.commit === githubState.run?.headSha
     && manifest.sourceCommit === input.sourceCommit
     && manifest.run.id === input.runId
