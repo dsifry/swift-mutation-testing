@@ -5,6 +5,7 @@ import test from 'node:test';
 
 const repositoryRoot = path.resolve(import.meta.dirname, '..', '..');
 const candidateWorkflow = path.join(repositoryRoot, '.github', 'workflows', 'release-candidate.yml');
+const releaseWorkflow = path.join(repositoryRoot, '.github', 'workflows', 'release.yml');
 
 function assertBefore(workflow, first, second) {
   const firstIndex = workflow.indexOf(first);
@@ -92,4 +93,70 @@ test('workflow contract rejects checked-in owners outside the control tree', asy
   assert.throws(() => assertOnlyControlTreeOwnersExecute(sourceOwner), /control tree/u);
   assert.throws(() => assertOnlyControlTreeOwnersExecute(repositoryOwner), /control tree/u);
   assert.throws(() => assertOnlyControlTreeOwnersExecute(relativeOwner), /control tree/u);
+});
+
+test('release workflow is protected manual promotion of proof-bound candidate bytes only', async () => {
+  const workflow = await readFile(releaseWorkflow, 'utf8');
+
+  assert.match(workflow, /^name: Promote release candidate$/mu);
+  assert.match(workflow, /^on:\n  workflow_dispatch:\n    inputs:/mu);
+  assert.doesNotMatch(workflow, /^\s{2}(?:push|pull_request|schedule|workflow_run|release):/mu);
+
+  const requiredInputs = [
+    ['version', 'string'],
+    ['canonical_tag', 'string'],
+    ['candidate_run_id', 'number'],
+    ['candidate_run_attempt', 'number'],
+    ['candidate_artifact_id', 'number'],
+    ['candidate_artifact_name', 'string'],
+    ['source_commit', 'string'],
+    ['manifest_sha256', 'string'],
+    ['archive_sha256', 'string'],
+    ['executable_sha256', 'string'],
+    ['candidate_descriptor_sha256', 'string'],
+    ['proof_commit', 'string'],
+    ['guide_commit', 'string'],
+    ['guide_proof_sha256', 'string'],
+  ];
+  for (const [name, type] of requiredInputs) {
+    assert.match(workflow, new RegExp(`^      ${name}:\\n        description: [^\\n]+\\n        required: true\\n        type: ${type}$`, 'mu'));
+  }
+
+  assert.match(workflow, /^permissions:\n  actions: read\n  contents: write\n  attestations: read$/mu);
+  assert.doesNotMatch(workflow, /id-token:/u);
+  assert.match(workflow, /^concurrency:\n  group: release-\$\{\{ inputs\.canonical_tag \}\}\n  cancel-in-progress: false$/mu);
+  assert.match(workflow, /^    environment: release-production$/mu);
+
+  const actionUses = [...workflow.matchAll(/^\s*-?\s*uses:\s+([^\s@]+)@([^\s#]+)(?:\s+#.*)?$/gmu)];
+  assert.equal(actionUses.length, 3, 'promotion workflow needs only control/source checkouts and Node provisioning actions');
+  for (const [, action, revision] of actionUses) {
+    assert.match(revision, /^[0-9a-f]{40}$/u, `${action} must be pinned to a full commit SHA`);
+  }
+  assert.match(workflow, /^        uses: actions\/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4\.4\.0$/mu);
+  assert.match(workflow, /^          node-version: '22'$/mu);
+  assert.match(workflow, /^        uses: actions\/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5\.1\.0$/mu);
+  assert.match(workflow, /^          ref: \$\{\{ inputs\.proof_commit \}\}$/mu);
+  assert.match(workflow, /^          path: \$\{\{ github\.workspace \}\}\/control$/mu);
+  assert.match(workflow, /^          ref: \$\{\{ inputs\.source_commit \}\}$/mu);
+  assert.match(workflow, /^          path: \$\{\{ github\.workspace \}\}\/source$/mu);
+  assert.equal((workflow.match(/uses: actions\/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5\.1\.0/gmu) ?? []).length, 2);
+  assert.match(workflow, /^          persist-credentials: false$/mu);
+
+  assertBefore(workflow, 'Validate canonical promotion inputs', 'Preflight protected repository controls');
+  assertBefore(workflow, 'Preflight protected repository controls', 'Checkout proof-bearing control tree');
+  assertBefore(workflow, 'Checkout proof-bearing control tree', 'Verify proof checkout and bytes');
+  assertBefore(workflow, 'Verify proof checkout and bytes', 'Promote exact candidate bytes');
+  assert.match(workflow, /repos\/\$GITHUB_REPOSITORY\/actions\/runs\/\$CANDIDATE_RUN_ID/u);
+  assert.match(workflow, /repos\/\$GITHUB_REPOSITORY\/actions\/artifacts\/\$CANDIDATE_ARTIFACT_ID/u);
+  assert.match(workflow, /immutable-release-tags/u);
+  assert.match(workflow, /release-production/u);
+  assert.match(workflow, /test "\$\(git -C "\$\{\{ github\.workspace \}\}\/control" rev-parse HEAD\)" = "\$PROOF_COMMIT"/u);
+  assert.match(workflow, /shasum -a 256 "\$\{\{ github\.workspace \}\}\/control\/Docs\/ReleaseEvidence\/v1\.3\.1-guide-proof\.json"/u);
+  assert.match(workflow, /test "\$OBSERVED_PROOF_SHA256" = "\$GUIDE_PROOF_SHA256"/u);
+  assert.match(workflow, /node "\$\{\{ github\.workspace \}\}\/control\/scripts\/promote-release-candidate\.mjs"/u);
+  assert.match(workflow, /--artifact-id "\$CANDIDATE_ARTIFACT_ID"/u);
+  assert.match(workflow, /--control-commit "\$PROOF_COMMIT"/u);
+  assert.match(workflow, /--guide-proof-sha256 "\$GUIDE_PROOF_SHA256"/u);
+
+  assert.doesNotMatch(workflow, /swift\s+build|xcodebuild|tar\s+-c|gzip|zip\s|actions\/cache|\bcache:|git\s+tag|gh\s+(?:api\s+[^\n]*git\/refs|release\s+(?:create|upload))|--clobber/u);
 });
