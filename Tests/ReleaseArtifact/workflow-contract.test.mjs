@@ -22,11 +22,12 @@ function assertAllActionsAreCommitPinned(workflow) {
   }
 }
 
-function assertOnlyControlTreeScriptsExecute(workflow) {
-  const scripts = [...workflow.matchAll(/\bnode\s+"(\$\{\{ github\.workspace \}\}\/control\/scripts\/[a-z0-9-]+\.mjs)"/gmu)];
-  assert.ok(scripts.length >= 2, 'candidate workflow must execute its build and verification owners');
-  for (const [, script] of scripts) {
-    assert.match(script, /^\$\{\{ github\.workspace \}\}\/control\/scripts\/[a-z0-9-]+\.mjs$/u, `script must execute from the control tree: ${script}`);
+function assertOnlyControlTreeOwnersExecute(workflow) {
+  const owners = [...workflow.matchAll(/\b(?:node|bash|sh)\s+(?:"([^"\n]+)"|'([^'\n]+)'|([^\s\n]+))/gmu)]
+    .map(([, doubleQuoted, singleQuoted, bare]) => doubleQuoted ?? singleQuoted ?? bare);
+  assert.ok(owners.length >= 4, 'candidate workflow must execute its reviewed source gates, build, and verification owners');
+  for (const owner of owners) {
+    assert.match(owner, /^\$\{\{ github\.workspace \}\}\/control\/scripts\/[a-z0-9-]+\.(?:mjs|sh)$/u, `checked-in owner must execute from the control tree: ${owner}`);
   }
 }
 
@@ -59,9 +60,10 @@ test('release candidate workflow preserves immutable candidate authority and cus
   assert.match(workflow, /test "\$\(git -C "\$\{\{ github\.workspace \}\}\/control" rev-parse HEAD\)" = "\$WORKFLOW_COMMIT"/u);
   assert.match(workflow, /test "\$\(git -C "\$\{\{ github\.workspace \}\}\/source" rev-parse HEAD\)" = "\$SOURCE_COMMIT"/u);
   assert.match(workflow, /swift-mutation-testing-v\$\{VERSION\}-candidate-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/u);
-  assertOnlyControlTreeScriptsExecute(workflow);
+  assertOnlyControlTreeOwnersExecute(workflow);
 
   assertBefore(workflow, 'Validate source ancestry', 'Build candidate once');
+  assertBefore(workflow, 'Test reviewed source', 'Build candidate once');
   assertBefore(workflow, 'Build candidate once', 'Attest candidate');
   assertBefore(workflow, 'Attest candidate', 'Upload immutable candidate');
   assert.doesNotMatch(workflow, /gh release|create-release|tags:/u);
@@ -70,4 +72,24 @@ test('release candidate workflow preserves immutable candidate authority and cus
     assert.match(workflow, new RegExp(`^\\s*echo "${summaryValue}: .+"$`, 'mu'));
   }
   assert.match(workflow, /^          \} >> "\$GITHUB_STEP_SUMMARY"$/mu);
+});
+
+test('workflow contract rejects checked-in owners outside the control tree', async () => {
+  const workflow = await readFile(candidateWorkflow, 'utf8');
+  const sourceOwner = workflow.replace(
+    'node "${{ github.workspace }}/control/scripts/build-release-candidate.mjs"',
+    'node "${{ github.workspace }}/source/scripts/build-release-candidate.mjs"',
+  );
+  const repositoryOwner = workflow.replace(
+    'node "${{ github.workspace }}/control/scripts/build-release-candidate.mjs"',
+    'node "${{ github.workspace }}/scripts/build-release-candidate.mjs"',
+  );
+  const relativeOwner = workflow.replace(
+    'node "${{ github.workspace }}/control/scripts/build-release-candidate.mjs"',
+    'node scripts/build-release-candidate.mjs',
+  );
+
+  assert.throws(() => assertOnlyControlTreeOwnersExecute(sourceOwner), /control tree/u);
+  assert.throws(() => assertOnlyControlTreeOwnersExecute(repositoryOwner), /control tree/u);
+  assert.throws(() => assertOnlyControlTreeOwnersExecute(relativeOwner), /control tree/u);
 });

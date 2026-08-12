@@ -82,6 +82,12 @@ jobs:
           test "$(git -C "${{ github.workspace }}/source" rev-parse HEAD)" = "$SOURCE_COMMIT"
           git -C "${{ github.workspace }}/control" merge-base --is-ancestor "$SOURCE_COMMIT" "$WORKFLOW_COMMIT"
 
+      - name: Test reviewed source
+        run: |
+          set -euo pipefail
+          bash "${{ github.workspace }}/control/scripts/check-focused-coverage.sh" --package-path "${{ github.workspace }}/source"
+          node "${{ github.workspace }}/control/scripts/check-exact-test-replay.mjs" --package-path "${{ github.workspace }}/source"
+
       - name: Build candidate once
         id: build
         env:
