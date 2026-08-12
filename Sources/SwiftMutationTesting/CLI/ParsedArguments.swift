@@ -31,9 +31,12 @@ struct ParsedArguments: Sendable {
     struct CacheOptions: Sendable {
         enum Mode: Sendable {
             case legacy
+            case legacyBenchmark
             case prepare
             case target
             case recover
+            case simulatorPrepare
+            case simulatorCleanup
         }
 
         init(
@@ -46,7 +49,13 @@ struct ParsedArguments: Sendable {
             mutantSelectionManifest: String? = nil,
             evidenceOutput: String? = nil,
             custodyFD: Int? = nil,
-            invocationNonce: String? = nil
+            invocationNonce: String? = nil,
+            simulatorRegistration: String? = nil,
+            buildCountEvidenceOutput: String? = nil,
+            guideLockFD: Int? = nil,
+            wrapperLeaseFD: Int? = nil,
+            runOrdinal: Int? = nil,
+            attemptOrdinal: Int? = nil
         ) {
             self.mode = mode
             self.buildCacheRoot = buildCacheRoot
@@ -58,6 +67,12 @@ struct ParsedArguments: Sendable {
             self.evidenceOutput = evidenceOutput
             self.custodyFD = custodyFD
             self.invocationNonce = invocationNonce
+            self.simulatorRegistration = simulatorRegistration
+            self.buildCountEvidenceOutput = buildCountEvidenceOutput
+            self.guideLockFD = guideLockFD
+            self.wrapperLeaseFD = wrapperLeaseFD
+            self.runOrdinal = runOrdinal
+            self.attemptOrdinal = attemptOrdinal
         }
 
         var mode: Mode
@@ -70,6 +85,12 @@ struct ParsedArguments: Sendable {
         var evidenceOutput: String?
         var custodyFD: Int?
         var invocationNonce: String?
+        var simulatorRegistration: String?
+        var buildCountEvidenceOutput: String?
+        var guideLockFD: Int?
+        var wrapperLeaseFD: Int?
+        var runOrdinal: Int?
+        var attemptOrdinal: Int?
     }
 
     struct BuildOptions: Sendable {

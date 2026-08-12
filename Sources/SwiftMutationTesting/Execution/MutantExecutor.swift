@@ -2,13 +2,19 @@ import Foundation
 
 struct MutantExecutor: Sendable {
 
-    init(configuration: RunnerConfiguration, launcher: any ProcessLaunching) {
+    init(
+        configuration: RunnerConfiguration,
+        launcher: any ProcessLaunching,
+        registeredSimulatorUDID: String? = nil
+    ) {
         self.configuration = configuration
         self.launcher = launcher
+        self.registeredSimulatorUDID = registeredSimulatorUDID
     }
 
     private let configuration: RunnerConfiguration
     private let launcher: any ProcessLaunching
+    private let registeredSimulatorUDID: String?
 
     private struct MutantRunContext {
         let deps: ExecutionDeps
@@ -535,6 +541,14 @@ struct MutantExecutor: Sendable {
             return SimulatorPool(
                 baseUDID: nil, size: configuration.build.concurrency,
                 destination: destination, launcher: launcher
+            )
+        }
+
+        if let registeredSimulatorUDID {
+            return SimulatorPool(
+                registeredUDID: registeredSimulatorUDID,
+                destination: destination,
+                launcher: launcher
             )
         }
 

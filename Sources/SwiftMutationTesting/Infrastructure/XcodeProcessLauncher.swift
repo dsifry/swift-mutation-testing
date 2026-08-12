@@ -1,5 +1,12 @@
 import Foundation
 
+protocol XcodeCustodyPreservingLauncher {
+    var supportsXcodeCustody: Bool { get }
+    func applyingXcodeCustody(
+        _ custody: ProcessCustody?, captureRoot: URL?
+    ) -> any ProcessLaunching
+}
+
 struct XcodeProcessLauncher: Sendable, ProcessLaunching {
     init(custody: ProcessCustody? = nil, captureRoot: URL? = nil) {
         self.custody = custody
@@ -41,6 +48,58 @@ struct XcodeProcessLauncher: Sendable, ProcessLaunching {
             timeoutDidFinish: { escalation.cancel(pid: $0) },
             captureRoot: captureRoot
         )
+    }
+}
+
+extension XcodeProcessLauncher: XcodeCustodyPreservingLauncher {
+    var supportsXcodeCustody: Bool { true }
+
+    func applyingXcodeCustody(
+        _ custody: ProcessCustody?, captureRoot: URL?
+    ) -> any ProcessLaunching {
+        XcodeProcessLauncher(custody: custody, captureRoot: captureRoot)
+    }
+}
+
+struct SimulatorDeviceSetLauncher: Sendable, ProcessLaunching {
+    let base: any ProcessLaunching
+    let deviceSetPath: String
+
+    func launch(
+        executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
+    ) async throws -> Int32 {
+        try await base.launch(
+            executableURL: executableURL, arguments: arguments,
+            workingDirectoryURL: workingDirectoryURL, timeout: timeout)
+    }
+
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        guard request.executableURL.path == "/usr/bin/xcodebuild" else {
+            return try await base.launchCapturing(request)
+        }
+        var environment = request.additionalEnvironment
+        environment["SIMULATOR_DEVICE_SET_PATH"] = deviceSetPath
+        return try await base.launchCapturing(ProcessRequest(
+            executableURL: request.executableURL, arguments: request.arguments,
+            environment: request.environment, additionalEnvironment: environment,
+            workingDirectoryURL: request.workingDirectoryURL, timeout: request.timeout))
+    }
+}
+
+extension SimulatorDeviceSetLauncher: XcodeCustodyPreservingLauncher {
+    var supportsXcodeCustody: Bool {
+        (base as? any XcodeCustodyPreservingLauncher)?.supportsXcodeCustody == true
+    }
+
+    func applyingXcodeCustody(
+        _ custody: ProcessCustody?, captureRoot: URL?
+    ) -> any ProcessLaunching {
+        guard let preserving = base as? any XcodeCustodyPreservingLauncher,
+            preserving.supportsXcodeCustody
+        else { return self }
+        return SimulatorDeviceSetLauncher(
+            base: preserving.applyingXcodeCustody(custody, captureRoot: captureRoot),
+            deviceSetPath: deviceSetPath)
     }
 }
 
@@ -97,6 +156,7 @@ final class ObservedBuildCountingLauncher: @unchecked Sendable, ProcessLaunching
     private var buildAttempts = 0
     private var incrementalAttempts = 0
     private var fallbackAttempts = 0
+    private var testWithoutBuildingAttempts = 0
 
     init(
         base: any ProcessLaunching,
@@ -112,6 +172,7 @@ final class ObservedBuildCountingLauncher: @unchecked Sendable, ProcessLaunching
     var fullBuildAttempts: Int { lock.withLock { buildAttempts } }
     var incrementalBuildAttempts: Int { lock.withLock { incrementalAttempts } }
     var fallbackBuildAttempts: Int { lock.withLock { fallbackAttempts } }
+    var testWithoutBuildingRuns: Int { lock.withLock { testWithoutBuildingAttempts } }
 
     func launch(
         executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
@@ -139,6 +200,7 @@ final class ObservedBuildCountingLauncher: @unchecked Sendable, ProcessLaunching
                 }
             }
             if countAsFallback, operation == "test" { fallbackAttempts += 1 }
+            if operation == "test-without-building" { testWithoutBuildingAttempts += 1 }
         }
     }
 }

@@ -3,9 +3,39 @@ import Testing
 
 @testable import SwiftMutationTesting
 
+private actor DeviceSetRecordingLauncher: ProcessLaunching {
+    private var values: [[String: String]] = []
+    func launch(executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double) async throws -> Int32 { 0 }
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        values.append(request.additionalEnvironment)
+        return (0, "")
+    }
+    func environments() -> [[String: String]] { values }
+}
+
 @Suite("XcodeProcessLauncher")
 struct XcodeProcessLauncherTests {
     private let launcher = XcodeProcessLauncher()
+
+    @Test("Simulator device-set launcher injects only into captured xcodebuild requests")
+    func simulatorDeviceSetLauncher() async throws {
+        let base = DeviceSetRecordingLauncher()
+        let launcher = SimulatorDeviceSetLauncher(base: base, deviceSetPath: "/private/device-set")
+        #expect(try await launcher.launch(
+            executableURL: URL(fileURLWithPath: "/bin/true"), arguments: [],
+            workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1) == 0)
+        _ = try await launcher.launchCapturing(ProcessRequest(
+            executableURL: URL(fileURLWithPath: "/bin/echo"), arguments: [],
+            environment: nil, additionalEnvironment: [:],
+            workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1))
+        _ = try await launcher.launchCapturing(ProcessRequest(
+            executableURL: URL(fileURLWithPath: "/usr/bin/xcodebuild"), arguments: [],
+            environment: nil, additionalEnvironment: ["EXISTING": "yes"],
+            workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1))
+        #expect(await base.environments() == [[:], ["EXISTING": "yes", "SIMULATOR_DEVICE_SET_PATH": "/private/device-set"]])
+        #expect(!launcher.supportsXcodeCustody)
+        #expect(launcher.applyingXcodeCustody(nil, captureRoot: nil) is SimulatorDeviceSetLauncher)
+    }
 
     @Test("Engine kill helper")
     func engineKillWindowHelper() async throws {
@@ -807,6 +837,7 @@ struct XcodeProcessLauncherTests {
                     workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 1
                 ))
         }
+        #expect(fallbackCounter.testWithoutBuildingRuns == 1)
         await #expect(throws: PreparedCacheError.invalidCacheState) {
             try await fallbackCounter.launchCapturing(
                 ProcessRequest(

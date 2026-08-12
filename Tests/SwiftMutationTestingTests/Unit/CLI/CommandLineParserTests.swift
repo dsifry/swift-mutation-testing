@@ -6,6 +6,103 @@ import Testing
 
 @Suite("CommandLineParser")
 struct CommandLineParserTests {
+    @Test("Gate simulator modes and benchmark evidence use the closed descriptor matrix")
+    func gateSimulatorDescriptorMatrix() throws {
+        let parser = CommandLineParser()
+        let root = "/tmp/swift-mutation-gate"
+        let registration = "/tmp/swift-mutation-gate-registration.json"
+        let nonce = "ABCDEFGHIJKLMNOPQRSTUV"
+
+        let prepare = try parser.parse([
+            "run", "--destination", "platform=iOS Simulator,name=iPhone 16",
+            "--prepare-gate-simulator", "--build-cache-root", root,
+            "--simulator-registration", registration,
+            "--invocation-nonce", nonce, "--guide-lock-fd", "4",
+        ])
+        #expect(prepare.cache.mode == .simulatorPrepare)
+        #expect(prepare.cache.simulatorRegistration == registration)
+
+        let cleanup = try parser.parse([
+            "run", "--cleanup-gate-simulator", "--build-cache-root", root,
+            "--simulator-registration", registration,
+            "--invocation-nonce", nonce, "--guide-lock-fd", "4",
+        ])
+        #expect(cleanup.cache.mode == .simulatorCleanup)
+
+        let legacy = try parser.parse([
+            "run", "--scheme", "App", "--destination", "platform=iOS Simulator,name=iPhone 16",
+            "--no-cache", "--target", "AppTests/One",
+            "--build-cache-root", root, "--simulator-registration", registration,
+            "--build-count-evidence-output", "/tmp/build-count.json",
+            "--run-ordinal", "7", "--attempt-ordinal", "1",
+            "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
+        ])
+        #expect(legacy.cache.mode == .legacyBenchmark)
+        #expect(legacy.cache.runOrdinal == 7)
+        #expect(legacy.cache.attemptOrdinal == 1)
+
+        #expect(throws: UsageError.self) {
+            _ = try parser.parse([
+                "run", "--prepare-gate-simulator", "--build-cache-root", root,
+                "--simulator-registration", registration,
+                "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
+            ])
+        }
+        #expect(throws: UsageError.self) {
+            _ = try parser.parse([
+                "run", "--no-cache", "--target", "AppTests/One", "--build-cache-root", root,
+                "--simulator-registration", registration,
+                "--build-count-evidence-output", "/tmp/build-count.json",
+                "--run-ordinal", "7", "--attempt-ordinal", "2",
+                "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
+            ])
+        }
+        #expect(throws: UsageError.self) {
+            _ = try parser.parse([
+                "run", "--no-cache", "--build-cache-root", root,
+                "--build-count-evidence-output", "/tmp/build-count.json",
+                "--invocation-nonce", nonce, "--guide-lock-fd", "4", "--wrapper-lease-fd", "5",
+            ])
+        }
+
+        #expect(throws: UsageError.self) {
+            _ = try parser.parse([
+                "run", "--build-cache-root", root,
+                "--cache-compatibility-id", String(repeating: "a", count: 64),
+                "--project-input-manifest", "/tmp/project-inputs.json",
+                "--target", "AppTests/One", "--mutant-selection-manifest", "/tmp/selection.json",
+                "--cache-evidence-output", "/tmp/cache-evidence.json",
+                "--build-count-evidence-output", "/tmp/build-count.json",
+                "--no-cache", "--custody-fd", "7", "--invocation-nonce", nonce,
+            ])
+        }
+
+        let preparedBound = try parser.parse([
+            "run", "--build-cache-root", root,
+            "--cache-compatibility-id", String(repeating: "a", count: 64),
+            "--project-input-manifest", "/tmp/project-inputs.json",
+            "--target", "AppTests/One", "--mutant-selection-manifest", "/tmp/selection.json",
+            "--cache-evidence-output", "/tmp/cache-evidence.json",
+            "--output", "/tmp/report.json", "--no-cache", "--custody-fd", "7",
+            "--simulator-registration", registration,
+            "--build-count-evidence-output", "/tmp/build-count.json",
+            "--guide-lock-fd", "4", "--wrapper-lease-fd", "5", "--invocation-nonce", nonce,
+        ])
+        #expect(preparedBound.cache.simulatorRegistration == registration)
+        #expect(preparedBound.cache.buildCountEvidenceOutput == "/tmp/build-count.json")
+
+        #expect(throws: UsageError.self) {
+            _ = try parser.parse([
+                "run", "--build-cache-root", root,
+                "--cache-compatibility-id", String(repeating: "a", count: 64),
+                "--project-input-manifest", "/tmp/project-inputs.json",
+                "--target", "AppTests/One", "--mutant-selection-manifest", "/tmp/selection.json",
+                "--cache-evidence-output", "/tmp/cache-evidence.json", "--output", "/tmp/report.json",
+                "--no-cache", "--custody-fd", "7", "--guide-lock-fd", "4",
+                "--invocation-nonce", nonce,
+            ])
+        }
+    }
     private let parser = CommandLineParser()
 
     @Test("Given help text, when read, then every cache protocol option is documented")

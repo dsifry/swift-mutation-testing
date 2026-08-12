@@ -7,6 +7,16 @@ actor SimulatorPool {
         self.destination = destination
         self.launcher = launcher
         self.sessionID = String(UUID().uuidString.prefix(8)).lowercased()
+        self.registeredUDID = nil
+    }
+
+    init(registeredUDID: String, destination: String, launcher: any ProcessLaunching) {
+        self.baseUDID = nil
+        self.size = 1
+        self.destination = destination
+        self.launcher = launcher
+        self.sessionID = "registered"
+        self.registeredUDID = registeredUDID
     }
 
     nonisolated let size: Int
@@ -15,11 +25,18 @@ actor SimulatorPool {
     private let destination: String
     private let launcher: any ProcessLaunching
     private let sessionID: String
+    private let registeredUDID: String?
     private var clonedUDIDs: [String] = []
     private var available: [SimulatorSlot] = []
     private var pending: [(id: UUID, continuation: CheckedContinuation<SimulatorSlot, Error>)] = []
 
     func setUp() async throws {
+        if let registeredUDID {
+            let platform = destination.components(separatedBy: ",")
+                .first(where: { $0.hasPrefix("platform=") }) ?? "platform=iOS Simulator"
+            available = [SimulatorSlot(udid: registeredUDID, destination: "\(platform),id=\(registeredUDID)")]
+            return
+        }
         guard let baseUDID else {
             available = [SimulatorSlot(udid: "", destination: destination)]
             return
@@ -119,6 +136,7 @@ actor SimulatorPool {
     }
 
     func tearDown() async {
+        guard registeredUDID == nil else { return }
         guard baseUDID != nil else { return }
 
         let launcher = self.launcher
