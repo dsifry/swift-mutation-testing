@@ -451,6 +451,7 @@ struct CommandLineParser: Sendable {
             let root = flags.buildCacheRoot,
             let registration = flags.simulatorRegistration,
             let evidence = flags.buildCountEvidenceOutput,
+            let output = flags.output,
             let nonce = flags.invocationNonce,
             let guideLockFD = flags.guideLockFD, guideLockFD == 4,
             let wrapperLeaseFD = flags.wrapperLeaseFD, wrapperLeaseFD == 5,
@@ -464,12 +465,37 @@ struct CommandLineParser: Sendable {
             flags.testTarget != nil,
             flags.testEnumerationOutput == nil,
             flags.mutantInventoryOutput == nil,
-            flags.cacheEvidenceOutput == nil,
-            flags.output == nil
+            flags.cacheEvidenceOutput == nil
         else { throw UsageError(message: "legacy build-count mode has invalid or missing protocol options") }
         try validateAbsolutePath(root, flag: "--build-cache-root")
         try validateAbsolutePath(registration, flag: "--simulator-registration")
         try validateAbsolutePath(evidence, flag: "--build-count-evidence-output")
+        try validateAbsolutePath(output, flag: "--output")
+        guard let rootURL = CachePathGuard.canonicalURL(URL(fileURLWithPath: root, isDirectory: true)) else {
+            throw UsageError(message: "--build-cache-root must be an existing canonical directory")
+        }
+        let outputURL = URL(fileURLWithPath: output).standardizedFileURL
+        if let existingOutput = CachePathGuard.canonicalURL(outputURL) {
+            guard CachePathGuard.isContained(existingOutput, in: rootURL) else {
+                throw UsageError(message: "--output must be beneath --build-cache-root")
+            }
+        }
+        var outputAncestor = outputURL.deletingLastPathComponent()
+        var outputSuffix = [outputURL.lastPathComponent]
+        while CachePathGuard.canonicalURL(outputAncestor) == nil, outputAncestor.path != "/" {
+            outputSuffix.insert(outputAncestor.lastPathComponent, at: 0)
+            outputAncestor.deleteLastPathComponent()
+        }
+        var safeOutputURL = CachePathGuard.canonicalURL(outputAncestor)!
+        for component in outputSuffix { safeOutputURL.appendPathComponent(component) }
+        guard CachePathGuard.isContained(safeOutputURL, in: rootURL), safeOutputURL != rootURL else {
+            throw UsageError(message: "--output must be beneath --build-cache-root")
+        }
+        try validateDistinctPaths([
+            ("--simulator-registration", registration),
+            ("--build-count-evidence-output", evidence),
+            ("--output", output),
+        ])
         try validateInvocationNonce(nonce)
         return .init(
             mode: .legacyBenchmark,
