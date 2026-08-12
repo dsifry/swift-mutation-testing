@@ -5,40 +5,29 @@ import { checkExactTestReplay } from '../../scripts/check-exact-test-replay.mjs'
 
 const packagePath = '/private/source';
 const expected = [
-  'SwiftMutationTestingTests.CacheTests/testA',
-  'SwiftMutationTestingTests.CacheTests/testB',
-  'SwiftMutationTestingTests.OtherTests/testC',
+  'SwiftMutationTestingTests.CacheTests/testA()',
+  'SwiftMutationTestingTests.CacheTests/testB()',
+  'SwiftMutationTestingTests.OtherTests/testC()',
 ];
 
-function xunit(names) {
-  return Buffer.from(`<?xml version="1.0"?><testsuite>${names.map((name) => {
-    const [classname, testName] = name.split('/');
-    return `<testcase classname="${classname}" name="${testName}"/>`;
-  }).join('')}</testsuite>`);
+function completed(count) {
+  return `Test run with ${count} test${count === 1 ? '' : 's'} in 1 suite passed after 0.001 seconds.\n`;
 }
 
-function successfulRun({ list = expected, shards = {} } = {}) {
+function successfulRun({ list = expected, completedCounts = {} } = {}) {
   const calls = [];
-  const xunitFiles = new Map();
+  const logs = new Map();
   return {
     calls,
-    xunitFiles,
+    logs,
     run: async (executable, argv, options) => {
       calls.push({ executable, argv, options });
       if (argv.at(-1) === 'list') return { stdout: `${list.join('\n')}\n`, stderr: '', exitCode: 0 };
-      const suite = argv[argv.indexOf('--filter') + 1];
-      const executed = shards[suite] ?? expected.filter((name) => name.startsWith(suite));
-      xunitFiles.set(argv[argv.indexOf('--xunit-output') + 1], xunit(executed));
-      return { stdout: '', stderr: '', exitCode: 0 };
+      const filter = argv[argv.indexOf('--filter') + 1];
+      const identity = expected.find((candidate) => filter === candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      return { stdout: completed(completedCounts[identity] ?? 1), stderr: '', exitCode: 0 };
     },
-    readFile: async (filePath) => {
-      if (!xunitFiles.has(filePath)) {
-        const error = new Error('missing xUnit');
-        error.code = 'ENOENT';
-        throw error;
-      }
-      return xunitFiles.get(filePath);
-    },
+    writeFile: async (filePath, value) => { logs.set(filePath, String(value)); },
   };
 }
 
@@ -46,56 +35,70 @@ async function replay(fixture, options = {}) {
   return checkExactTestReplay({
     packagePath,
     run: fixture.run,
-    readFile: fixture.readFile,
-    makeXunitDirectory: async () => '/private/xunit-run',
+    makeRunDirectory: async () => '/private/exact-test-run',
+    writeFile: fixture.writeFile,
     removeTree: async () => {},
     ...options,
   });
 }
 
-test('replays each stable suite exactly once with a fresh xUnit result and no parallel execution', async () => {
+test('replays every listed test with an escaped collision-checked singleton filter and exact completion', async () => {
   const fixture = successfulRun();
   const receipt = await replay(fixture, { timeoutMs: 1234 });
 
-  assert.deepEqual(receipt, {
-    expected: [...expected].sort(),
-    executed: [...expected].sort(),
-    suites: ['SwiftMutationTestingTests.CacheTests', 'SwiftMutationTestingTests.OtherTests'],
-  });
-  assert.deepEqual(fixture.calls.map(({ executable, argv }) => [executable, argv.slice(0, argv.indexOf('--xunit-output') < 0 ? -1 : -1)]), [
-    ['swift', ['test', '--package-path', packagePath]],
-    ['swift', ['test', '--package-path', packagePath, '--no-parallel', '--filter', 'SwiftMutationTestingTests.CacheTests', '--xunit-output']],
-    ['swift', ['test', '--package-path', packagePath, '--no-parallel', '--filter', 'SwiftMutationTestingTests.OtherTests', '--xunit-output']],
+  assert.deepEqual(receipt.executed, [...expected].sort());
+  assert.equal(receipt.shards.every(({ count }) => count === 1), true);
+  assert.deepEqual(fixture.calls.map(({ executable, argv }) => [executable, argv]), [
+    ['swift', ['test', '--package-path', packagePath, 'list']],
+    ['swift', ['test', '--package-path', packagePath, '--skip-build', '--no-parallel', '--filter', 'SwiftMutationTestingTests\\.CacheTests/testA\\(\\)']],
+    ['swift', ['test', '--package-path', packagePath, '--skip-build', '--no-parallel', '--filter', 'SwiftMutationTestingTests\\.CacheTests/testB\\(\\)']],
+    ['swift', ['test', '--package-path', packagePath, '--skip-build', '--no-parallel', '--filter', 'SwiftMutationTestingTests\\.OtherTests/testC\\(\\)']],
   ]);
   assert.equal(fixture.calls.every(({ options }) => options.timeoutMs === 1234), true);
+  assert.equal(fixture.logs.size, expected.length);
 });
 
-test('fails closed when a shard has no xUnit result', async () => {
-  const fixture = successfulRun();
-  fixture.readFile = async () => { const error = new Error('missing'); error.code = 'ENOENT'; throw error; };
-  await assert.rejects(() => replay(fixture), /xUnit|result/i);
-});
-
-for (const [name, shards, pattern] of [
-  ['same-count wrong identity', { 'SwiftMutationTestingTests.CacheTests': [expected[0], 'SwiftMutationTestingTests.OtherTests/testC'] }, /exact.*set|unexpected|omitted/i],
-  ['duplicate identity', { 'SwiftMutationTestingTests.CacheTests': [expected[0], expected[0], expected[1]] }, /duplicate/i],
-  ['unexpected identity', { 'SwiftMutationTestingTests.CacheTests': [expected[0], expected[1], 'SwiftMutationTestingTests.CacheTests/testUnknown'] }, /unexpected|canonical/i],
+for (const [name, completedCounts, pattern] of [
+  ['absent completed count', { undefined: undefined }, /completed count|result/i],
+  ['zero completed count', { [expected[0]]: 0 }, /exactly one|count/i],
+  ['multiple completed count', { [expected[0]]: 2 }, /exactly one|count/i],
 ]) {
-  test(`fails closed for ${name} in a production xUnit result`, async () => {
-    await assert.rejects(() => replay(successfulRun({ shards })), pattern);
+  test(`fails closed for ${name}`, async () => {
+    const fixture = successfulRun({ completedCounts });
+    if (name === 'absent completed count') fixture.run = async (executable, argv) => argv.at(-1) === 'list' ? { stdout: `${expected.join('\n')}\n`, stderr: '', exitCode: 0 } : { stdout: '', stderr: '', exitCode: 0 };
+    await assert.rejects(() => replay(fixture), name === 'absent completed count' ? /completed test count|result/i : pattern);
   });
 }
 
-test('fails closed when a shard fails', async () => {
+test('rejects a malformed listed identity instead of constructing an unanchored filter', async () => {
+  const fixture = successfulRun({ list: ['SwiftMutationTestingTests.CacheTests/testA()|.*'] });
+  await assert.rejects(() => replay(fixture), /list|malformed/i);
+  assert.equal(fixture.calls.length, 1);
+});
+
+test('rejects duplicate listed identities before replay', async () => {
+  const fixture = successfulRun({ list: [expected[0], expected[0]] });
+  await assert.rejects(() => replay(fixture), /duplicate/i);
+  assert.equal(fixture.calls.length, 1);
+});
+
+test('fails closed when preflight reports a filter collision', async () => {
+  const fixture = successfulRun();
+  await assert.rejects(() => replay(fixture, {
+    matchListed: () => [expected[0], expected[1]],
+  }), /collision|exactly one/i);
+});
+
+test('fails closed when a singleton shard exits unsuccessfully', async () => {
   const fixture = successfulRun();
   const original = fixture.run;
-  fixture.run = async (...args) => args[1][args[1].indexOf('--filter') + 1] === 'SwiftMutationTestingTests.CacheTests'
+  fixture.run = async (...args) => args[1].includes(expected[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
     ? { stdout: '', stderr: 'failed', exitCode: 1 }
     : original(...args);
   await assert.rejects(() => replay(fixture), /shard|failed/i);
 });
 
-test('fails closed when a bounded shard watchdog times out', async () => {
+test('fails closed when a singleton shard watchdog times out', async () => {
   const fixture = successfulRun();
   const original = fixture.run;
   fixture.run = async (...args) => {
@@ -105,10 +108,4 @@ test('fails closed when a bounded shard watchdog times out', async () => {
     throw error;
   };
   await assert.rejects(() => replay(fixture, { timeoutMs: 1 }), /timeout|watchdog/i);
-});
-
-test('rejects malformed swift test list output before running a shard', async () => {
-  const fixture = successfulRun({ list: ['not a test identifier'] });
-  await assert.rejects(() => replay(fixture), /list|malformed/i);
-  assert.equal(fixture.calls.length, 1);
 });
