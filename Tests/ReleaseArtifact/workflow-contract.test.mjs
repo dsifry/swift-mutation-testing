@@ -51,6 +51,7 @@ test('release candidate workflow preserves immutable candidate authority and cus
   assert.match(workflow, /^          retention-days: 30$/mu);
   assert.match(workflow, /^          overwrite: false$/mu);
   assert.match(workflow, /^          artifact-ids: \$\{\{ steps\.upload\.outputs\.artifact-id \}\}$/mu);
+  assert.match(workflow, /^          merge-multiple: true$/mu);
   assert.equal((workflow.match(/uses: actions\/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3\.2\.0/gmu) ?? []).length, 2);
 
   assert.match(workflow, /^        run: \|\n          set -euo pipefail\n          WORKFLOW_COMMIT="\$\{\{ github\.sha \}\}"\n          DISPATCH_TRIGGER_COMMIT="\$\{\{ github\.sha \}\}"$/mu);
