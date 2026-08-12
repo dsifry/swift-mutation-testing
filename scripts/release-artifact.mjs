@@ -238,8 +238,9 @@ function assertAbsoluteChild(root, target, label) {
 
 function assertBundleInput(input) {
   if (!isObject(input)) fail('candidate bundle', 'input must be an object');
-  assertAbsoluteChild(input.controlRoot, input.archivePath, 'archive path');
-  assertAbsoluteChild(input.controlRoot, input.manifestPath, 'manifest path');
+  const artifactRoot = input.artifactRoot ?? input.controlRoot;
+  assertAbsoluteChild(artifactRoot, input.archivePath, 'archive path');
+  assertAbsoluteChild(artifactRoot, input.manifestPath, 'manifest path');
   if (typeof input.sourceRoot !== 'string' || !path.isAbsolute(input.sourceRoot) || input.sourceRoot === input.controlRoot) {
     fail('candidate bundle', 'source root must be a separate absolute path');
   }
@@ -286,7 +287,7 @@ async function verifySourceCheckout(input, manifest) {
 
 async function stageArchivePrivately(input) {
   await input.fs.mkdirFreshPrivate(input.privateDirectory, 0o700);
-  const staged = await input.fs.stageOwnedArchive(input.archivePath, input.controlRoot, input.privateDirectory);
+  const staged = await input.fs.stageOwnedArchive(input.archivePath, input.artifactRoot ?? input.controlRoot, input.privateDirectory);
   if (!isObject(staged) || typeof staged.path !== 'string' || !Buffer.isBuffer(staged.bytes)) {
     fail('candidate bundle', 'staged archive must be an owned private file and bytes');
   }
@@ -320,7 +321,8 @@ async function inspectExecutable(executablePath, manifest, commands, fs, private
 
 export async function verifyCandidateBundle(input) {
   assertBundleInput(input);
-  const manifestBytes = await input.fs.readOwnedRegularFile(input.manifestPath, input.controlRoot);
+  const artifactRoot = input.artifactRoot ?? input.controlRoot;
+  const manifestBytes = await input.fs.readOwnedRegularFile(input.manifestPath, artifactRoot);
   const manifest = parseCandidateManifest(manifestBytes);
   await verifySourceCheckout(input, manifest);
   const stagedArchive = await stageArchivePrivately(input);
