@@ -464,6 +464,7 @@ git commit -m "docs: document immutable artifact promotion"
 - Modify: `tools/coverage/swift-coverage-adapter.test.mjs`
 - Modify: `tools/coverage/swift-mutation-benchmark.mjs`
 - Modify: `tools/coverage/swift-mutation-benchmark.test.mjs`
+- Modify: `tools/coverage/swift-mutation-benchmark-corpus.json`
 - Modify: `scripts/check-swift-closure-tools.sh`
 - Modify: `docs/SERVICE_INVENTORY.md`
 - Modify: `docs/superpowers/specs/2026-08-11-swift-mutation-warm-cache-delivery-design.md`
@@ -508,6 +509,8 @@ First assert that the current closed receipt rejects or drops `candidateDescript
 - [ ] **Step 5: Write Guide release-proof RED/GREEN tests**
 
 Extend the real benchmark owner to consume the candidate-bound uncached/warm receipts plus canonical recovery, privacy/scrub, and retention drill receipts. The closed proof contains exactly: schema/version, `dsifry/theguide`, Guide commit, candidate descriptor/manifest/archive/binary digests, selector count, uncached/warm semantic tuple digests, elapsed/build counters, benchmark receipt digest, three drill receipt digests/pass booleans, and `status: pass`. Reject source paths, source/replacement bytes, logs, arbitrary diagnostics, unequal tuple digests, selector count other than 103, time ratio above 0.80, fallback ratio above 0.10, or any failed/mismatched drill. Assert canonical bytes and stable SHA-256.
+
+Write RED corpus tests proving the current ten-unit truncation and 12-selector committed corpus are rejected. Change `benchmarkCorpus` to derive all 101 unique sorted `TheGuideTests/` selectors from the authenticated ownership manifest, append exactly the two fixed UI selectors, and require an exact sorted unique total of 103. Regenerate `tools/coverage/swift-mutation-benchmark-corpus.json` from that function and require its ownership-manifest path, digest, and selector array to match the runtime derivation byte-for-byte. Add negative tests for 100 or 102 unit selectors, a missing/extra/reordered/duplicate UI selector, stale corpus digest, and committed/runtime corpus drift.
 
 - [ ] **Step 6: Run Guide GREEN and exact coverage**
 
