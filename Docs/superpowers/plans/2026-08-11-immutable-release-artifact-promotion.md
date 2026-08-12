@@ -11,11 +11,12 @@
 ## Global Constraints
 
 - Candidate control code executes only from the control tree pinned to `workflow_commit`; Swift tests, version injection, and compilation occur only in the source tree pinned to `source_commit`.
+- The canonical candidate, attestation, tag, and v1.3.1 release repository is `dsifry/swift-mutation-testing`; the existing `ericodx/swift-mutation-testing` v1.3.0 release and Guide pin remain historical and unchanged.
 - `workflow_commit`, `dispatch_trigger_commit`, and `main_anchor_commit` are equal; `source_commit` is that commit or an authenticated ancestor.
 - Runner/toolchain identity is exactly macOS 26, Xcode 26.6 build 17F113, Apple Swift 6.3.3, arm64 Mach-O, and the package's existing macOS 15 deployment minimum.
 - The candidate archive is packaged once, retained 30 days, and never rebuilt, repacked, normalized, clobbered, or overwritten during Guide proof or promotion.
 - Candidate and promotion workflows use only third-party actions pinned to full commit SHAs and the minimum permissions in the approved design.
-- The promotion job uses `release-production`, one maintainer approval, prevention of self-review, and noncancelling `release-${canonical_tag}` concurrency.
+- The promotion job uses `release-production`, explicit approval by the repository's authenticated maintainer, and noncancelling `release-${canonical_tag}` concurrency.
 - The `immutable-release-tags` ruleset protects `refs/tags/v*` from update/deletion with no bypass actors.
 - Every executable decision owner is a dependency-free Node module included in exact 100% focused line, branch, and function coverage. Workflow YAML is declarative orchestration covered by static contract tests and `actionlint`; no shell production owners are introduced. Existing Swift focused coverage and exact-union replay remain green.
 - The existing `v1.3.0` release, public archive filename, source-build installation path, prepared-cache protocol, and legacy CLI behavior remain unchanged.
@@ -30,12 +31,14 @@ Companion repository (`swift-mutation-testing`):
 - Create `scripts/release-artifact.mjs`: closed manifest, provenance, archive, binary, attestation, tag, and draft-state verification library.
 - Create `scripts/build-release-candidate.mjs`: source-confined test, version-injection, build, one-time package, and manifest CLI.
 - Create `scripts/promote-release-candidate.mjs`: GitHub API coordinator CLI that never builds or repackages.
+- Create `scripts/configure-release-controls.mjs`: idempotent check/apply owner for the feasible protected environment and immutable-tag controls in the canonical repository.
 - Create `scripts/check-release-artifact-coverage.sh`: exact focused Node coverage and shell/workflow contract gate.
 - Create `scripts/release-artifact-coverage-manifest.json`: explicit production include list and exact thresholds.
 - Create `scripts/check-exact-test-replay.mjs`: enumerate current Swift tests, run deterministic nonoverlapping shards, and prove exact set equality.
 - Create `Tests/ReleaseArtifact/release-artifact.test.mjs`: verifier and API-state behavior tests.
 - Create `Tests/ReleaseArtifact/build-release-candidate.test.mjs`: injected-command build-owner tests.
 - Create `Tests/ReleaseArtifact/promote-release-candidate.test.mjs`: promotion API-state tests.
+- Create `Tests/ReleaseArtifact/configure-release-controls.test.mjs`: injected GitHub configuration/preflight tests.
 - Create `Tests/ReleaseArtifact/workflow-contract.test.mjs`: static workflow trust/order/permission tests.
 - Create `Tests/ReleaseArtifact/fixtures/`: canonical and adversarial manifest, attestation, archive-listing, run, tag, ruleset, draft, and release fixtures.
 - Modify `Docs/INSTALLATION.MD`: arm64 prebuilt archive and checksum/attestation verification.
@@ -53,6 +56,8 @@ Guide repository (`theguide`, Issue #51 worktree):
 - Modify `tools/coverage/swift-mutation-adapter.test.mjs`: candidate descriptor receipt tests and strict schema cases.
 - Modify `tools/coverage/collect-swift-coverage.test.mjs`: update closed receipt fixtures.
 - Modify `tools/coverage/swift-coverage-adapter.test.mjs`: update closed receipt fixtures.
+- Modify `tools/coverage/swift-mutation-benchmark.mjs`: emit the closed content-free Guide release-proof receipt after real threshold/drill validation.
+- Modify `tools/coverage/swift-mutation-benchmark.test.mjs`: exact proof schema, binding, threshold, and content-exclusion tests.
 - Modify `tools/coverage/swift-mutation-release-candidate.json`: accepted v1.3.1 candidate identity after the real candidate exists.
 - Modify `scripts/check-swift-closure-tools.sh`: include any newly split Guide production verifier owner if splitting is required for focus; otherwise keep the existing owner included.
 - Modify `docs/SERVICE_INVENTORY.md`: materially expanded release-candidate verification boundary and validation evidence.
@@ -281,17 +286,17 @@ git commit -m "ci: create immutable release candidate"
 - Modify: `scripts/release-artifact.mjs`
 
 **Interfaces:**
-- Consumes: explicit canonical version, candidate run ID/attempt, artifact ID/name, manifest/archive/executable SHA-256, and `GH_TOKEN`.
+- Consumes: explicit canonical version, candidate run ID/attempt, artifact ID/name, manifest/archive/executable SHA-256, promotion control/Guide-proof commit, `guide-release-proof-v1.json` SHA-256, and `GH_TOKEN`.
 - Produces: draft release state transitions only after `verifyPromotionAuthority(input, githubState)` succeeds.
 - Produces: unchanged archive, candidate manifest, and canonical two-line `SHA256SUMS`; never invokes build or archive creation commands.
 
 - [ ] **Step 1: Write RED tests for candidate/run authority**
 
-Test wrong repository/workflow/commit/event/status, expired/deleted artifact, wrong artifact run ID, wrong attestation attempt URI, absent attestation, input digest mismatch, and untrusted download URL. Each must stop before the first mutating API call.
+Test wrong repository/workflow/commit/event/status, expired/deleted artifact, wrong artifact run ID, wrong attestation attempt URI, absent attestation, input digest mismatch, and untrusted download URL. Also test absent/malformed/noncanonical Guide proof; wrong proof commit/digest/candidate descriptor; failed status; selector count other than 103; unequal tuple digests; elapsed ratio above 0.80; fallback ratio above 0.10; and any failed recovery/privacy/retention drill. Each must stop before the first mutating API call.
 
 - [ ] **Step 2: Write RED tests for tag and repository authority**
 
-Test missing/lightweight/unverified/wrong-reason tags, tag-to-tag targets, wrong source commit, absent/weak/bypassed `immutable-release-tags`, absent/unprotected/self-reviewable `release-production`, and tag tuple substitution before upload, before publish, and after publish.
+Test missing/lightweight/unverified/wrong-reason tags, tag-to-tag targets, wrong source commit, absent/weak/bypassed `immutable-release-tags`, absent or approval-free `release-production`, and tag tuple substitution before upload, before publish, and after publish.
 
 - [ ] **Step 3: Write RED tests for draft/public state machine**
 
@@ -315,7 +320,7 @@ Expected: FAIL because the promotion owner and verifier functions are absent.
 
 - [ ] **Step 5: Implement the minimal verifier and coordinator**
 
-Add `verifyPromotionAuthority`, `verifyTagTuple`, `verifyRepositoryControls`, and `classifyReleaseState` to the Node owner. Its injected GitHub adapter uses `gh api` only through those decisions, creates a draft if absent, uploads without clobber, downloads and verifies draft assets, revalidates the tag tuple, publishes, then downloads and verifies the public archive.
+Add `parseGuideReleaseProof`, `verifyPromotionAuthority`, `verifyTagTuple`, `verifyRepositoryControls`, and `classifyReleaseState` to the Node owner. Read the proof only from `Docs/ReleaseEvidence/v1.3.1-guide-proof.json` in the exact promotion control checkout; require its bytes/digest, Guide commit, candidate descriptor/digests, 103-selector equality, performance ratios, and drill results to match explicit inputs before any mutation. The injected GitHub adapter uses `gh api` only through those decisions, creates a draft if absent, uploads without clobber, downloads and verifies draft assets, revalidates the tag tuple, publishes, then downloads and verifies the public archive.
 
 - [ ] **Step 6: Run Task 4 GREEN**
 
@@ -342,7 +347,7 @@ git commit -m "feat: promote authenticated release archive"
 
 - [ ] **Step 1: Add failing release workflow contract tests**
 
-Require `workflow_dispatch` only, typed required inputs, `actions: read`, `contents: write`, `attestations: read`, no `id-token`, `environment: release-production`, `concurrency.group: release-${canonical_tag}`, `cancel-in-progress: false`, full-SHA actions, checksum-pinned `actions/setup-node` provisioning Node 22, control checkout at dispatch commit, and invocation of `node scripts/promote-release-candidate.mjs`. Reject `swift build`, `xcodebuild`, `tar -c`, compression, cache, tag creation, `--clobber`, or automatic tag triggers.
+Require `workflow_dispatch` only, typed required candidate and Guide-proof inputs, `actions: read`, `contents: write`, `attestations: read`, no `id-token`, `environment: release-production`, `concurrency.group: release-${canonical_tag}`, `cancel-in-progress: false`, full-SHA actions, checksum-pinned `actions/setup-node` provisioning Node 22, control checkout at the proof commit, exact proof-file digest verification, and invocation of `node scripts/promote-release-candidate.mjs`. Reject `swift build`, `xcodebuild`, `tar -c`, compression, cache, tag creation, `--clobber`, or automatic tag triggers.
 
 - [ ] **Step 2: Run and confirm RED**
 
@@ -377,6 +382,8 @@ git commit -m "ci: promote proven release bytes"
 - Modify: `Tests/ReleaseArtifact/release-artifact.test.mjs`
 - Modify: `Tests/ReleaseArtifact/build-release-candidate.test.mjs`
 - Modify: `Tests/ReleaseArtifact/promote-release-candidate.test.mjs`
+- Create: `Tests/ReleaseArtifact/configure-release-controls.test.mjs`
+- Create: `scripts/configure-release-controls.mjs`
 - Modify: `Docs/INSTALLATION.MD`
 - Modify: `Docs/BUILDING.md`
 - Modify: `Docs/Architecture/README.md`
@@ -394,7 +401,8 @@ git commit -m "ci: promote proven release bytes"
     "scripts/release-artifact.mjs",
     "scripts/build-release-candidate.mjs",
     "scripts/promote-release-candidate.mjs",
-    "scripts/check-exact-test-replay.mjs"
+    "scripts/check-exact-test-replay.mjs",
+    "scripts/configure-release-controls.mjs"
   ],
   "thresholds": {"lines": 100, "branches": 100, "functions": 100},
   "excludes": []
@@ -407,13 +415,21 @@ The gate must fail if an include is missing from V8 output, a metric is below 10
 
 Run: `scripts/check-release-artifact-coverage.sh`
 
-Expected final result: all release test suites PASS and all four included Node decision owners report exactly 100% lines/branches/functions. Do not add ignore directives or weaken the manifest.
+Expected final result: all release test suites PASS and all five included Node decision owners report exactly 100% lines/branches/functions. Do not add ignore directives or weaken the manifest.
 
-- [ ] **Step 3: Document installation verification and operations**
+- [ ] **Step 3: Add RED/GREEN repository-control setup tests**
+
+With an injected GitHub adapter, cover the current empty environment/ruleset state, exact already-configured state, weaker/malformed settings, wrong repository, lost admin authority, partial apply failure, and idempotent retry. Implement `node scripts/configure-release-controls.mjs --repository dsifry/swift-mutation-testing --check` as the default read-only preflight and require explicit `--apply` to create/update `release-production` with authenticated-maintainer approval and active `immutable-release-tags` protection for `refs/tags/v*` with no bypass actors. Re-read exact settings after apply; a weaker or unobservable result fails.
+
+Run: `node --test Tests/ReleaseArtifact/configure-release-controls.test.mjs`
+
+Expected: PASS with no mutations in check mode, the minimal expected API mutations in apply mode, and a clean no-op on exact retry.
+
+- [ ] **Step 4: Document installation verification and operations**
 
 Add commands that download the stable archive and SHA256SUMS, run `shasum -a 256 -c`, identify the prebuilt artifact as arm64/macOS 15+, and point other architectures to source build. Document exact API preflight for the protected environment and no-bypass tag ruleset, candidate expiry, matching draft retry, and terminal collision escalation.
 
-- [ ] **Step 4: Run companion validation**
+- [ ] **Step 5: Run companion validation**
 
 Run:
 
@@ -428,10 +444,10 @@ bash -n scripts/check-release-artifact-coverage.sh
 
 Expected: exact coverage PASS, every current Swift test listed and executed once, workflow validation PASS, and clean diff checks.
 
-- [ ] **Step 5: Commit Task 6**
+- [ ] **Step 6: Commit Task 6**
 
 ```bash
-git add scripts/check-release-artifact-coverage.sh scripts/release-artifact-coverage-manifest.json Tests/ReleaseArtifact Docs/INSTALLATION.MD Docs/BUILDING.md Docs/Architecture/README.md .github/CODEOWNERS
+git add scripts/check-release-artifact-coverage.sh scripts/release-artifact-coverage-manifest.json scripts/configure-release-controls.mjs Tests/ReleaseArtifact Docs/INSTALLATION.MD Docs/BUILDING.md Docs/Architecture/README.md .github/CODEOWNERS
 git commit -m "docs: document immutable artifact promotion"
 ```
 
@@ -446,6 +462,8 @@ git commit -m "docs: document immutable artifact promotion"
 - Modify: `tools/coverage/swift-mutation-adapter.test.mjs`
 - Modify: `tools/coverage/collect-swift-coverage.test.mjs`
 - Modify: `tools/coverage/swift-coverage-adapter.test.mjs`
+- Modify: `tools/coverage/swift-mutation-benchmark.mjs`
+- Modify: `tools/coverage/swift-mutation-benchmark.test.mjs`
 - Modify: `scripts/check-swift-closure-tools.sh`
 - Modify: `docs/SERVICE_INVENTORY.md`
 - Modify: `docs/superpowers/specs/2026-08-11-swift-mutation-warm-cache-delivery-design.md`
@@ -457,6 +475,7 @@ git commit -m "docs: document immutable artifact promotion"
 - `loadMutationReleaseCandidate(path): Promise<{ candidate, canonicalBytes, descriptorSHA256 }>` rejects unknown, missing, duplicate, noncanonical, or inconsistent fields.
 - `mutationToolIdentity(pin, verifiedCandidate)` produces the companion cache identity plus `candidateDescriptorSHA256` from the verified fetch result.
 - `verifySwiftMutationReceipt` requires the closed tool identity to bind `candidateDescriptorSHA256`; legacy immutable-pin runs bind the canonical pin-file SHA-256 in the same field so receipt schema remains singular.
+- `createGuideReleaseProof({ candidate, benchmark, drills, guideCommit }): GuideReleaseProofV1` emits content-free canonical JSON only when all acceptance conditions pass; otherwise it emits no pass receipt.
 
 - [ ] **Step 1: Write failing descriptor and download-custody tests**
 
@@ -486,12 +505,16 @@ Require workflow/trigger/anchor equality, positive safe run/artifact integers, r
 
 First assert that the current closed receipt rejects or drops `candidateDescriptorSHA256`. Then extend the singular tool schema and every affected fixture so `adaptSwiftMutationReport`, `verifySwiftMutationReceipt`, collection, and coverage adaptation preserve and validate the descriptor digest. Candidate runs use the verified descriptor digest; legacy pin runs use the SHA-256 of canonical pin bytes. Reject any report where the descriptor digest is absent, malformed, or differs from the fetch result.
 
-- [ ] **Step 5: Run Guide GREEN and exact coverage**
+- [ ] **Step 5: Write Guide release-proof RED/GREEN tests**
+
+Extend the real benchmark owner to consume the candidate-bound uncached/warm receipts plus canonical recovery, privacy/scrub, and retention drill receipts. The closed proof contains exactly: schema/version, `dsifry/theguide`, Guide commit, candidate descriptor/manifest/archive/binary digests, selector count, uncached/warm semantic tuple digests, elapsed/build counters, benchmark receipt digest, three drill receipt digests/pass booleans, and `status: pass`. Reject source paths, source/replacement bytes, logs, arbitrary diagnostics, unequal tuple digests, selector count other than 103, time ratio above 0.80, fallback ratio above 0.10, or any failed/mismatched drill. Assert canonical bytes and stable SHA-256.
+
+- [ ] **Step 6: Run Guide GREEN and exact coverage**
 
 Run:
 
 ```bash
-node --test tools/coverage/swift-mutation-release-candidate.test.mjs tools/coverage/run-swift-mutations.test.mjs tools/coverage/swift-mutation-adapter.test.mjs tools/coverage/collect-swift-coverage.test.mjs tools/coverage/swift-coverage-adapter.test.mjs
+node --test tools/coverage/swift-mutation-release-candidate.test.mjs tools/coverage/run-swift-mutations.test.mjs tools/coverage/swift-mutation-adapter.test.mjs tools/coverage/collect-swift-coverage.test.mjs tools/coverage/swift-coverage-adapter.test.mjs tools/coverage/swift-mutation-benchmark.test.mjs
 npm run test:swift-closure-tools
 npm run validate:service-inventory
 git diff --check
@@ -499,7 +522,7 @@ git diff --check
 
 Expected: the existing lightweight closure plus new candidate tests remain green; every included Guide production owner, including the new fetcher and changed adapter/runner, is exact 100% lines/branches/functions; inventory validation passes.
 
-- [ ] **Step 6: Commit Guide code separately after work-unit review**
+- [ ] **Step 7: Commit Guide code separately after work-unit review**
 
 Stage only the declared Guide files and commit without `--no-verify` after the Guide work-unit review gate.
 
@@ -507,6 +530,7 @@ Stage only the declared Guide files and commit without `--no-verify` after the G
 
 **Files:**
 - Modify with real authenticated values: Guide `tools/coverage/swift-mutation-release-candidate.json`
+- Create after passing real proof: companion `Docs/ReleaseEvidence/v1.3.1-guide-proof.json`
 - Create as uncommitted/release evidence: candidate workflow summary, attestation bundles, Guide cold/warm receipts, promotion summary, and public digest comparison.
 
 **Interfaces:**
@@ -517,31 +541,39 @@ Stage only the declared Guide files and commit without `--no-verify` after the G
 
 Run companion task-done and PR-ready reviews, address all valid findings with TDD, rerun exact coverage/full replay, commit without bypassing hooks, push, obtain green CI, and squash-merge. Do not dispatch the candidate workflow from an unmerged branch. The Guide verifier code may be reviewed and committed before the candidate exists because all behavior is fixture-driven; its descriptor data is not finalized or merged yet.
 
-- [ ] **Step 2: Preflight repository controls and dispatch one candidate**
+- [ ] **Step 2: Configure and verify canonical repository controls**
 
-Verify `release-production` and `immutable-release-tags` through GitHub APIs. Dispatch `release-candidate.yml` with version `1.3.1` and the reviewed source commit. Record workflow commit, trigger/main anchor, source commit, run ID/attempt, artifact ID/name, service digest, manifest/archive/binary digests, toolchain, and attestation invocation URIs.
+Run `node scripts/configure-release-controls.mjs --repository dsifry/swift-mutation-testing --apply` with the authenticated repository administrator, approve the explicit API changes, then run the default `--check` mode. Require an exact `release-production` approval gate and active no-bypass `immutable-release-tags` protection before continuing. The setup owner never changes source, workflows, tags, releases, or assets.
 
-- [ ] **Step 3: Download and independently verify exact candidate bytes**
+- [ ] **Step 3: Dispatch one candidate**
+
+Dispatch `release-candidate.yml` in `dsifry/swift-mutation-testing` with version `1.3.1` and the reviewed source commit. Record workflow commit, trigger/main anchor, source commit, run ID/attempt, artifact ID/name, service digest, manifest/archive/binary digests, toolchain, and attestation invocation URIs.
+
+- [ ] **Step 4: Download and independently verify exact candidate bytes**
 
 Use the checked-in Guide fetcher against the downloaded artifact, not a local rebuild or free binary path. Confirm `swift-mutation-testing --version` is exactly `swift-mutation-testing 1.3.1 [arm64-macos26]`, and write the accepted Guide descriptor from the verified values.
 
-- [ ] **Step 4: Run the authoritative Guide proof once under ready-host discipline**
+- [ ] **Step 5: Run the authoritative Guide proof once under ready-host discipline**
 
 Require the existing Guide host-resource preflight, no unrelated booted simulator, one authenticated simulator, and custody cleanup. Execute the 103-selector uncached baseline and warm prepared lane. Require exact selector/result tuple equivalence, warm elapsed `<= 0.80 * uncached`, warm fallback builds `<= 0.10 * uncached`, and passing kill/recovery/privacy/retention drills. On OOM, timeout, custody residue, or threshold failure: publish nothing, preserve content-free evidence, fix the Guide/runtime issue, and rerun the proof against the same candidate bytes. Each candidate run/attempt packages exactly once. Only an invalid, corrupt, or expired candidate may be abandoned for a new run/attempt, and that replacement requires a complete fresh proof; evidence from different candidates is never combined.
 
-- [ ] **Step 5: Finalize and merge the Guide proof binding**
+- [ ] **Step 6: Finalize and merge the Guide proof binding**
 
 After the proof passes, rerun Guide task-done/PR-ready gates with the real descriptor and receipts, commit only intended Issue #51 files without bypassing hooks, push, obtain green CI, and squash-merge. Re-download and reverify the candidate after merge; any descriptor or byte change invalidates the proof.
 
-- [ ] **Step 6: Create the protected annotated tag and promote**
+- [ ] **Step 7: Review and merge the content-free promotion proof**
 
-Create signed annotated `v1.3.1` pointing directly to the manifest source commit. Dispatch `release.yml` with the exact accepted Guide values. Approve through `release-production`; do not approve one's own run. Require the workflow to publish the existing candidate archive unchanged.
+Copy only the canonical `guide-release-proof-v1.json` bytes emitted by the passing Guide benchmark into companion `Docs/ReleaseEvidence/v1.3.1-guide-proof.json`. Verify its digest and candidate binding with `release-artifact.mjs`, open a focused evidence-only companion PR, require normal CI/review, and squash-merge. The promotion control checkout must be this exact merge commit; unmerged/local proof files have no authority.
 
-- [ ] **Step 7: Verify public bytes and installation path**
+- [ ] **Step 8: Create the protected annotated tag and promote**
+
+Create signed annotated `v1.3.1` in `dsifry/swift-mutation-testing` pointing directly to the manifest source commit. Dispatch `release.yml` from the exact proof merge commit with the candidate values, Guide proof commit, and Guide proof SHA-256. Approve through `release-production`. Require the workflow to authenticate the checked-in proof and publish the existing candidate archive unchanged.
+
+- [ ] **Step 9: Verify public bytes and installation path**
 
 Download all public assets afresh. Require public archive SHA-256 and extracted executable SHA-256 to equal the Guide proof, verify SHA256SUMS, version, code signature, CPU, and deployment minimum, and perform the documented installation smoke test.
 
-- [ ] **Step 8: Complete thread audit and capture post-merge learning**
+- [ ] **Step 10: Complete thread audit and capture post-merge learning**
 
 Audit all review bodies, outside-diff comments, unresolved threads, and mandatory PR checks. Squash-merge only after green gates, then run the supported post-merge learning mechanism. Close Issue #51 only after the public-byte equality and performance evidence are attached; Issue #50 begins afterward using the released system.
 
