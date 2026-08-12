@@ -142,7 +142,7 @@ jobs:
         with:
           ref: ${{ inputs.candidate_workflow_commit }}
           path: ${{ github.workspace }}/candidate-control
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout candidate source tree
@@ -150,7 +150,7 @@ jobs:
         with:
           ref: ${{ inputs.source_commit }}
           path: ${{ github.workspace }}/source
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Provision checksum-pinned Node 22

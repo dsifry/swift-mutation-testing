@@ -146,9 +146,9 @@ test('release workflow is protected manual promotion of proof-bound candidate by
   assert.match(workflow, /^          ref: \$\{\{ inputs\.proof_commit \}\}$/mu);
   assert.match(workflow, /^          path: \$\{\{ github\.workspace \}\}\/control$/mu);
   assert.match(workflow, /^          ref: \$\{\{ inputs\.source_commit \}\}$/mu);
-  assert.match(workflow, /^          path: \$\{\{ github\.workspace \}\}\/source$/mu);
+  assert.match(workflow, /^          ref: \$\{\{ inputs\.source_commit \}\}\n          path: \$\{\{ github\.workspace \}\}\/source\n          fetch-depth: 0$/mu);
   assert.match(workflow, /^          ref: \$\{\{ inputs\.candidate_workflow_commit \}\}$/mu);
-  assert.match(workflow, /^          path: \$\{\{ github\.workspace \}\}\/candidate-control$/mu);
+  assert.match(workflow, /^          ref: \$\{\{ inputs\.candidate_workflow_commit \}\}\n          path: \$\{\{ github\.workspace \}\}\/candidate-control\n          fetch-depth: 0$/mu);
   assert.equal((workflow.match(/uses: actions\/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5\.1\.0/gmu) ?? []).length, 3);
   assert.match(workflow, /^          persist-credentials: false$/mu);
 
