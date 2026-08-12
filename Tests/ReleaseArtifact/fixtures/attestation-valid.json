@@ -1,0 +1,28 @@
+{
+  "statement": {
+    "_type": "https://in-toto.io/Statement/v1",
+    "subject": [
+      {
+        "name": "swift-mutation-testing-v1.3.1-macos.tar.gz",
+        "digest": {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      {
+        "name": "release-candidate-v1.json",
+        "digest": {
+          "sha256": "c2c439096dff02a64b991157ba8eeaa16312737332e6c075399e5bd3881b6a30"
+        }
+      }
+    ],
+    "predicateType": "https://slsa.dev/provenance/v1",
+    "predicate": {
+      "repository": "dsifry/swift-mutation-testing",
+      "workflowPath": ".github/workflows/release-candidate.yml",
+      "workflowRef": "refs/heads/main",
+      "workflowCommit": "1111111111111111111111111111111111111111",
+      "event": "workflow_dispatch",
+      "runnerInvocationUri": "https://github.com/dsifry/swift-mutation-testing/actions/runs/123456789/attempts/2"
+    }
+  }
+}
