@@ -1,5 +1,13 @@
 # Immutable Release Artifact Promotion Implementation Plan
 
+> **2026-08-12 approved replacement:** GitHub PR/main CI is Ubuntu Node-only.
+> Build, code-sign verification, and canonical local provenance creation happen
+> under owner-only local custody. GitHub never builds or stores a candidate
+> artifact. The authenticated local publisher accepts the exact prebuilt
+> archive/manifest/provenance bytes and expected hashes, uploads without a
+> rebuild, redownloads the public assets, and verifies identical hashes. The
+> legacy remote-candidate/Actions-attestation tasks below are superseded.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build one authenticated `swift-mutation-testing` v1.3.1 candidate archive, prove those exact bytes in The Guide, and promote the unchanged archive to the public GitHub release.
@@ -168,7 +176,7 @@ git commit -m "feat: verify immutable release candidates"
 **Interfaces:**
 - Consumes: Task 1 `candidate-manifest` and `candidate-bundle` CLI commands from the control tree.
 - Produces: `node build-release-candidate.mjs --control-root ... --source-root ... --output-root ... --version ... --source-commit ... --workflow-commit ... --run-id ... --run-attempt ... --artifact-name ...`
-- Produces: output directory containing exactly the stable archive, `release-candidate-v1.json`, and two attestation input files; stdout contains one canonical JSON receipt with their digests.
+- Produces: output directory containing exactly the stable archive, `release-candidate-v2.json`, and two attestation input files; stdout contains one canonical JSON receipt with their digests.
 - Produces: `node check-exact-test-replay.mjs --package-path SOURCE_ROOT`, which proves sorted expected/executed test set equality with no duplicates or omissions.
 
 - [ ] **Step 1: Write the failing deterministic replay tests**

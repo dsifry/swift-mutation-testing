@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "release-candidate-v1",
+  "schemaVersion": "release-candidate-v2",
   "repository": "dsifry/swift-mutation-testing",
   "workflow": {
     "path": ".github/workflows/release-candidate.yml",

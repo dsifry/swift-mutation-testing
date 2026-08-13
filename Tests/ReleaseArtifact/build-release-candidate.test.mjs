@@ -65,6 +65,7 @@ async function fixture() {
     if (executable === 'git' && argv[0] === 'merge-base') return { stdout: '', stderr: '', exitCode: 0 };
     if (executable === 'swift' && argv[0] === '--version') return { stdout: 'Apple Swift version 6.3.3\n', stderr: '', exitCode: 0 };
     if (executable === 'xcodebuild' && argv[0] === '-version') return { stdout: 'Xcode 26.6\nBuild version 17F113\n', stderr: '', exitCode: 0 };
+    if (executable === 'xcrun' && argv[0] === '--show-sdk-version') return { stdout: '26.0\n', stderr: '', exitCode: 0 };
     if (executable === 'uname' && argv[0] === '-m') return { stdout: 'arm64\n', stderr: '', exitCode: 0 };
     if (executable === 'swift' && argv[0] === 'build') {
       const scratch = argv[argv.indexOf('--scratch-path') + 1];
@@ -107,18 +108,25 @@ test('builds the candidate exactly once from source while every owner path is co
     runCommand: value.runCommand,
     loadArtifact: async () => ({
       sha256: (bytes) => createHash('sha256').update(bytes).digest('hex'),
+      canonicalLocalProvenance: releaseArtifact.canonicalLocalProvenance,
       parseCandidateManifest: (bytes) => JSON.parse(bytes),
       verifyCandidateBundle: async () => ({ executableSHA256: 'verified' }),
     }),
   });
 
   assert.equal(receipt.archive.filename, 'swift-mutation-testing-v1.3.1-macos.tar.gz');
-  assert.equal(receipt.manifest.filename, 'release-candidate-v1.json');
+  assert.equal(receipt.manifest.filename, 'release-candidate-v2.json');
   assert.deepEqual((await (await import('node:fs/promises')).readdir(value.outputRoot)).sort(), [
-    'archive-attestation-input-v1.json', 'manifest-attestation-input-v1.json', 'release-candidate-v1.json', 'swift-mutation-testing-v1.3.1-macos.tar.gz',
+    'local-release-provenance-v1.json', 'release-candidate-v2.json', 'swift-mutation-testing-v1.3.1-macos.tar.gz',
   ]);
+  const provenanceBytes = await readFile(path.join(value.outputRoot, 'local-release-provenance-v1.json'));
+  const provenance = releaseArtifact.parseLocalProvenance(provenanceBytes);
+  assert.equal(receipt.provenance.sha256, createHash('sha256').update(provenanceBytes).digest('hex'));
+  assert.equal(provenance.manifestSHA256, receipt.manifest.sha256);
+  assert.equal(provenance.archiveSHA256, receipt.archive.sha256);
+  assert.equal(provenance.binarySHA256, receipt.executable.sha256);
   assert.equal(value.calls.filter(({ executable }) => executable === 'tar').length, 1);
-  assert.equal(value.calls.some(({ executable }) => executable.startsWith(value.sourceRoot)), false);
+  assert.equal(value.calls.some(({ executable }) => executable.startsWith(`${path.join(value.sourceRoot, 'scripts')}${path.sep}`)), false);
   assert.equal(value.calls.some(({ executable, argv }) => executable === 'swift' && argv.includes('--no-parallel')), false);
   assert.equal(value.calls.some(({ executable, argv }) => executable === 'swift' && argv.includes('--scratch-path') && argv.some((argument) => argument.includes('.release-candidate-scratch-'))), true);
   assert.equal((await readFile(path.join(value.sourceRoot, 'Sources', 'SwiftMutationTesting', 'Version.swift'), 'utf8')).includes('1.3.1'), true);
@@ -154,16 +162,16 @@ test('preserves exact archive bytes through verifier staging and simulated uploa
   const downloadRoot = path.join(value.root, 'download');
   await mkdir(downloadRoot);
   const downloadedArchive = path.join(downloadRoot, archiveName);
-  const downloadedManifest = path.join(downloadRoot, 'release-candidate-v1.json');
+  const downloadedManifest = path.join(downloadRoot, 'release-candidate-v2.json');
   await copyFile(archivePath, downloadedArchive);
-  await copyFile(path.join(value.outputRoot, 'release-candidate-v1.json'), downloadedManifest);
+  await copyFile(path.join(value.outputRoot, 'release-candidate-v2.json'), downloadedManifest);
   const afterDownload = await digest(downloadedArchive);
   assert.equal(afterDownload, beforeVerifier);
 
   const canonicalDownloadRoot = await realpath(downloadRoot);
   await releaseArtifact.verifyCandidateBundle({
     controlRoot: await realpath(value.controlRoot), sourceRoot: await realpath(value.sourceRoot), artifactRoot: canonicalDownloadRoot,
-    archivePath: path.join(canonicalDownloadRoot, archiveName), manifestPath: path.join(canonicalDownloadRoot, 'release-candidate-v1.json'), privateDirectory: path.join(canonicalDownloadRoot, 'verify-private'),
+    archivePath: path.join(canonicalDownloadRoot, archiveName), manifestPath: path.join(canonicalDownloadRoot, 'release-candidate-v2.json'), privateDirectory: path.join(canonicalDownloadRoot, 'verify-private'),
     fs: {
       readOwnedRegularFile: ownedRead,
       mkdirFreshPrivate: async (directory, mode) => { await mkdir(directory, { mode }); await chmod(directory, mode); },
@@ -185,7 +193,7 @@ test('preserves a pre-existing source scratch path and uses a new owned scratch 
 
   await runBuild(value.input, {
     runCommand: value.runCommand,
-    loadArtifact: async () => ({ sha256: (bytes) => createHash('sha256').update(bytes).digest('hex'), parseCandidateManifest: JSON.parse, verifyCandidateBundle: async () => ({}) }),
+    loadArtifact: async () => ({ sha256: (bytes) => createHash('sha256').update(bytes).digest('hex'), canonicalLocalProvenance: releaseArtifact.canonicalLocalProvenance, parseCandidateManifest: JSON.parse, verifyCandidateBundle: async () => ({}) }),
   });
 
   assert.equal(await readFile(path.join(staleScratch, 'preserve-me'), 'utf8'), 'prior run');
@@ -198,7 +206,7 @@ test('runs the control-owned focused gate against the source package path', asyn
 
   await runBuild(value.input, {
     runCommand: value.runCommand,
-    loadArtifact: async () => ({ sha256: (bytes) => createHash('sha256').update(bytes).digest('hex'), parseCandidateManifest: JSON.parse, verifyCandidateBundle: async () => ({}) }),
+    loadArtifact: async () => ({ sha256: (bytes) => createHash('sha256').update(bytes).digest('hex'), canonicalLocalProvenance: releaseArtifact.canonicalLocalProvenance, parseCandidateManifest: JSON.parse, verifyCandidateBundle: async () => ({}) }),
   });
 
   const [focused] = value.calls.filter(({ executable }) => executable === 'bash').map(({ argv }) => argv);
@@ -215,7 +223,7 @@ test('does not execute source-supplied control owners when source attempts repla
 
   await runBuild(value.input, {
     runCommand: value.runCommand,
-    loadArtifact: async () => ({ sha256: (bytes) => createHash('sha256').update(bytes).digest('hex'), parseCandidateManifest: JSON.parse, verifyCandidateBundle: async () => ({}) }),
+    loadArtifact: async () => ({ sha256: (bytes) => createHash('sha256').update(bytes).digest('hex'), canonicalLocalProvenance: releaseArtifact.canonicalLocalProvenance, parseCandidateManifest: JSON.parse, verifyCandidateBundle: async () => ({}) }),
   });
 
   assert.equal(value.calls.some(({ executable, argv }) => executable === process.execPath && argv[0] === poisonedOwner), false);
@@ -241,6 +249,7 @@ for (const [name, mutate, pattern] of [
   ['wrong toolchain', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'swift' && args[1][0] === '--version' ? { stdout: 'Swift 5', stderr: '', exitCode: 0 } : original(...args); }, /toolchain|Swift/i],
   ['wrong Xcode build', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'xcodebuild' ? { stdout: 'Xcode 26.6\nBuild version wrong\n', stderr: '', exitCode: 0 } : original(...args); }, /toolchain|Xcode/i],
   ['wrong runner architecture', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'uname' ? { stdout: 'x86_64\n', stderr: '', exitCode: 0 } : original(...args); }, /toolchain|architecture/i],
+  ['wrong SDK version', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'xcrun' ? { stdout: 'unknown\n', stderr: '', exitCode: 0 } : original(...args); }, /SDK version/i],
   ['build failure', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'swift' && args[1][0] === 'build' ? { stdout: '', stderr: 'bad', exitCode: 1 } : original(...args); }, /build/i],
   ['focused test failure', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'bash' ? { stdout: '', stderr: 'failed', exitCode: 1 } : original(...args); }, /coverage|gate/i],
   ['wrong binary type', (value) => { const original = value.runCommand; value.runCommand = async (...args) => args[0] === 'file' ? { stdout: 'text\n', stderr: '', exitCode: 0 } : original(...args); }, /Mach-O|binary/i],
@@ -310,12 +319,12 @@ for (const [name, mutate, pattern] of [
   ['incomplete artifact interface', () => {}, /interface/],
 ]) test(`rejects ${name}`, async (t) => {
   const value=await fixture(); t.after(()=>rm(value.root,{recursive:true,force:true})); mutate(value);
-  await assert.rejects(()=>runBuild(value.input,{runCommand:value.runCommand,loadArtifact:async()=>name==='incomplete artifact interface'?{}:{sha256:(b)=>createHash('sha256').update(b).digest('hex'),parseCandidateManifest:JSON.parse,verifyCandidateBundle:async()=>({})}}),pattern);
+  await assert.rejects(()=>runBuild(value.input,{runCommand:value.runCommand,loadArtifact:async()=>name==='incomplete artifact interface'?{}:{sha256:(b)=>createHash('sha256').update(b).digest('hex'),canonicalLocalProvenance:releaseArtifact.canonicalLocalProvenance,parseCandidateManifest:JSON.parse,verifyCandidateBundle:async()=>({})}}),pattern);
 });
 
 test('removes output when late output-set validation fails', async (t) => {
   const value=await fixture(); t.after(()=>rm(value.root,{recursive:true,force:true}));
-  await assert.rejects(()=>runBuild(value.input,{runCommand:value.runCommand,loadArtifact:async()=>({sha256:(b)=>createHash('sha256').update(b).digest('hex'),parseCandidateManifest:JSON.parse,verifyCandidateBundle:async()=>{await writeFile(path.join(value.outputRoot,'extra'),'x');}})}),/outside/);
+  await assert.rejects(()=>runBuild(value.input,{runCommand:value.runCommand,loadArtifact:async()=>({sha256:(b)=>createHash('sha256').update(b).digest('hex'),canonicalLocalProvenance:releaseArtifact.canonicalLocalProvenance,parseCandidateManifest:JSON.parse,verifyCandidateBundle:async()=>{await writeFile(path.join(value.outputRoot,'extra'),'x');}})}),/outside/);
   await assert.rejects(()=>access(value.outputRoot),/ENOENT/);
 });
 
