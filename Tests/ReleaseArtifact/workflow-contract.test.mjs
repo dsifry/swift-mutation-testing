@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -7,6 +7,7 @@ const repositoryRoot = path.resolve(import.meta.dirname, '..', '..');
 const candidateWorkflow = path.join(repositoryRoot, '.github', 'workflows', 'release-candidate.yml');
 const releaseWorkflow = path.join(repositoryRoot, '.github', 'workflows', 'release.yml');
 const pullRequestWorkflow = path.join(repositoryRoot, '.github', 'workflows', 'pull-request-analysis.yml');
+const mainWorkflow = path.join(repositoryRoot, '.github', 'workflows', 'main-analysis.yml');
 
 function assertAllActionsAreCommitPinned(workflow) {
   const actionUses = [...workflow.matchAll(/^\s*-?\s*uses:\s+([^\s@]+)@([^\s#]+)(?:\s+#.*)?$/gmu)];
@@ -49,4 +50,19 @@ test('pull request analysis is Ubuntu Node-only contract validation', async () =
   assert.match(workflow, /! -name '\*\.integration\.test\.mjs'/u);
   assert.equal((workflow.match(/^\s+uses:/gmu) ?? []).length, 2);
   assert.doesNotMatch(workflow, /macos-|swift\s|xcode|llvm-cov|actions\/cache|coverage|sonar|upload-artifact|download-artifact/iu);
+});
+
+test('main analysis is Ubuntu Node-only contract validation and no workflow can invoke Apple build tooling', async () => {
+  const workflow = await readFile(mainWorkflow, 'utf8');
+  assert.match(workflow, /^  push:$/mu);
+  assert.match(workflow, /^    runs-on: ubuntu-latest$/mu);
+  assert.match(workflow, /xargs -0 node --test/u);
+  assert.match(workflow, /! -name '\*\.integration\.test\.mjs'/u);
+
+  const workflowDirectory = path.join(repositoryRoot, '.github', 'workflows');
+  const workflowNames = (await readdir(workflowDirectory)).filter((name) => /\.ya?ml$/u.test(name));
+  for (const workflowName of workflowNames) {
+    const candidate = await readFile(path.join(workflowDirectory, workflowName), 'utf8');
+    assert.doesNotMatch(candidate, /macos-|\bxcode(?:build)?\b|\bswift\s+(?:test|build)\b|\bllvm-cov\b/iu, workflowName);
+  }
 });
