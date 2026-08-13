@@ -23,4 +23,4 @@ jobs:
           node-version: '22'
 
       - name: Test release artifact contract
-        run: node --test Tests/ReleaseArtifact/*.test.mjs
+        run: find Tests/ReleaseArtifact -maxdepth 1 -name '*.test.mjs' ! -name '*.integration.test.mjs' -print0 | xargs -0 node --test

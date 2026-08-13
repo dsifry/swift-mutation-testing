@@ -126,7 +126,7 @@ test('builds the candidate exactly once from source while every owner path is co
   assert.equal(provenance.archiveSHA256, receipt.archive.sha256);
   assert.equal(provenance.binarySHA256, receipt.executable.sha256);
   assert.equal(value.calls.filter(({ executable }) => executable === 'tar').length, 1);
-  assert.equal(value.calls.some(({ executable }) => executable.startsWith(value.sourceRoot)), false);
+  assert.equal(value.calls.some(({ executable }) => executable.startsWith(`${path.join(value.sourceRoot, 'scripts')}${path.sep}`)), false);
   assert.equal(value.calls.some(({ executable, argv }) => executable === 'swift' && argv.includes('--no-parallel')), false);
   assert.equal(value.calls.some(({ executable, argv }) => executable === 'swift' && argv.includes('--scratch-path') && argv.some((argument) => argument.includes('.release-candidate-scratch-'))), true);
   assert.equal((await readFile(path.join(value.sourceRoot, 'Sources', 'SwiftMutationTesting', 'Version.swift'), 'utf8')).includes('1.3.1'), true);

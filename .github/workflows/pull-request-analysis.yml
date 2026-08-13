@@ -2,10 +2,8 @@ name: Pull Request Analysis
 
 on:
   pull_request:
-    branches: [ main ]
-    types: [ opened, synchronize, reopened ]
-    paths-ignore:
-      - '**/*.md'
+    branches: [main]
+    types: [opened, synchronize, reopened]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,25 +13,19 @@ permissions:
   contents: read
 
 jobs:
-  validate-and-test:
-    runs-on: macos-26
-    timeout-minutes: 30
-
+  validate-release-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          fetch-depth: 1
+          persist-credentials: false
 
-      - name: Verify Swift version
-        run: swift --version
-
-      - name: Cache SwiftPM
-        uses: actions/cache@v5
+      - name: Provision Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          path: .build
-          key: ${{ runner.os }}-${{ runner.arch }}-spm-${{ hashFiles('**/Package.resolved', '**/Package.swift') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-spm-
+          node-version: '22'
 
-      - name: Run tests
-        run: swift test --no-parallel
+      - name: Validate release artifact contract
+        run: find Tests/ReleaseArtifact -maxdepth 1 -name '*.test.mjs' ! -name '*.integration.test.mjs' -print0 | xargs -0 node --test

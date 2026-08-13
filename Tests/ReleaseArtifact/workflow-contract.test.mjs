@@ -6,6 +6,7 @@ import test from 'node:test';
 const repositoryRoot = path.resolve(import.meta.dirname, '..', '..');
 const candidateWorkflow = path.join(repositoryRoot, '.github', 'workflows', 'release-candidate.yml');
 const releaseWorkflow = path.join(repositoryRoot, '.github', 'workflows', 'release.yml');
+const pullRequestWorkflow = path.join(repositoryRoot, '.github', 'workflows', 'pull-request-analysis.yml');
 
 function assertAllActionsAreCommitPinned(workflow) {
   const actionUses = [...workflow.matchAll(/^\s*-?\s*uses:\s+([^\s@]+)@([^\s#]+)(?:\s+#.*)?$/gmu)];
@@ -22,7 +23,8 @@ test('release candidate workflow is Ubuntu Node-only PR and main CI', async () =
   assert.match(workflow, /^    runs-on: ubuntu-latest$/mu);
   assert.match(workflow, /^permissions:\n  contents: read$/mu);
   assert.equal((workflow.match(/^\s+uses:/gmu) ?? []).length, 2);
-  assert.match(workflow, /node --test Tests\/ReleaseArtifact\/\*\.test\.mjs/u);
+  assert.match(workflow, /xargs -0 node --test/u);
+  assert.match(workflow, /! -name '\*\.integration\.test\.mjs'/u);
   assert.doesNotMatch(workflow, /workflow_dispatch|macos-|xcodebuild|swift\s+(?:build|test)|build-release-candidate|attest-build-provenance|upload-artifact|download-artifact|gh attestation/u);
 
   assertAllActionsAreCommitPinned(workflow);
@@ -37,4 +39,14 @@ test('release candidate workflow is Ubuntu Node-only PR and main CI', async () =
 
 test('there is no remote publication workflow', async () => {
   await assert.rejects(() => readFile(releaseWorkflow, 'utf8'), { code: 'ENOENT' });
+});
+
+test('pull request analysis is Ubuntu Node-only contract validation', async () => {
+  const workflow = await readFile(pullRequestWorkflow, 'utf8');
+  assert.match(workflow, /^  pull_request:$/mu);
+  assert.match(workflow, /^    runs-on: ubuntu-latest$/mu);
+  assert.match(workflow, /xargs -0 node --test/u);
+  assert.match(workflow, /! -name '\*\.integration\.test\.mjs'/u);
+  assert.equal((workflow.match(/^\s+uses:/gmu) ?? []).length, 2);
+  assert.doesNotMatch(workflow, /macos-|swift\s|xcode|llvm-cov|actions\/cache|coverage|sonar|upload-artifact|download-artifact/iu);
 });
