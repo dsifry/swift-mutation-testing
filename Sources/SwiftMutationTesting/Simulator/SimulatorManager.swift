@@ -5,35 +5,18 @@ struct PrepareLifecycleChildIdentity: Codable, Equatable, Sendable {
     let pgid: Int32
     let birthIdentity: String
 
-    static func current() throws -> Self {
-        let pid = getpid()
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-o", "pgid=", "-o", "lstart=", "-p", String(pid)]
-        process.standardOutput = output
-        try process.run()
-        process.waitUntilExit()
-        let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return try parseProcessIdentity(text, expectedPID: pid)
-    }
-
-    static func parseProcessIdentity(_ text: String, expectedPID pid: Int32) throws -> Self {
-        let pieces = text.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
-        guard pieces.count == 2,
-            let pgid = Int32(pieces[0]), pgid == pid
-        else { throw PreparedCacheError.unverifiableProcessIdentity }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
-        guard let date = formatter.date(from: String(pieces[1])) else {
-            throw PreparedCacheError.unverifiableProcessIdentity
+    static func current(
+        identity: (Int32) throws -> CustodiedProcessGroup = {
+            try SystemProcessIdentity.group(for: $0)
         }
+    ) throws -> Self {
+        let pid = getpid()
+        let process = try identity(pid)
+        guard process.processGroupID == pid
+        else { throw PreparedCacheError.unverifiableProcessIdentity }
         return Self(
-            pid: pid, pgid: pgid,
-            birthIdentity: String(Int64((date.timeIntervalSince1970 * 1_000).rounded())))
+            pid: process.pid, pgid: process.processGroupID,
+            birthIdentity: process.birthIdentity)
     }
 }
 
@@ -70,7 +53,7 @@ struct GateSimulatorRegistration: Codable, Equatable, Sendable {
         state: State,
         activeInvocationNonce: String?,
         prepareLifecycleChild: PrepareLifecycleChildIdentity = .init(
-            pid: 1, pgid: 1, birthIdentity: "0")
+            pid: 1, pgid: 1, birthIdentity: "0:0")
     ) {
         self.schemaVersion = schemaVersion
         self.gateRunNonce = gateRunNonce
@@ -129,8 +112,8 @@ struct GateSimulatorRegistration: Codable, Equatable, Sendable {
             let pid = child["pid"] as? Int, pid > 0,
             let pgid = child["pgid"] as? Int, pgid == pid,
             let birthIdentity = child["birthIdentity"] as? String,
-            (1 ... 32).contains(birthIdentity.count),
-            birthIdentity.allSatisfy(\.isNumber)
+            birthIdentity.range(of: #"^[0-9]{1,20}:[0-9]{1,6}$"#,
+                options: .regularExpression) != nil
         else { throw SimulatorError.cloneFailed(udid: "invalid gate registration") }
         return try JSONDecoder().decode(Self.self, from: data)
     }
@@ -181,12 +164,15 @@ struct SimulatorManager: Sendable {
         let sourceUDID = try await sourceUDID(
             destination: destination, runtimeIdentifier: runtime,
             deviceTypeIdentifier: deviceType)
+        guard try await launch(["simctl", "shutdown", sourceUDID], timeout: 30) == 0 else {
+            throw SimulatorError.cloneFailed(udid: sourceUDID)
+        }
         let cloneName = "SwiftMutationGate-\(gateRunNonce)"
-        let prepareChild = prepareLifecycleChild ?? .init(pid: 1, pgid: 1, birthIdentity: "0")
+        let prepareChild = prepareLifecycleChild ?? .init(pid: 1, pgid: 1, birthIdentity: "0:0")
         var clonedUDID: String?
         do {
             let result = try await launchCapturing(
-                ["simctl", "clone", sourceUDID, cloneName]
+                ["simctl", "clone", sourceUDID, cloneName], timeout: 60
             )
             guard result.exitCode == 0 else { throw SimulatorError.cloneFailed(udid: "gate simulator") }
             let udid = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -422,11 +408,13 @@ struct SimulatorManager: Sendable {
         )
     }
 
-    private func launchCapturing(_ arguments: [String]) async throws -> (exitCode: Int32, output: String) {
+    private func launchCapturing(
+        _ arguments: [String], timeout: Double = 30
+    ) async throws -> (exitCode: Int32, output: String) {
         try await launcher.launchCapturing(ProcessRequest(
             executableURL: executableURL, arguments: arguments,
             environment: nil, additionalEnvironment: [:],
-            workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 30
+            workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: timeout
         ))
     }
 

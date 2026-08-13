@@ -46,6 +46,10 @@ struct SimulatorManagerTests {
         )
 
         let commands = await launcher.commands
+        let sourceShutdown = try #require(commands.firstIndex { $0.contains(" shutdown BASE-UDID") })
+        let clone = try #require(commands.firstIndex { $0.contains(" clone BASE-UDID ") })
+        #expect(sourceShutdown < clone)
+        #expect(await launcher.cloneTimeout == 60)
         #expect(commands.filter { $0.contains(" clone BASE-UDID ") }.count == 1)
         #expect(commands.allSatisfy { !$0.contains(" --set ") })
         #expect(commands.filter { $0.contains(" boot GATE-UDID") }.count == 1)
@@ -53,6 +57,21 @@ struct SimulatorManagerTests {
         #expect(commands.filter { $0.contains(" delete GATE-UDID") }.count == 1)
         #expect(await launcher.unrelatedExists)
         #expect(try GateSimulatorRegistration.load(from: registrationURL).state == .deleted)
+    }
+
+    @Test("Gate preparation fails closed when its exact source cannot be shut down")
+    func sourceShutdownMustSucceedBeforeClone() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        let launcher = GateSimulatorCommandLog(sourceShutdownExitCode: 1)
+
+        await #expect(throws: SimulatorError.self) {
+            try await SimulatorManager(launcher: launcher).prepareGateSimulator(
+                destination: "platform=iOS Simulator,name=iPhone 16", cacheRoot: root,
+                registrationURL: root.appendingPathComponent("registration.json"),
+                gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42)
+        }
+        #expect(!(await launcher.commands).contains { $0.contains(" clone ") })
     }
 
     @Test("A wrapper or engine failure cleans the bound gate simulator before returning")
@@ -117,7 +136,7 @@ struct SimulatorManagerTests {
         let root = try FileHelpers.makeTemporaryDirectory()
         defer { FileHelpers.cleanup(root) }
         let valid: [String: Any] = [
-            "pid": 123, "pgid": 123, "birthIdentity": "1786579200000",
+            "pid": 123, "pgid": 123, "birthIdentity": "1786579200:123456",
         ]
         let invalid: [[String: Any]] = [
             valid.merging(["extra": true]) { _, new in new },
@@ -132,7 +151,7 @@ struct SimulatorManagerTests {
                     .appendingPathComponent("Library/Developer/CoreSimulator/Devices").path,
                 udid: "GATE-UDID", runtimeIdentifier: "runtime", deviceTypeIdentifier: "type",
                 generation: 1, state: .idle, activeInvocationNonce: nil,
-                prepareLifecycleChild: .init(pid: 123, pgid: 123, birthIdentity: "1786579200000"))
+                prepareLifecycleChild: .init(pid: 123, pgid: 123, birthIdentity: "1786579200:123456"))
             var object = try #require(JSONSerialization.jsonObject(
                 with: JSONEncoder().encode(registration)) as? [String: Any])
             object["prepareLifecycleChild"] = child
@@ -144,11 +163,9 @@ struct SimulatorManagerTests {
             }
         }
         #expect(throws: PreparedCacheError.self) {
-            _ = try PrepareLifecycleChildIdentity.parseProcessIdentity("bad", expectedPID: 123)
-        }
-        #expect(throws: PreparedCacheError.self) {
-            _ = try PrepareLifecycleChildIdentity.parseProcessIdentity(
-                "123 not-a-date", expectedPID: 123)
+            _ = try PrepareLifecycleChildIdentity.current(identity: { pid in
+                .init(pid: pid, processGroupID: pid + 1, birthIdentity: "0:0")
+            })
         }
     }
 
@@ -572,6 +589,12 @@ private actor GateSimulatorCommandLog: ProcessLaunching {
     private(set) var commands: [String] = []
     private var exists = false
     private(set) var unrelatedExists = true
+    private(set) var cloneTimeout: Double?
+    let sourceShutdownExitCode: Int32
+
+    init(sourceShutdownExitCode: Int32 = 0) {
+        self.sourceShutdownExitCode = sourceShutdownExitCode
+    }
 
     func launch(
         executableURL: URL,
@@ -580,12 +603,16 @@ private actor GateSimulatorCommandLog: ProcessLaunching {
         timeout: Double
     ) async throws -> Int32 {
         commands.append(([executableURL.path] + arguments).joined(separator: " "))
+        if arguments.contains("shutdown"), arguments.contains("BASE-UDID") {
+            return sourceShutdownExitCode
+        }
         if arguments.contains("delete") { exists = false }
         return 0
     }
 
     func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
         commands.append(([request.executableURL.path] + request.arguments).joined(separator: " "))
+        if request.arguments.contains("clone") { cloneTimeout = request.timeout }
         if request.arguments.contains("create") || request.arguments.contains("clone") {
             exists = true
             return (0, "GATE-UDID\n")

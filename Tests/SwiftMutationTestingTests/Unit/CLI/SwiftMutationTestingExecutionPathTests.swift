@@ -12,6 +12,27 @@ struct SwiftMutationTestingExecutionPathTests {
         #expect(await SwiftMutationTesting.main(
             args: ["--gate-simulator-prepare-supervisor"]) == 64)
     }
+
+    @Test("Hidden process identity status is closed and read-only")
+    func processIdentityStatusDispatch() async throws {
+        let current = try SystemProcessIdentity.group(for: getpid())
+        #expect(SwiftMutationTesting.processIdentityStatus(arguments: [
+            String(current.pid), String(current.processGroupID), current.birthIdentity,
+        ]) == (0, "exact"))
+        #expect(SwiftMutationTesting.processIdentityStatus(arguments: [
+            String(current.pid), String(current.processGroupID), "0:0",
+        ]) == (0, "mismatch"))
+        #expect(SwiftMutationTesting.processIdentityStatus(arguments: [
+            String(Int32.max), String(Int32.max), "0:0",
+        ]) == (0, "absent"))
+        #expect(SwiftMutationTesting.processIdentityStatus(arguments: []) == (64, nil))
+        #expect(await SwiftMutationTesting.main(
+            args: ["--process-custody-identity-status"]) == 64)
+        #expect(await SwiftMutationTesting.main(args: [
+            "--process-custody-identity-status", String(current.pid),
+            String(current.processGroupID), current.birthIdentity,
+        ]) == 0)
+    }
     @Test("Shipping CLI prepares and cleans the authenticated gate simulator")
     func gateSimulatorDispatch() async throws {
         let root = try FileHelpers.makeTemporaryDirectory()

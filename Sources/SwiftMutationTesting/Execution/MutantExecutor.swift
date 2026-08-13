@@ -237,10 +237,18 @@ struct MutantExecutor: Sendable {
         switch configuration.build.projectType {
         case .xcode(let scheme, let destination):
             do {
+                let buildDestination: String
+                if let registeredSimulatorUDID {
+                    let platform = destination.components(separatedBy: ",")
+                        .first(where: { $0.hasPrefix("platform=") }) ?? "platform=iOS Simulator"
+                    buildDestination = "\(platform),id=\(registeredSimulatorUDID)"
+                } else {
+                    buildDestination = destination
+                }
                 let artifact = try await stage.build(
                     sandbox: sandbox,
                     scheme: scheme,
-                    destination: destination,
+                    destination: buildDestination,
                     timeout: configuration.build.timeout
                 )
                 await deps.reporter.report(.buildFinished(duration: Date().timeIntervalSince(start)))

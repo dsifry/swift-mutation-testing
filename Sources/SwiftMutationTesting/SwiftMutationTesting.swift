@@ -4,6 +4,11 @@ import Darwin
 public struct SwiftMutationTesting {
 
     public static func main(args: [String] = Array(CommandLine.arguments.dropFirst())) async -> Int32 {
+        if args.first == "--process-custody-identity-status" {
+            let result = processIdentityStatus(arguments: Array(args.dropFirst()))
+            if let output = result.1 { print(output) }
+            return result.0
+        }
         if args.first == "--gate-simulator-supervisor" {
             return await GateSimulatorSupervisor.run(Array(args.dropFirst()))
         }
@@ -13,6 +18,21 @@ public struct SwiftMutationTesting {
         SandboxCleaner.installSignalHandlers()
         SandboxCleaner.removeOrphaned()
         return await run(args: args).rawValue
+    }
+
+    static func processIdentityStatus(arguments: [String]) -> (Int32, String?) {
+        guard arguments.count == 3,
+            let pid = Int32(arguments[0]), pid > 0,
+            let pgid = Int32(arguments[1]), pgid > 0,
+            arguments[2].range(
+                of: #"^[0-9]{1,20}:[0-9]{1,6}$"#, options: .regularExpression) != nil
+        else { return (64, nil) }
+        switch SystemProcessIdentity.status(of: .init(
+            pid: pid, processGroupID: pgid, birthIdentity: arguments[2])) {
+        case .matching: return (0, "exact")
+        case .absent: return (0, "absent")
+        case .mismatched: return (0, "mismatch")
+        }
     }
 
     static func run(args: [String], launcher: (any ProcessLaunching)? = nil) async -> ExitCode {
