@@ -30,10 +30,13 @@ struct MutantExecutorTests {
             schematizedFiles: [.init(originalPath: source.path, schematizedContent: "let x = false")],
             mutants: [mutant]))
 
-        let arguments = try #require(await launcher.buildArguments)
-        let destinationIndex = try #require(arguments.firstIndex(of: "-destination"))
-        #expect(arguments[destinationIndex + 1]
-            == "platform=iOS Simulator,id=REGISTERED-UDID")
+        let builds = await launcher.buildArguments
+        #expect(builds.count == 2)
+        for arguments in builds {
+            let destinationIndex = try #require(arguments.firstIndex(of: "-destination"))
+            #expect(arguments[destinationIndex + 1]
+                == "platform=iOS Simulator,id=REGISTERED-UDID")
+        }
     }
 
     @Test("Given empty mutant list, when execute called, then returns empty results")
@@ -827,13 +830,13 @@ struct MutantExecutorTests {
 }
 
 private actor LegacyBuildDestinationLog: ProcessLaunching {
-    private(set) var buildArguments: [String]?
+    private(set) var buildArguments: [[String]] = []
     func launch(
         executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
     ) async throws -> Int32 { 0 }
     func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
-        if request.arguments.contains("build-for-testing"), buildArguments == nil {
-            buildArguments = request.arguments
+        if request.arguments.contains("build-for-testing") {
+            buildArguments.append(request.arguments)
         }
         return (1, "build failed")
     }

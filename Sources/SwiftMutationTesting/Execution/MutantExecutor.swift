@@ -237,14 +237,7 @@ struct MutantExecutor: Sendable {
         switch configuration.build.projectType {
         case .xcode(let scheme, let destination):
             do {
-                let buildDestination: String
-                if let registeredSimulatorUDID {
-                    let platform = destination.components(separatedBy: ",")
-                        .first(where: { $0.hasPrefix("platform=") }) ?? "platform=iOS Simulator"
-                    buildDestination = "\(platform),id=\(registeredSimulatorUDID)"
-                } else {
-                    buildDestination = destination
-                }
+                let buildDestination = simulatorBoundDestination(destination)
                 let artifact = try await stage.build(
                     sandbox: sandbox,
                     scheme: scheme,
@@ -363,8 +356,22 @@ struct MutantExecutor: Sendable {
         input: RunnerInput,
         pool: SimulatorPool
     ) async throws -> [ExecutionResult] {
-        try await FallbackExecutor(deps: deps, configuration: configuration)
+        let buildDestination: String?
+        if case .xcode(_, let destination) = configuration.build.projectType {
+            buildDestination = simulatorBoundDestination(destination)
+        } else {
+            buildDestination = nil
+        }
+        return try await FallbackExecutor(
+            deps: deps, configuration: configuration, buildDestination: buildDestination)
             .execute(input: input, pool: pool)
+    }
+
+    private func simulatorBoundDestination(_ destination: String) -> String {
+        guard let registeredSimulatorUDID else { return destination }
+        let platform = destination.components(separatedBy: ",")
+            .first(where: { $0.hasPrefix("platform=") }) ?? "platform=iOS Simulator"
+        return "\(platform),id=\(registeredSimulatorUDID)"
     }
 
     private func runIncompatible(
