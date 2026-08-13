@@ -206,12 +206,12 @@ test('normalizes a private-umask build to the required 0755 mode before codesign
   const original = value.runCommand;
   let codesignMode;
   value.runCommand = async (...args) => {
+    if (args[0] === 'codesign') codesignMode = (await lstat(args[1].at(-1))).mode & 0o777;
     const result = await original(...args);
     if (args[0] === 'swift' && args[1][0] === 'build') {
       const scratch = args[1][args[1].indexOf('--scratch-path') + 1];
       await chmod(path.join(scratch, 'release', 'swift-mutation-testing'), 0o700);
     }
-    if (args[0] === 'codesign') codesignMode = (await lstat(args[1].at(-1))).mode & 0o777;
     return result;
   };
 
