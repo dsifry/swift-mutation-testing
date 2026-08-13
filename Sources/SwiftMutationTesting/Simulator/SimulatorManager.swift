@@ -161,18 +161,20 @@ struct SimulatorManager: Sendable {
             list: "runtimes", collection: "runtimes", matchingName: nil,
             fallback: "com.apple.CoreSimulator.SimRuntime.iOS"
         )
-        let sourceUDID = try await sourceUDID(
+        let source = try await sourceDevice(
             destination: destination, runtimeIdentifier: runtime,
             deviceTypeIdentifier: deviceType)
-        guard try await launch(["simctl", "shutdown", sourceUDID], timeout: 30) == 0 else {
-            throw SimulatorError.cloneFailed(udid: sourceUDID)
+        if source.state != "Shutdown" {
+            guard try await launch(["simctl", "shutdown", source.udid], timeout: 30) == 0 else {
+                throw SimulatorError.cloneFailed(udid: source.udid)
+            }
         }
         let cloneName = "SwiftMutationGate-\(gateRunNonce)"
         let prepareChild = prepareLifecycleChild ?? .init(pid: 1, pgid: 1, birthIdentity: "0:0")
         var clonedUDID: String?
         do {
             let result = try await launchCapturing(
-                ["simctl", "clone", sourceUDID, cloneName], timeout: 60
+                ["simctl", "clone", source.udid, cloneName], timeout: 60
             )
             guard result.exitCode == 0 else { throw SimulatorError.cloneFailed(udid: "gate simulator") }
             let udid = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -355,9 +357,9 @@ struct SimulatorManager: Sendable {
         return fallback
     }
 
-    private func sourceUDID(
+    private func sourceDevice(
         destination: String, runtimeIdentifier: String, deviceTypeIdentifier: String
-    ) async throws -> String {
+    ) async throws -> (udid: String, state: String) {
         let result = try await launchCapturing(["simctl", "list", "devices", "--json"])
         let name = parseValue(for: "name", in: destination)
         guard result.exitCode == 0,
@@ -365,13 +367,14 @@ struct SimulatorManager: Sendable {
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let devices = object["devices"] as? [String: [[String: Any]]],
             let entries = devices[runtimeIdentifier],
-            let udid = entries.first(where: {
+            let source = entries.first(where: {
                 ($0["isAvailable"] as? Bool) != false
                     && $0["deviceTypeIdentifier"] as? String == deviceTypeIdentifier
                     && (name == nil || $0["name"] as? String == name)
-            })?["udid"] as? String
+            }),
+            let udid = source["udid"] as? String
         else { throw SimulatorError.deviceNotFound(destination: destination) }
-        return udid
+        return (udid, source["state"] as? String ?? "")
     }
 
     private func deviceExists(udid: String) async throws -> Bool {
