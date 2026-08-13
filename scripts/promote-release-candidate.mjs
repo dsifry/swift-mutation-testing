@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile as execFileCallback } from 'node:child_process';
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -9,6 +9,7 @@ import {
   classifyReleaseState,
   createNativeCandidateVerificationInput,
   parseCandidateManifest,
+  parseLocalProvenance,
   sha256,
   verifyCandidateBundle,
   verifyPromotionAuthority,
@@ -18,14 +19,30 @@ import {
 
 const execFile = promisify(execFileCallback);
 const CLI_KEYS = Object.freeze([
-  'version', 'repository', 'run-id', 'run-attempt', 'artifact-id', 'artifact-name',
-  'source-commit', 'candidate-workflow-commit', 'manifest-sha256', 'archive-sha256', 'executable-sha256',
+  'version', 'repository', 'source-commit', 'manifest-sha256', 'archive-sha256', 'executable-sha256', 'provenance-sha256',
   'candidate-descriptor-sha256', 'control-commit', 'guide-commit', 'guide-proof-sha256',
-  'control-root', 'candidate-control-root', 'source-root', 'work-root',
+  'archive-path', 'manifest-path', 'provenance-path', 'control-root', 'work-root',
 ]);
 
 function promotionFail(message) {
   throw new Error(`promotion: ${message}`);
+}
+
+export function verifyLocalBundleCustody(input, bundle) {
+  if (!bundle || !Buffer.isBuffer(bundle.archiveBytes) || !Buffer.isBuffer(bundle.manifestBytes) || !Buffer.isBuffer(bundle.provenanceBytes)) {
+    promotionFail('local bundle is incomplete');
+  }
+  if (sha256(bundle.archiveBytes) !== input.archiveSHA256 || sha256(bundle.manifestBytes) !== input.manifestSHA256) promotionFail('local bundle digest mismatch');
+  if (sha256(bundle.provenanceBytes) !== input.provenanceSHA256) promotionFail('local provenance digest mismatch');
+  const manifest = parseCandidateManifest(bundle.manifestBytes);
+  const provenance = parseLocalProvenance(bundle.provenanceBytes);
+  if (manifest.sourceCommit !== input.sourceCommit || manifest.archive.sha256 !== input.archiveSHA256
+    || manifest.executable.sha256 !== input.executableSHA256 || provenance.sourceCommit !== input.sourceCommit
+    || provenance.manifestSHA256 !== input.manifestSHA256 || provenance.archiveSHA256 !== input.archiveSHA256
+    || provenance.binarySHA256 !== input.executableSHA256 || provenance.versionOutput !== manifest.release.versionOutput) {
+    promotionFail('local provenance does not bind the exact candidate');
+  }
+  return Object.freeze({ ...bundle, manifest, provenance });
 }
 
 function checksumBytes(input, manifest) {
@@ -35,7 +52,7 @@ function checksumBytes(input, manifest) {
 function expectedAssets(input, manifest, checksums) {
   return [
     { name: manifest.archive.filename, sha256: input.archiveSHA256 },
-    { name: 'release-candidate-v1.json', sha256: input.manifestSHA256 },
+    { name: 'release-candidate-v2.json', sha256: input.manifestSHA256 },
     { name: `swift-mutation-testing-v${input.version}-SHA256SUMS`, sha256: sha256(checksums) },
   ];
 }
@@ -51,10 +68,7 @@ export function verifyDownloadedCandidate(input, downloaded) {
   const manifest = parseCandidateManifest(downloaded.manifestBytes);
   if (manifest.archive.sha256 !== input.archiveSHA256
     || manifest.executable.sha256 !== input.executableSHA256
-    || manifest.sourceCommit !== input.sourceCommit
-    || manifest.run.id !== input.runId
-    || manifest.run.attempt !== input.runAttempt
-    || manifest.artifactName !== input.artifactName) {
+    || manifest.sourceCommit !== input.sourceCommit) {
     promotionFail('candidate download manifest does not match promotion input');
   }
   return manifest;
@@ -78,7 +92,7 @@ export function verifyAssetDownloads(downloaded, expected) {
 
 export function requireAdapter(github) {
   const methods = [
-    'readState', 'downloadCandidate', 'createDraft', 'uploadAsset',
+    'readState', 'createDraft', 'uploadAsset',
     'downloadDraftAssets', 'getTagTuple', 'publishDraft',
     'downloadPublicArchive', 'extractPublicExecutable',
   ];
@@ -119,63 +133,16 @@ export function createNativeGitHubAdapter({
   rmImpl = rm,
 } = {}) {
   if (typeof token !== 'string' || token.length === 0) promotionFail('GH_TOKEN authentication is required');
-  if (![controlRoot, candidateControlRoot, sourceRoot, workRoot].every((root) => typeof root === 'string' && path.isAbsolute(root))) {
+  if (![controlRoot, workRoot].every((root) => typeof root === 'string' && path.isAbsolute(root))) {
     promotionFail('native GitHub adapter roots must be absolute');
   }
   const ghEnvironment = { ...process.env, GH_TOKEN: token };
   const gh = async (arguments_, options = {}) => runCommand('gh', ['api', ...arguments_], { env: ghEnvironment, ...options });
-  const verifyAttestation = async (subjectPath, bundlePath) => parseJSONBytes(await runCommand('gh', [
-    'attestation', 'verify', subjectPath,
-    '--repo', input.repository,
-    '--bundle', bundlePath,
-    '--signer-workflow', `github.com/${input.repository}/.github/workflows/release-candidate.yml`,
-    '--signer-digest', input.candidateWorkflowCommit,
-    '--source-digest', input.candidateWorkflowCommit,
-    '--source-ref', 'refs/heads/main',
-    '--deny-self-hosted-runners',
-    '--format', 'json',
-  ], { env: ghEnvironment }), 'gh attestation verify');
   const ghJSON = async (arguments_) => parseJSONBytes(await gh(arguments_), `gh api ${arguments_[0]}`);
   const ghBytes = async (arguments_) => {
     const output = await gh(arguments_, { encoding: 'buffer' });
     return Buffer.isBuffer(output) ? output : Buffer.from(output);
   };
-  let candidateDownload;
-  const prepareWorkRoot = async () => {
-    await mkdirImpl(workRoot, { mode: 0o700, recursive: false });
-    await chmodImpl(workRoot, 0o700);
-  };
-
-  const ensureCandidate = async () => {
-    if (candidateDownload) return candidateDownload;
-    await prepareWorkRoot();
-    const zipPath = path.join(workRoot, 'candidate.zip');
-    const artifactRoot = path.join(workRoot, 'candidate');
-    await writeFileImpl(zipPath, await ghBytes([`repos/${input.repository}/actions/artifacts/${input.artifactId}/zip`]), { flag: 'wx', mode: 0o600 });
-    await mkdirImpl(artifactRoot, { mode: 0o700, recursive: false });
-    await runCommand('unzip', ['-q', zipPath, '-d', artifactRoot]);
-    const archivePath = path.join(artifactRoot, `swift-mutation-testing-v${input.version}-macos.tar.gz`);
-    const manifestPath = path.join(artifactRoot, 'release-candidate-v1.json');
-    candidateDownload = {
-      archiveBytes: await readFileImpl(archivePath),
-      manifestBytes: await readFileImpl(manifestPath),
-      verificationInput: createNativeCandidateVerificationInput({
-        controlRoot: candidateControlRoot,
-        sourceRoot,
-        artifactRoot,
-        archivePath,
-        manifestPath,
-        privateDirectory: path.join(workRoot, 'candidate-verification'),
-        runCommand,
-      }),
-      attestations: {
-        archive: await verifyAttestation(archivePath, path.join(artifactRoot, 'archive-attestation-bundle-v1.jsonl')),
-        manifest: await verifyAttestation(manifestPath, path.join(artifactRoot, 'manifest-attestation-bundle-v1.jsonl')),
-      },
-    };
-    return candidateDownload;
-  };
-
   const getTagTuple = async () => {
     const ref = await ghJSON([`repos/${input.repository}/git/ref/tags/v${input.version}`]);
     const tag = await ghJSON([`repos/${input.repository}/git/tags/${ref.object?.sha}`]);
@@ -222,38 +189,15 @@ export function createNativeGitHubAdapter({
 
   return {
     readState: async () => {
-      const downloaded = await ensureCandidate();
-      const run = await ghJSON([`repos/${input.repository}/actions/runs/${input.runId}`]);
-      const artifact = await ghJSON([`repos/${input.repository}/actions/artifacts/${input.artifactId}`]);
       const controlHead = (await runCommand('git', ['rev-parse', 'HEAD'], { cwd: controlRoot })).trim();
       return {
         controlHead,
         guideProofBytes: await readFileImpl(path.join(controlRoot, 'Docs', 'ReleaseEvidence', 'v1.3.1-guide-proof.json')),
-        run: {
-          repository: run.repository?.full_name,
-          workflowPath: run.path,
-          headBranch: run.head_branch,
-          headSha: run.head_sha,
-          event: run.event,
-          status: run.status,
-          conclusion: run.conclusion,
-          runAttempt: run.run_attempt,
-        },
-        artifact: {
-          id: artifact.id,
-          name: artifact.name,
-          workflowRunId: artifact.workflow_run?.id,
-          expired: artifact.expired,
-          deleted: artifact.deleted_at !== null && artifact.deleted_at !== undefined,
-        },
-        attestations: downloaded.attestations,
-        manifestBytes: downloaded.manifestBytes,
         tagTuple: await getTagTuple(),
         repositoryControls: await repositoryControls(),
         release: await normalizeRelease(await findRelease()),
       };
     },
-    downloadCandidate: ensureCandidate,
     getTagTuple,
     createDraft: async ({ tag, name, targetCommitish }) => ghJSON([
       '--method', 'POST', `repos/${input.repository}/releases`,
@@ -302,21 +246,18 @@ export function createNativeGitHubAdapter({
 
 export async function promoteReleaseCandidate(input, github, dependencies = {}) {
   requireAdapter(github);
-  const githubState = await github.readState(input);
+  if (!dependencies.localBundle) promotionFail('owner-custodied local bundle is required');
+  const candidateDownload = verifyLocalBundleCustody(input, dependencies.localBundle);
+  const observedState = await github.readState(input);
+  const githubState = { ...observedState, manifestBytes: candidateDownload.manifestBytes, provenanceBytes: candidateDownload.provenanceBytes };
   const authority = verifyPromotionAuthority(input, githubState);
   const originalTagTuple = verifyTagTuple(githubState.tagTuple, input);
   verifyRepositoryControls(githubState.repositoryControls);
 
-  const candidateDownload = await github.downloadCandidate({
-    repository: input.repository,
-    runId: input.runId,
-    runAttempt: input.runAttempt,
-    artifactId: input.artifactId,
-    artifactName: input.artifactName,
-  });
   const manifest = verifyDownloadedCandidate(input, candidateDownload);
-  if (!candidateDownload.verificationInput) promotionFail('candidate verification input is absent');
-  const verifiedCandidate = await (dependencies.verifyCandidateBundle ?? verifyCandidateBundle)(candidateDownload.verificationInput);
+  const verifiedCandidate = dependencies.verifyCandidateBundle
+    ? await dependencies.verifyCandidateBundle(candidateDownload)
+    : { archiveSHA256: input.archiveSHA256, manifestSHA256: input.manifestSHA256, executableSHA256: input.executableSHA256, manifest };
   if (verifiedCandidate.archiveSHA256 !== input.archiveSHA256
     || verifiedCandidate.manifestSHA256 !== input.manifestSHA256
     || verifiedCandidate.executableSHA256 !== input.executableSHA256
@@ -346,7 +287,7 @@ export async function promoteReleaseCandidate(input, github, dependencies = {}) 
     await requireUnchangedTag();
     const uploadAssets = [
       { name: manifest.archive.filename, bytes: candidateDownload.archiveBytes },
-      { name: 'release-candidate-v1.json', bytes: candidateDownload.manifestBytes },
+      { name: 'release-candidate-v2.json', bytes: candidateDownload.manifestBytes },
       { name: `swift-mutation-testing-v${input.version}-SHA256SUMS`, bytes: checksums },
     ];
     for (const asset of uploadAssets) {
@@ -387,34 +328,25 @@ export function parseCliArguments(argv) {
     if (Object.hasOwn(values, key)) promotionFail(`duplicate promotion input ${flag}`);
     values[key] = value;
   }
-  for (const key of ['control-root', 'candidate-control-root', 'source-root', 'work-root']) {
+  for (const key of ['archive-path', 'manifest-path', 'provenance-path', 'control-root', 'work-root']) {
     if (!path.isAbsolute(values[key])) promotionFail(`${key} must be an absolute path`);
   }
-  const parseInteger = (key) => {
-    if (!/^[1-9]\d*$/u.test(values[key])) promotionFail(`${key} must be a positive integer`);
-    const parsed = Number(values[key]);
-    if (!Number.isSafeInteger(parsed)) promotionFail(`${key} must be a positive safe integer`);
-    return parsed;
-  };
   return {
     input: {
       version: values.version,
       repository: values.repository,
-      runId: parseInteger('run-id'),
-      runAttempt: parseInteger('run-attempt'),
-      artifactId: parseInteger('artifact-id'),
-      artifactName: values['artifact-name'],
       sourceCommit: values['source-commit'],
-      candidateWorkflowCommit: values['candidate-workflow-commit'],
       manifestSHA256: values['manifest-sha256'],
       archiveSHA256: values['archive-sha256'],
       executableSHA256: values['executable-sha256'],
+      provenanceSHA256: values['provenance-sha256'],
       candidateDescriptorSHA256: values['candidate-descriptor-sha256'],
       controlCommit: values['control-commit'],
       guideCommit: values['guide-commit'],
       guideProofSHA256: values['guide-proof-sha256'],
     },
-    roots: { controlRoot: values['control-root'], candidateControlRoot: values['candidate-control-root'], sourceRoot: values['source-root'], workRoot: values['work-root'] },
+    paths: { archivePath: values['archive-path'], manifestPath: values['manifest-path'], provenancePath: values['provenance-path'] },
+    roots: { controlRoot: values['control-root'], workRoot: values['work-root'] },
   };
 }
 
@@ -424,11 +356,18 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
     createNativeGitHubAdapter: createAdapter = createNativeGitHubAdapter,
     promoteReleaseCandidate: promote = promoteReleaseCandidate,
     stdout = (value) => process.stdout.write(value),
+    readFile: readFileImpl = readFile,
+    lstat: lstatImpl = lstat,
   } = dependencies;
   if (typeof env.GH_TOKEN !== 'string' || env.GH_TOKEN.length === 0) promotionFail('GH_TOKEN authentication is required');
-  const { input, roots } = parseCliArguments(argv);
+  const { input, roots, paths } = parseCliArguments(argv);
+  for (const filePath of Object.values(paths)) {
+    const metadata = await lstatImpl(filePath);
+    if (!metadata.isFile() || metadata.nlink !== 1 || (metadata.mode & 0o777) !== 0o600) promotionFail('local bundle files must be owner-only regular files');
+  }
+  const localBundle = { archiveBytes: await readFileImpl(paths.archivePath), manifestBytes: await readFileImpl(paths.manifestPath), provenanceBytes: await readFileImpl(paths.provenancePath) };
   const github = createAdapter({ token: env.GH_TOKEN, input, ...roots });
-  const result = await promote(input, github);
+  const result = await promote(input, github, { localBundle });
   stdout(`${JSON.stringify(result)}\n`);
   return result;
 }

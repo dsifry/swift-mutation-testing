@@ -210,6 +210,8 @@ export async function runBuild(input, dependencies = {}) {
       await runChecked(runCommand, 'xcodebuild', ['-version'], { cwd: controlRoot }, 'Xcode toolchain check'),
       (await runChecked(runCommand, 'uname', ['-m'], { cwd: controlRoot }, 'runner architecture check')).trim(),
     );
+    const sdkVersionOutput = (await runChecked(runCommand, 'xcrun', ['--show-sdk-version'], { cwd: controlRoot }, 'SDK version check')).trim();
+    if (!/^\d+\.\d+$/u.test(sdkVersionOutput)) fail('SDK version output is invalid');
     scratchRoot = await freshScratchRoot(sourceRoot);
     await runChecked(runCommand, 'swift', ['build', '--package-path', sourceRoot, '--scratch-path', scratchRoot, '-c', 'release'], { cwd: controlRoot }, 'clean release build');
     const binaryPath = path.join(scratchRoot, 'release', executableName);
@@ -226,12 +228,12 @@ export async function runBuild(input, dependencies = {}) {
     createdOutput = true;
     await chmod(outputRoot, 0o700);
     const archivePath = path.join(outputRoot, archiveName);
-    const manifestPath = path.join(outputRoot, 'release-candidate-v1.json');
+    const manifestPath = path.join(outputRoot, 'release-candidate-v2.json');
     await runChecked(runCommand, 'tar', ['-czf', archivePath, '-C', path.dirname(binaryPath), executableName], { cwd: controlRoot }, 'one-time archive package');
     const archiveSHA256 = parseDigest(await runChecked(runCommand, 'shasum', ['-a', '256', archivePath], { cwd: controlRoot }, 'archive SHA-256'), archivePath);
     const executableSHA256 = parseDigest(await runChecked(runCommand, 'shasum', ['-a', '256', binaryPath], { cwd: controlRoot }, 'executable SHA-256'), binaryPath);
     const manifest = {
-      schemaVersion: 'release-candidate-v1', repository: 'dsifry/swift-mutation-testing',
+      schemaVersion: 'release-candidate-v2', repository: 'dsifry/swift-mutation-testing',
       workflow: { path: '.github/workflows/release-candidate.yml', ref: 'refs/heads/main', commit: input.workflowCommit },
       dispatch: { event: 'workflow_dispatch', triggerCommit: input.workflowCommit, mainAnchorCommit: input.workflowCommit },
       run: { id: Number(input.runId), attempt: Number(input.runAttempt) }, artifactName: input.artifactName, sourceCommit: input.sourceCommit,
@@ -243,18 +245,23 @@ export async function runBuild(input, dependencies = {}) {
     const manifestBytes = Buffer.from(`${JSON.stringify(manifest)}\n`);
     await writeExclusive(manifestPath, manifestBytes);
     const artifact = await loadArtifact(controlRoot);
-    if (typeof artifact.parseCandidateManifest !== 'function' || typeof artifact.verifyCandidateBundle !== 'function' || typeof artifact.sha256 !== 'function') fail('control release artifact interface is incomplete');
+    if (typeof artifact.parseCandidateManifest !== 'function' || typeof artifact.verifyCandidateBundle !== 'function' || typeof artifact.sha256 !== 'function' || typeof artifact.canonicalLocalProvenance !== 'function') fail('control release artifact interface is incomplete');
     artifact.parseCandidateManifest(manifestBytes);
-    const archiveAttestationPath = path.join(outputRoot, 'archive-attestation-input-v1.json');
-    const manifestAttestationPath = path.join(outputRoot, 'manifest-attestation-input-v1.json');
     const manifestSHA256 = artifact.sha256(manifestBytes);
-    await writeExclusive(archiveAttestationPath, `${JSON.stringify({ schemaVersion: 'release-attestation-input-v1', subject: { name: archiveName, digest: { sha256: archiveSHA256 } } })}\n`);
-    await writeExclusive(manifestAttestationPath, `${JSON.stringify({ schemaVersion: 'release-attestation-input-v1', subject: { name: 'release-candidate-v1.json', digest: { sha256: manifestSHA256 } } })}\n`);
+    const provenancePath = path.join(outputRoot, 'local-release-provenance-v1.json');
+    const provenanceBytes = artifact.canonicalLocalProvenance({
+      schemaVersion: 'local-release-provenance-v1', repository: 'dsifry/swift-mutation-testing',
+      sourceCommit: input.sourceCommit, versionOutput, capability: 'prepared-cache-v1',
+      manifestSHA256, archiveSHA256, binarySHA256: executableSHA256,
+      swiftVersionOutput: toolchain.swiftVersion, sdkVersionOutput,
+      targetTriple: 'arm64-apple-macosx26.0', configuration: 'release', codesignVerified: true,
+    });
+    await writeExclusive(provenancePath, provenanceBytes);
     await artifact.verifyCandidateBundle({ controlRoot, sourceRoot, artifactRoot: outputRoot, archivePath, manifestPath, privateDirectory: path.join(outputRoot, '.verification'), fs: { readOwnedRegularFile: ownedRegularFile, mkdirFreshPrivate: freshPrivateDirectory, stageOwnedArchive }, commands: artifactCommands(runCommand, controlRoot), git: { controlHead: async () => input.workflowCommit, sourceHead: async () => input.sourceCommit, isAncestor: async () => true } });
     await rm(path.join(outputRoot, '.verification'), { recursive: true, force: true });
     const output = await import('node:fs/promises').then(({ readdir }) => readdir(outputRoot));
-    if (output.length !== 4) fail('candidate output contains files outside the closed artifact set');
-    const receipt = Object.freeze({ archive: { filename: archiveName, sha256: archiveSHA256 }, manifest: { filename: 'release-candidate-v1.json', sha256: manifestSHA256 }, executable: { filename: executableName, sha256: executableSHA256 }, attestationInputs: { archive: { filename: path.basename(archiveAttestationPath), sha256: sha256(await readFile(archiveAttestationPath)) }, manifest: { filename: path.basename(manifestAttestationPath), sha256: sha256(await readFile(manifestAttestationPath)) } } });
+    if (output.length !== 3) fail('candidate output contains files outside the closed artifact set');
+    const receipt = Object.freeze({ archive: { filename: archiveName, sha256: archiveSHA256 }, manifest: { filename: 'release-candidate-v2.json', sha256: manifestSHA256 }, executable: { filename: executableName, sha256: executableSHA256 }, provenance: { filename: path.basename(provenancePath), sha256: sha256(provenanceBytes) } });
     await rm(scratchRoot, { recursive: true, force: true });
     scratchRoot = undefined;
     return receipt;

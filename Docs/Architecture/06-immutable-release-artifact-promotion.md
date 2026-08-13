@@ -1,5 +1,29 @@
 # Immutable Release Artifact Promotion
 
+## Approved local-candidate authority
+
+Candidate construction is a local, owner-custodied macOS operation. GitHub PR
+and `main` automation is Ubuntu/Node contract CI only: it never runs Swift,
+Xcode, candidate construction, signing, attestation, or publication. There is
+no remote candidate artifact and no publication workflow.
+
+The local builder emits exactly the prebuilt archive, its closed manifest, and
+canonical `local-release-provenance-v1.json`. The provenance object has exactly
+`schemaVersion`, `repository`, `sourceCommit`, `versionOutput`, `capability`,
+`manifestSHA256`, `archiveSHA256`, `binarySHA256`, `swiftVersionOutput`,
+`sdkVersionOutput`, `targetTriple`, `configuration`, and `codesignVerified`, in
+that order. Its canonical bytes are compact JSON plus one LF; their SHA-256 is
+the campaign and promotion binding. `codesignVerified` is true only after the
+local macOS code signature passes strict verification. No additional PKI or
+remote attestation is introduced.
+
+Publication is performed locally by the authenticated owner from that private
+bundle. Before upload, the owner verifies all expected hashes and the canonical
+provenance. Publication uploads those exact existing files without rebuilding
+or repacking, then downloads the public assets to a new private directory and
+requires their hashes to equal the prepublication values. Prebuilt binaries are
+never committed to this repository.
+
 ## Problem and decision
 
 Issue #51 requires the executable exercised by The Guide's 103-selector cold
@@ -96,7 +120,7 @@ code signature, CPU type, and macOS 15 deployment minimum.
 
 Packaging occurs once. The archive has the existing public filename
 `swift-mutation-testing-vX.Y.Z-macos.tar.gz` and contains only the executable at
-its root. A closed `release-candidate-v1.json` manifest records:
+its root. A closed `release-candidate-v2.json` manifest records:
 
 - schema version, repository, workflow path/ref, workflow commit, dispatch
   trigger commit, immutable main-anchor commit, run ID, run attempt, and Actions

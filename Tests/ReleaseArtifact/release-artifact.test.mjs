@@ -22,6 +22,8 @@ import {
   main,
   createNativeCandidateVerificationInput,
   verifyRepositoryControls,
+  canonicalLocalProvenance,
+  parseLocalProvenance,
 } from '../../scripts/release-artifact.mjs';
 
 const fixtures = path.join(import.meta.dirname, 'fixtures');
@@ -33,6 +35,30 @@ const manifestSHA256 = sha256(validCandidateBytes);
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
+
+test('local provenance is closed canonical evidence for exact prebuilt bytes', () => {
+  const value = {
+    schemaVersion: 'local-release-provenance-v1',
+    repository: 'dsifry/swift-mutation-testing',
+    sourceCommit: 'a'.repeat(40),
+    versionOutput: 'swift-mutation-testing 1.3.1 [arm64-macos26]',
+    capability: 'prepared-cache-v1',
+    manifestSHA256: 'b'.repeat(64),
+    archiveSHA256: 'c'.repeat(64),
+    binarySHA256: 'd'.repeat(64),
+    swiftVersionOutput: 'Apple Swift version 6.3.3',
+    sdkVersionOutput: '26.0',
+    targetTriple: 'arm64-apple-macosx26.0',
+    configuration: 'release',
+    codesignVerified: true,
+  };
+  const bytes = canonicalLocalProvenance(value);
+  assert.deepEqual(parseLocalProvenance(bytes), value);
+  assert.equal(bytes.equals(Buffer.from(`${JSON.stringify(value)}\n`)), true);
+  assert.throws(() => parseLocalProvenance(Buffer.from(`${JSON.stringify({ ...value, remoteRunId: 1 })}\n`)), /exactly/u);
+  assert.throws(() => parseLocalProvenance(Buffer.from(`${JSON.stringify({ ...value, codesignVerified: false })}\n`)), /codesign/u);
+  assert.throws(() => parseLocalProvenance(Buffer.from(JSON.stringify(value))), /canonical/u);
+});
 
 test('native filesystem and parsing decisions fail closed', async (t) => {
   assert.throws(()=>assertResolvedChild('/root','/root','same'),/escapes/);
@@ -174,7 +200,7 @@ test('candidate manifest rejects a wrongly typed nested value', () => {
 });
 
 test('candidate manifest rejects duplicate JSON keys', () => {
-  const duplicated = validCandidateBytes.toString().replace('"schemaVersion": "release-candidate-v1",', '"schemaVersion": "release-candidate-v1",\n  "schemaVersion": "release-candidate-v1",');
+  const duplicated = validCandidateBytes.toString().replace('"schemaVersion": "release-candidate-v2",', '"schemaVersion": "release-candidate-v2",\n  "schemaVersion": "release-candidate-v2",');
   assert.throws(() => parseCandidateManifest(Buffer.from(duplicated)), /candidate manifest/i);
 });
 
@@ -238,7 +264,7 @@ async function withBundle(overrides, assertion) {
     controlRoot: '/control',
     sourceRoot: '/source',
     archivePath: '/control/output/swift-mutation-testing-v1.3.1-macos.tar.gz',
-    manifestPath: '/control/output/release-candidate-v1.json',
+    manifestPath: '/control/output/release-candidate-v2.json',
     privateDirectory: privateRoot,
     fs: {
       readOwnedRegularFile: async (filePath) => {
