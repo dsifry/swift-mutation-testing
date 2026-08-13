@@ -200,6 +200,34 @@ test('preserves a pre-existing source scratch path and uses a new owned scratch 
   assert.equal(value.calls.some(({ executable, argv }) => executable === 'swift' && argv.includes('--scratch-path') && argv.some((argument) => argument.includes('.release-candidate-scratch-'))), true);
 });
 
+test('normalizes a private-umask build to the required 0755 mode before codesign and archive', async (t) => {
+  const value = await fixture();
+  t.after(() => rm(value.root, { recursive: true, force: true }));
+  const original = value.runCommand;
+  let codesignMode;
+  value.runCommand = async (...args) => {
+    const result = await original(...args);
+    if (args[0] === 'swift' && args[1][0] === 'build') {
+      const scratch = args[1][args[1].indexOf('--scratch-path') + 1];
+      await chmod(path.join(scratch, 'release', 'swift-mutation-testing'), 0o700);
+    }
+    if (args[0] === 'codesign') codesignMode = (await lstat(args[1].at(-1))).mode & 0o777;
+    return result;
+  };
+
+  await runBuild(value.input, {
+    runCommand: value.runCommand,
+    loadArtifact: async () => ({
+      sha256: (bytes) => createHash('sha256').update(bytes).digest('hex'),
+      canonicalLocalProvenance: releaseArtifact.canonicalLocalProvenance,
+      parseCandidateManifest: JSON.parse,
+      verifyCandidateBundle: async () => ({}),
+    }),
+  });
+
+  assert.equal(codesignMode, 0o755);
+});
+
 test('runs the control-owned focused gate against the source package path', async (t) => {
   const value = await fixture();
   t.after(() => rm(value.root, { recursive: true, force: true }));

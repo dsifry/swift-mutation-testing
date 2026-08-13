@@ -223,6 +223,7 @@ export async function runBuild(input, dependencies = {}) {
     const binaryPath = path.join(scratchRoot, 'release', executableName);
     const binaryStat = await stat(binaryPath);
     if (!binaryStat.isFile() || binaryStat.mode & 0o022) fail('built executable is not a safe regular file');
+    await chmod(binaryPath, 0o755);
     await runChecked(runCommand, 'codesign', ['--verify', '--strict', binaryPath], { cwd: controlRoot }, 'code signature verification');
     const fileType = (await runChecked(runCommand, 'file', ['-b', binaryPath], { cwd: controlRoot }, 'Mach-O file check')).trim();
     if (!fileType.includes('Mach-O 64-bit executable arm64')) fail('built executable is not arm64 Mach-O');
