@@ -74,6 +74,22 @@ struct SimulatorManagerTests {
         #expect(!(await launcher.commands).contains { $0.contains(" clone ") })
     }
 
+    @Test("An already-shutdown exact source skips shutdown and proceeds to clone")
+    func alreadyShutdownSourceSkipsShutdown() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        let launcher = GateSimulatorCommandLog(sourceState: "Shutdown", sourceShutdownExitCode: 1)
+
+        _ = try await SimulatorManager(launcher: launcher).prepareGateSimulator(
+            destination: "platform=iOS Simulator,name=iPhone 16", cacheRoot: root,
+            registrationURL: root.appendingPathComponent("registration.json"),
+            gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42)
+
+        let commands = await launcher.commands
+        #expect(!commands.contains { $0.contains(" shutdown BASE-UDID") })
+        #expect(commands.contains { $0.contains(" clone BASE-UDID ") })
+    }
+
     @Test("A wrapper or engine failure cleans the bound gate simulator before returning")
     func failedInvocationCleansBoundGateSimulator() async throws {
         let root = FileManager.default.temporaryDirectory
@@ -590,9 +606,11 @@ private actor GateSimulatorCommandLog: ProcessLaunching {
     private var exists = false
     private(set) var unrelatedExists = true
     private(set) var cloneTimeout: Double?
+    let sourceState: String
     let sourceShutdownExitCode: Int32
 
-    init(sourceShutdownExitCode: Int32 = 0) {
+    init(sourceState: String = "Booted", sourceShutdownExitCode: Int32 = 0) {
+        self.sourceState = sourceState
         self.sourceShutdownExitCode = sourceShutdownExitCode
     }
 
@@ -626,7 +644,7 @@ private actor GateSimulatorCommandLog: ProcessLaunching {
         let gate = exists
             ? #",{"udid":"GATE-UDID","name":"SwiftMutationGate","deviceTypeIdentifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16","state":"Booted"}"#
             : ""
-        return (0, #"{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{"udid":"BASE-UDID","name":"iPhone 16","deviceTypeIdentifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16","state":"Shutdown"},{"udid":"UNRELATED-UDID","name":"Unrelated","deviceTypeIdentifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16","state":"Shutdown"}"# + gate + "]}}")
+        return (0, #"{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{"udid":"BASE-UDID","name":"iPhone 16","deviceTypeIdentifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16","state":""# + sourceState + #""},{"udid":"UNRELATED-UDID","name":"Unrelated","deviceTypeIdentifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16","state":"Shutdown"}"# + gate + "]}}")
     }
 }
 
@@ -673,7 +691,7 @@ private actor GateSimulatorBootFailureLog: ProcessLaunching {
         let gate = exists
             ? #",{"name":"SwiftMutationGate","udid":"GATE-UDID","deviceTypeIdentifier":"type","isAvailable":true}"#
             : ""
-        return (0, #"{"devices":{"runtime":[{"name":"iPhone 16","udid":"SOURCE-UDID","deviceTypeIdentifier":"type","isAvailable":true},{"name":"Unrelated","udid":"UNRELATED-UDID","deviceTypeIdentifier":"type","isAvailable":true}"# + gate + "]}}")
+        return (0, #"{"devices":{"runtime":[{"name":"iPhone 16","udid":"SOURCE-UDID","deviceTypeIdentifier":"type","isAvailable":true,"state":"Booted"},{"name":"Unrelated","udid":"UNRELATED-UDID","deviceTypeIdentifier":"type","isAvailable":true}"# + gate + "]}}")
     }
 }
 
@@ -702,7 +720,7 @@ private actor GateSimulatorReceiptWriteFailureLog: ProcessLaunching {
             return (0, "GATE-UDID\n")
         }
         let gate = exists ? #",{"udid":"GATE-UDID"}"# : ""
-        return (0, #"{"devices":{"runtime":[{"name":"iPhone 16","udid":"SOURCE-UDID","deviceTypeIdentifier":"type","isAvailable":true},{"udid":"UNRELATED-UDID"}"# + gate + "]}}")
+        return (0, #"{"devices":{"runtime":[{"name":"iPhone 16","udid":"SOURCE-UDID","deviceTypeIdentifier":"type","isAvailable":true,"state":"Booted"},{"udid":"UNRELATED-UDID"}"# + gate + "]}}")
     }
 }
 
@@ -766,7 +784,7 @@ private actor GateSimulatorBranchLauncher: ProcessLaunching {
                 return (0, #"{"devices":{"runtime":[{"udid":"GATE-UDID","deviceTypeIdentifier":"type"}]}}"#)
             }
         }
-        return (0, #"{"devices":{"runtime":[{"name":"iPhone 16","udid":"SOURCE-UDID","deviceTypeIdentifier":"type","isAvailable":true}]}}"#)
+        return (0, #"{"devices":{"runtime":[{"name":"iPhone 16","udid":"SOURCE-UDID","deviceTypeIdentifier":"type","isAvailable":true,"state":"Booted"}]}}"#)
     }
 }
 
