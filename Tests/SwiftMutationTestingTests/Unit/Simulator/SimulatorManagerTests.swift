@@ -46,11 +46,32 @@ struct SimulatorManagerTests {
         )
 
         let commands = await launcher.commands
-        #expect(commands.filter { $0.contains(" create ") }.count == 1)
+        let sourceShutdown = try #require(commands.firstIndex { $0.contains(" shutdown BASE-UDID") })
+        let clone = try #require(commands.firstIndex { $0.contains(" clone BASE-UDID ") })
+        #expect(sourceShutdown < clone)
+        #expect(await launcher.cloneTimeout == 60)
+        #expect(commands.filter { $0.contains(" clone BASE-UDID ") }.count == 1)
+        #expect(commands.allSatisfy { !$0.contains(" --set ") })
         #expect(commands.filter { $0.contains(" boot GATE-UDID") }.count == 1)
         #expect(commands.filter { $0.contains(" shutdown GATE-UDID") }.count == 1)
         #expect(commands.filter { $0.contains(" delete GATE-UDID") }.count == 1)
+        #expect(await launcher.unrelatedExists)
         #expect(try GateSimulatorRegistration.load(from: registrationURL).state == .deleted)
+    }
+
+    @Test("Gate preparation fails closed when its exact source cannot be shut down")
+    func sourceShutdownMustSucceedBeforeClone() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        let launcher = GateSimulatorCommandLog(sourceShutdownExitCode: 1)
+
+        await #expect(throws: SimulatorError.self) {
+            try await SimulatorManager(launcher: launcher).prepareGateSimulator(
+                destination: "platform=iOS Simulator,name=iPhone 16", cacheRoot: root,
+                registrationURL: root.appendingPathComponent("registration.json"),
+                gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42)
+        }
+        #expect(!(await launcher.commands).contains { $0.contains(" clone ") })
     }
 
     @Test("A wrapper or engine failure cleans the bound gate simulator before returning")
@@ -110,6 +131,44 @@ struct SimulatorManagerTests {
         }
     }
 
+    @Test("Prepare lifecycle child identity is closed and authenticated")
+    func prepareLifecycleChildIdentityIsClosedAndAuthenticated() throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        let valid: [String: Any] = [
+            "pid": 123, "pgid": 123, "birthIdentity": "1786579200:123456",
+        ]
+        let invalid: [[String: Any]] = [
+            valid.merging(["extra": true]) { _, new in new },
+            valid.merging(["pid": 0]) { _, new in new },
+            valid.merging(["pgid": 124]) { _, new in new },
+            valid.merging(["birthIdentity": "not-a-date"]) { _, new in new },
+        ]
+        for (index, child) in invalid.enumerated() {
+            let registration = GateSimulatorRegistration(
+                schemaVersion: 1, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42,
+                deviceSetPath: FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent("Library/Developer/CoreSimulator/Devices").path,
+                udid: "GATE-UDID", runtimeIdentifier: "runtime", deviceTypeIdentifier: "type",
+                generation: 1, state: .idle, activeInvocationNonce: nil,
+                prepareLifecycleChild: .init(pid: 123, pgid: 123, birthIdentity: "1786579200:123456"))
+            var object = try #require(JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(registration)) as? [String: Any])
+            object["prepareLifecycleChild"] = child
+            let url = root.appendingPathComponent("invalid-\(index).json")
+            try JSONSerialization.data(withJSONObject: object).write(to: url)
+
+            #expect(throws: (any Error).self) {
+                _ = try GateSimulatorRegistration.load(from: url)
+            }
+        }
+        #expect(throws: PreparedCacheError.self) {
+            _ = try PrepareLifecycleChildIdentity.current(identity: { pid in
+                .init(pid: pid, processGroupID: pid + 1, birthIdentity: "0:0")
+            })
+        }
+    }
+
     @Test("Gate registration validates an idle device-set and preserves active invocation encoding")
     func validatesRegistrationAndEncodesActiveInvocation() throws {
         let root = try FileHelpers.makeTemporaryDirectory()
@@ -117,7 +176,9 @@ struct SimulatorManagerTests {
         let registrationURL = root.appendingPathComponent("registration.json")
         let registration = GateSimulatorRegistration(
             schemaVersion: 1, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42,
-            deviceSetPath: root.path, udid: "GATE-UDID", runtimeIdentifier: "runtime",
+            deviceSetPath: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Developer/CoreSimulator/Devices").path,
+            udid: "GATE-UDID", runtimeIdentifier: "runtime",
             deviceTypeIdentifier: "type", generation: 1, state: .idle,
             activeInvocationNonce: "abcdefghijklmnopqrstuv"
         )
@@ -128,13 +189,38 @@ struct SimulatorManagerTests {
 
         let idle = GateSimulatorRegistration(
             schemaVersion: 1, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42,
-            deviceSetPath: root.path, udid: "GATE-UDID", runtimeIdentifier: "runtime",
+            deviceSetPath: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Developer/CoreSimulator/Devices").path,
+            udid: "GATE-UDID", runtimeIdentifier: "runtime",
             deviceTypeIdentifier: "type", generation: 1, state: .idle,
             activeInvocationNonce: nil
         )
         try JSONEncoder().encode(idle).write(to: registrationURL)
         #expect(try SimulatorManager.validatedRegistration(
             at: registrationURL, expectedGuideLockInode: 42).udid == "GATE-UDID")
+    }
+
+    @Test("Activation rejects the same UDID under a different runtime or device type")
+    func activationRequiresCompleteRegisteredIdentity() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        let url = root.appendingPathComponent("registration.json")
+        let registration = GateSimulatorRegistration(
+            schemaVersion: 1, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42,
+            deviceSetPath: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Developer/CoreSimulator/Devices").path,
+            udid: "GATE-UDID", runtimeIdentifier: "runtime", deviceTypeIdentifier: "type",
+            generation: 1, state: .idle, activeInvocationNonce: nil)
+        try JSONEncoder().encode(registration).write(to: url)
+        for output in [
+            #"{"devices":{"other-runtime":[{"udid":"GATE-UDID","deviceTypeIdentifier":"type"}]}}"#,
+            #"{"devices":{"runtime":[{"udid":"GATE-UDID","deviceTypeIdentifier":"other-type"}]}}"#,
+        ] {
+            await #expect(throws: SimulatorError.self) {
+                try await SimulatorManager(launcher: MockProcessLauncher(exitCode: 0, output: output))
+                    .validatedRegistration(at: url, expectedCacheRoot: root, expectedGuideLockInode: 42)
+            }
+        }
     }
 
     @Test("Gate preparation rejects an existing receipt and removes its device set after create failure")
@@ -160,6 +246,194 @@ struct SimulatorManagerTests {
         }
         #expect(!FileManager.default.fileExists(
             atPath: root.appendingPathComponent("gate-simulator-abcdefghijklmnopqrstuv").path))
+    }
+
+    @Test("A boot failure recovers the durable creating receipt by deleting only its exact clone")
+    func creatingReceiptIsRecoveredAfterPrepareFailure() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        let registrationURL = root.appendingPathComponent("registration.json")
+        let launcher = GateSimulatorBootFailureLog()
+
+        await #expect(throws: SimulatorError.self) {
+            try await SimulatorManager(launcher: launcher).prepareGateSimulator(
+                destination: "platform=iOS Simulator,name=iPhone 16", cacheRoot: root,
+                registrationURL: registrationURL, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+                guideLockInode: 42)
+        }
+
+        #expect(try GateSimulatorRegistration.load(from: registrationURL).state == .deleted)
+        let commands = await launcher.commands
+        #expect(commands.filter { $0.contains(" delete GATE-UDID") }.count == 1)
+        #expect(!commands.contains { $0.contains("delete UNRELATED-UDID") })
+    }
+
+    @Test("A clone is exactly deleted and verified when its creating receipt cannot be written")
+    func cloneIsRecoveredWhenCreatingReceiptWriteFails() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        let missingParent = root.appendingPathComponent("missing", isDirectory: true)
+        let registrationURL = missingParent.appendingPathComponent("registration.json")
+        let launcher = GateSimulatorReceiptWriteFailureLog()
+
+        await #expect(throws: (any Error).self) {
+            try await SimulatorManager(launcher: launcher).prepareGateSimulator(
+                destination: "platform=iOS Simulator,name=iPhone 16", cacheRoot: root,
+                registrationURL: registrationURL, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+                guideLockInode: 42)
+        }
+
+        let commands = await launcher.commands
+        #expect(commands.filter { $0.contains(" delete GATE-UDID") }.count == 1)
+        #expect(commands.last?.contains("list devices --json") == true)
+        #expect(!commands.contains { $0.contains("delete UNRELATED-UDID") })
+    }
+
+    @Test("A cleaning receipt retries exact deletion without requiring shutdown to succeed")
+    func cleaningReceiptRetriesExactDeletion() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        let registrationURL = root.appendingPathComponent("registration.json")
+        let registration = GateSimulatorRegistration(
+            schemaVersion: 1, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42,
+            deviceSetPath: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Developer/CoreSimulator/Devices").path,
+            udid: "GATE-UDID", runtimeIdentifier: "runtime", deviceTypeIdentifier: "type",
+            generation: 1, state: .cleaning, activeInvocationNonce: nil)
+        try JSONEncoder().encode(registration).write(to: registrationURL)
+        let launcher = GateSimulatorCleaningRetryLog()
+
+        try await SimulatorManager(launcher: launcher).cleanupGateSimulator(
+            registrationURL: registrationURL, expectedGateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+            expectedGuideLockInode: 42)
+
+        #expect(try GateSimulatorRegistration.load(from: registrationURL).state == .deleted)
+        let commands = await launcher.commands
+        #expect(commands.filter { $0.contains(" shutdown GATE-UDID") }.count == 1)
+        #expect(commands.filter { $0.contains(" delete GATE-UDID") }.count == 1)
+    }
+
+    @Test("Cleanup rejects a same-UDID runtime or device-type mismatch before destructive commands")
+    func cleanupRevalidatesCompleteIdentityBeforeDelete() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        for output in [
+            #"{"devices":{"other-runtime":[{"udid":"GATE-UDID","deviceTypeIdentifier":"type"}]}}"#,
+            #"{"devices":{"runtime":[{"udid":"GATE-UDID","deviceTypeIdentifier":"other-type"}]}}"#,
+        ] {
+            let url = root.appendingPathComponent(UUID().uuidString)
+            try writeGateRegistration(to: url, state: .idle)
+            let launcher = GateSimulatorCleanupIdentityLog(output: output)
+            await #expect(throws: SimulatorError.self) {
+                try await SimulatorManager(launcher: launcher).cleanupGateSimulator(
+                    registrationURL: url, expectedGateRunNonce: nil,
+                    expectedGuideLockInode: 42)
+            }
+            #expect(await launcher.destructiveCommands == 0)
+        }
+    }
+
+    @Test("Cleaning retry publishes deleted when its exact device is already absent")
+    func cleaningRetryIsIdempotentWhenDeviceAlreadyAbsent() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        let url = root.appendingPathComponent("registration.json")
+        try writeGateRegistration(to: url, state: .cleaning)
+        let launcher = GateSimulatorCleanupIdentityLog(
+            output: #"{"devices":{"runtime":[{"udid":"UNRELATED-UDID","deviceTypeIdentifier":"type"}]}}"#)
+
+        try await SimulatorManager(launcher: launcher).cleanupGateSimulator(
+            registrationURL: url, expectedGateRunNonce: nil, expectedGuideLockInode: 42)
+
+        #expect(try GateSimulatorRegistration.load(from: url).state == .deleted)
+        #expect(await launcher.destructiveCommands == 0)
+    }
+
+    @Test("Gate manager rejects clone, delete, readback, and registration failure branches")
+    func gateManagerFailureBranches() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        for cloneOutput in ["EXIT", ""] {
+            let url = root.appendingPathComponent("registration-\(cloneOutput.count).json")
+            await #expect(throws: SimulatorError.self) {
+                try await SimulatorManager(launcher: GateSimulatorBranchLauncher(
+                    cloneOutput: cloneOutput)).prepareGateSimulator(
+                        destination: "platform=iOS Simulator", cacheRoot: root,
+                        registrationURL: url, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+                        guideLockInode: 42)
+            }
+        }
+        let missingParent = root.appendingPathComponent("missing-parent")
+        await #expect(throws: SimulatorError.self) {
+            try await SimulatorManager(launcher: GateSimulatorBranchLauncher(
+                cleanupFailure: .delete)).prepareGateSimulator(
+                    destination: "platform=iOS Simulator", cacheRoot: root,
+                    registrationURL: missingParent.appendingPathComponent("registration.json"),
+                    gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42)
+        }
+        for mode in [GateSimulatorBranchLauncher.CleanupFailure.delete,
+                     GateSimulatorBranchLauncher.CleanupFailure.list,
+                     GateSimulatorBranchLauncher.CleanupFailure.prelist] {
+            let url = root.appendingPathComponent("cleanup-\(mode).json")
+            try writeGateRegistration(to: url, state: .idle)
+            await #expect(throws: SimulatorError.self) {
+                try await SimulatorManager(launcher: GateSimulatorBranchLauncher(
+                    cleanupFailure: mode)).cleanupGateSimulator(
+                        registrationURL: url, expectedGateRunNonce: nil,
+                        expectedGuideLockInode: 42)
+            }
+        }
+        let invalid = root.appendingPathComponent("invalid.json")
+        try writeGateRegistration(to: invalid, state: .deleted)
+        #expect(throws: SimulatorError.self) {
+            _ = try SimulatorManager.validatedRegistration(at: invalid, expectedGuideLockInode: 42)
+        }
+        let active = root.appendingPathComponent("active.json")
+        try writeGateRegistration(to: active, state: .idle)
+        #expect(throws: SimulatorError.self) {
+            try SimulatorManager(launcher: MockProcessLauncher(exitCode: 0)).finishRegistration(
+                at: active, expectedGuideLockInode: 42, invocationNonce: "wrong")
+        }
+        #expect(!SimulatorManager.containsUDID("GATE-UDID", in: "not-json"))
+        #expect(!SimulatorManager.containsRegistration(
+            try GateSimulatorRegistration.load(from: active), in: "not-json"))
+        var mismatchedSetManager = SimulatorManager(launcher: MockProcessLauncher(
+            exitCode: 0,
+            output: #"{"devices":{"runtime":[{"udid":"GATE-UDID","deviceTypeIdentifier":"type"}]}}"#))
+        mismatchedSetManager.defaultDeviceSetURL = root
+        await #expect(throws: SimulatorError.self) {
+            try await mismatchedSetManager.validatedRegistration(
+                at: active, expectedCacheRoot: root, expectedGuideLockInode: 42)
+        }
+    }
+
+    @Test("Gate manager falls back for unavailable identifiers and malformed boot state")
+    func gateManagerFallbackBranches() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        await #expect(throws: SimulatorError.self) {
+            try await SimulatorManager(launcher: GateSimulatorBranchLauncher(
+                malformedIdentifiers: true)).prepareGateSimulator(
+                    destination: "platform=iOS Simulator", cacheRoot: root,
+                    registrationURL: root.appendingPathComponent("fallback.json"),
+                    gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42)
+        }
+        await #expect(throws: SimulatorError.self) {
+            try await SimulatorManager(launcher: MockProcessLauncher(exitCode: 0, output: "not-json"))
+                .waitForBooted(udid: "GATE-UDID", maxAttempts: 1, sleepDuration: .zero)
+        }
+    }
+
+    private func writeGateRegistration(
+        to url: URL, state: GateSimulatorRegistration.State
+    ) throws {
+        let registration = GateSimulatorRegistration(
+            schemaVersion: 1, gateRunNonce: "ABCDEFGHIJKLMNOPQRSTUV", guideLockInode: 42,
+            deviceSetPath: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Developer/CoreSimulator/Devices").path,
+            udid: "GATE-UDID", runtimeIdentifier: "runtime", deviceTypeIdentifier: "type",
+            generation: 1, state: state, activeInvocationNonce: nil)
+        try JSONEncoder().encode(registration).write(to: url)
     }
 
     @Test("Gate cleanup rejects a device still present after deletion")
@@ -314,6 +588,13 @@ struct SimulatorManagerTests {
 private actor GateSimulatorCommandLog: ProcessLaunching {
     private(set) var commands: [String] = []
     private var exists = false
+    private(set) var unrelatedExists = true
+    private(set) var cloneTimeout: Double?
+    let sourceShutdownExitCode: Int32
+
+    init(sourceShutdownExitCode: Int32 = 0) {
+        self.sourceShutdownExitCode = sourceShutdownExitCode
+    }
 
     func launch(
         executableURL: URL,
@@ -322,13 +603,17 @@ private actor GateSimulatorCommandLog: ProcessLaunching {
         timeout: Double
     ) async throws -> Int32 {
         commands.append(([executableURL.path] + arguments).joined(separator: " "))
+        if arguments.contains("shutdown"), arguments.contains("BASE-UDID") {
+            return sourceShutdownExitCode
+        }
         if arguments.contains("delete") { exists = false }
         return 0
     }
 
     func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
         commands.append(([request.executableURL.path] + request.arguments).joined(separator: " "))
-        if request.arguments.contains("create") {
+        if request.arguments.contains("clone") { cloneTimeout = request.timeout }
+        if request.arguments.contains("create") || request.arguments.contains("clone") {
             exists = true
             return (0, "GATE-UDID\n")
         }
@@ -338,9 +623,10 @@ private actor GateSimulatorCommandLog: ProcessLaunching {
         if request.arguments.contains("runtimes") {
             return (0, #"{"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-0","isAvailable":true}]}"#)
         }
-        return exists
-            ? (0, #"{"devices":{"runtime":[{"udid":"GATE-UDID"}]}}"#)
-            : (0, #"{"devices":{}}"#)
+        let gate = exists
+            ? #",{"udid":"GATE-UDID","name":"SwiftMutationGate","deviceTypeIdentifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16","state":"Booted"}"#
+            : ""
+        return (0, #"{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{"udid":"BASE-UDID","name":"iPhone 16","deviceTypeIdentifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16","state":"Shutdown"},{"udid":"UNRELATED-UDID","name":"Unrelated","deviceTypeIdentifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16","state":"Shutdown"}"# + gate + "]}}")
     }
 }
 
@@ -356,5 +642,147 @@ private struct GateSimulatorStillListedLog: ProcessLaunching {
     func launch(executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double) async throws -> Int32 { 0 }
     func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
         (0, "GATE-UDID")
+    }
+}
+
+private actor GateSimulatorBootFailureLog: ProcessLaunching {
+    private(set) var commands: [String] = []
+    private var exists = false
+
+    func launch(
+        executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
+    ) async throws -> Int32 {
+        commands.append(([executableURL.path] + arguments).joined(separator: " "))
+        if arguments.contains("boot") { return 1 }
+        if arguments.contains("delete") { exists = false }
+        return 0
+    }
+
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        commands.append(([request.executableURL.path] + request.arguments).joined(separator: " "))
+        if request.arguments.contains("devicetypes") {
+            return (0, #"{"devicetypes":[{"name":"iPhone 16","identifier":"type"}]}"#)
+        }
+        if request.arguments.contains("runtimes") {
+            return (0, #"{"runtimes":[{"identifier":"runtime","isAvailable":true}]}"#)
+        }
+        if request.arguments.contains("clone") {
+            exists = true
+            return (0, "GATE-UDID\n")
+        }
+        let gate = exists
+            ? #",{"name":"SwiftMutationGate","udid":"GATE-UDID","deviceTypeIdentifier":"type","isAvailable":true}"#
+            : ""
+        return (0, #"{"devices":{"runtime":[{"name":"iPhone 16","udid":"SOURCE-UDID","deviceTypeIdentifier":"type","isAvailable":true},{"name":"Unrelated","udid":"UNRELATED-UDID","deviceTypeIdentifier":"type","isAvailable":true}"# + gate + "]}}")
+    }
+}
+
+private actor GateSimulatorReceiptWriteFailureLog: ProcessLaunching {
+    private(set) var commands: [String] = []
+    private var exists = false
+
+    func launch(
+        executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
+    ) async throws -> Int32 {
+        commands.append(([executableURL.path] + arguments).joined(separator: " "))
+        if arguments.contains("delete") { exists = false }
+        return 0
+    }
+
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        commands.append(([request.executableURL.path] + request.arguments).joined(separator: " "))
+        if request.arguments.contains("devicetypes") {
+            return (0, #"{"devicetypes":[{"name":"iPhone 16","identifier":"type"}]}"#)
+        }
+        if request.arguments.contains("runtimes") {
+            return (0, #"{"runtimes":[{"identifier":"runtime","isAvailable":true}]}"#)
+        }
+        if request.arguments.contains("clone") {
+            exists = true
+            return (0, "GATE-UDID\n")
+        }
+        let gate = exists ? #",{"udid":"GATE-UDID"}"# : ""
+        return (0, #"{"devices":{"runtime":[{"name":"iPhone 16","udid":"SOURCE-UDID","deviceTypeIdentifier":"type","isAvailable":true},{"udid":"UNRELATED-UDID"}"# + gate + "]}}")
+    }
+}
+
+private actor GateSimulatorCleaningRetryLog: ProcessLaunching {
+    private(set) var commands: [String] = []
+    private var exists = true
+    func launch(
+        executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
+    ) async throws -> Int32 {
+        commands.append(([executableURL.path] + arguments).joined(separator: " "))
+        if arguments.contains("delete") { exists = false }
+        return arguments.contains("shutdown") ? 1 : 0
+    }
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        commands.append(([request.executableURL.path] + request.arguments).joined(separator: " "))
+        let gate = exists ? #",{"udid":"GATE-UDID","deviceTypeIdentifier":"type"}"# : ""
+        return (0, #"{"devices":{"runtime":[{"udid":"UNRELATED-UDID"}"# + gate + "]}}")
+    }
+}
+
+private actor GateSimulatorBranchLauncher: ProcessLaunching {
+    enum CleanupFailure: String { case none, delete, list, prelist }
+    let cloneOutput: String
+    let cleanupFailure: CleanupFailure
+    let malformedIdentifiers: Bool
+    private var deviceLists = 0
+
+    init(
+        cloneOutput: String = "GATE-UDID\n",
+        cleanupFailure: CleanupFailure = .none,
+        malformedIdentifiers: Bool = false
+    ) {
+        self.cloneOutput = cloneOutput
+        self.cleanupFailure = cleanupFailure
+        self.malformedIdentifiers = malformedIdentifiers
+    }
+
+    func launch(
+        executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
+    ) async throws -> Int32 {
+        arguments.contains("delete") && cleanupFailure == .delete ? 1 : 0
+    }
+
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        if request.arguments.contains("devicetypes") {
+            return malformedIdentifiers ? (1, "")
+                : (0, #"{"devicetypes":[{"name":"iPhone 16","identifier":"type"}]}"#)
+        }
+        if request.arguments.contains("runtimes") {
+            return malformedIdentifiers ? (0, #"{"runtimes":[]}"#)
+                : (0, #"{"runtimes":[{"identifier":"runtime","isAvailable":true}]}"#)
+        }
+        if request.arguments.contains("clone") {
+            return cloneOutput == "EXIT" ? (1, "") : (0, cloneOutput)
+        }
+        if request.arguments.contains("devices") {
+            deviceLists += 1
+            if cleanupFailure == .prelist { return (1, #"{"devices":{}}"#) }
+            if cleanupFailure == .list, deviceLists > 1 { return (1, #"{"devices":{}}"#) }
+            if cleanupFailure != .none, deviceLists == 1 {
+                return (0, #"{"devices":{"runtime":[{"udid":"GATE-UDID","deviceTypeIdentifier":"type"}]}}"#)
+            }
+        }
+        return (0, #"{"devices":{"runtime":[{"name":"iPhone 16","udid":"SOURCE-UDID","deviceTypeIdentifier":"type","isAvailable":true}]}}"#)
+    }
+}
+
+private actor GateSimulatorCleanupIdentityLog: ProcessLaunching {
+    let output: String
+    private(set) var destructiveCommands = 0
+    init(output: String) { self.output = output }
+    func launch(
+        executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
+    ) async throws -> Int32 {
+        if arguments.contains("shutdown") || arguments.contains("delete") {
+            destructiveCommands += 1
+        }
+        return 0
+    }
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        (0, output)
     }
 }

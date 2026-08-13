@@ -5,6 +5,40 @@ import Testing
 
 @Suite("MutantExecutor")
 struct MutantExecutorTests {
+    @Test("Registered gate simulator binds legacy build-for-testing to its exact UDID")
+    func registeredSimulatorBindsLegacyBuildDestination() async throws {
+        let dir = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(dir) }
+        let source = dir.appendingPathComponent("Foo.swift")
+        try Data("let x = true".utf8).write(to: source)
+        let launcher = LegacyBuildDestinationLog()
+        let executor = MutantExecutor(
+            configuration: makeRunnerConfiguration(
+                projectPath: dir.path,
+                projectType: .xcode(
+                    scheme: "App", destination: "platform=iOS Simulator,name=iPhone 16")),
+            launcher: launcher, registeredSimulatorUDID: "REGISTERED-UDID")
+        let mutant = makeMutantDescriptor(
+            filePath: source.path, originalText: "true", mutatedText: "false",
+            replacementKind: .booleanLiteral, isSchematizable: true,
+            mutatedSourceContent: "let x = false")
+
+        _ = try await executor.execute(makeRunnerInput(
+            projectPath: dir.path,
+            projectType: .xcode(
+                scheme: "App", destination: "platform=iOS Simulator,name=iPhone 16"),
+            schematizedFiles: [.init(originalPath: source.path, schematizedContent: "let x = false")],
+            mutants: [mutant]))
+
+        let builds = await launcher.buildArguments
+        #expect(builds.count == 2)
+        for arguments in builds {
+            let destinationIndex = try #require(arguments.firstIndex(of: "-destination"))
+            #expect(arguments[destinationIndex + 1]
+                == "platform=iOS Simulator,id=REGISTERED-UDID")
+        }
+    }
+
     @Test("Given empty mutant list, when execute called, then returns empty results")
     func emptyMutantsReturnsEmpty() async throws {
         let dir = try FileHelpers.makeTemporaryDirectory()
@@ -792,5 +826,18 @@ struct MutantExecutorTests {
 
         #expect(results.count == 1)
         #expect(results[0].status == .unviable)
+    }
+}
+
+private actor LegacyBuildDestinationLog: ProcessLaunching {
+    private(set) var buildArguments: [[String]] = []
+    func launch(
+        executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
+    ) async throws -> Int32 { 0 }
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        if request.arguments.contains("build-for-testing") {
+            buildArguments.append(request.arguments)
+        }
+        return (1, "build failed")
     }
 }

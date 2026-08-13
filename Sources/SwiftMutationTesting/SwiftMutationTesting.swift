@@ -4,12 +4,35 @@ import Darwin
 public struct SwiftMutationTesting {
 
     public static func main(args: [String] = Array(CommandLine.arguments.dropFirst())) async -> Int32 {
+        if args.first == "--process-custody-identity-status" {
+            let result = processIdentityStatus(arguments: Array(args.dropFirst()))
+            if let output = result.1 { print(output) }
+            return result.0
+        }
         if args.first == "--gate-simulator-supervisor" {
             return await GateSimulatorSupervisor.run(Array(args.dropFirst()))
+        }
+        if args.first == "--gate-simulator-prepare-supervisor" {
+            return await GateSimulatorSupervisor.runPreparing(Array(args.dropFirst()))
         }
         SandboxCleaner.installSignalHandlers()
         SandboxCleaner.removeOrphaned()
         return await run(args: args).rawValue
+    }
+
+    static func processIdentityStatus(arguments: [String]) -> (Int32, String?) {
+        guard arguments.count == 3,
+            let pid = Int32(arguments[0]), pid > 0,
+            let pgid = Int32(arguments[1]), pgid > 0,
+            arguments[2].range(
+                of: #"^[0-9]{1,20}:[0-9]{1,6}$"#, options: .regularExpression) != nil
+        else { return (64, nil) }
+        switch SystemProcessIdentity.status(of: .init(
+            pid: pid, processGroupID: pgid, birthIdentity: arguments[2])) {
+        case .matching: return (0, "exact")
+        case .absent: return (0, "absent")
+        case .mismatched: return (0, "mismatch")
+        }
     }
 
     static func run(args: [String], launcher: (any ProcessLaunching)? = nil) async -> ExitCode {
@@ -65,7 +88,9 @@ public struct SwiftMutationTesting {
     static func execute(
         parsed: ParsedArguments,
         launcher: (any ProcessLaunching)?,
-        defaultXcodeLauncher: any ProcessLaunching = XcodeProcessLauncher()
+        defaultXcodeLauncher: any ProcessLaunching = XcodeProcessLauncher(),
+        gateSupervisorExecutableURL: URL = URL(fileURLWithPath: CommandLine.arguments[0]),
+        xcrunURL: URL = URL(fileURLWithPath: "/usr/bin/xcrun")
     ) async throws -> ExitCode {
         if parsed.showHelp {
             print(HelpText.usage)
@@ -96,13 +121,24 @@ public struct SwiftMutationTesting {
                 guard let destination = parsed.build.destination else {
                     throw UsageError(message: "--prepare-gate-simulator requires --destination")
                 }
-                _ = try await manager.prepareGateSimulator(
-                    destination: destination,
-                    cacheRoot: URL(fileURLWithPath: root, isDirectory: true),
-                    registrationURL: URL(fileURLWithPath: registrationPath),
-                    gateRunNonce: nonce,
-                    guideLockInode: inode
-                )
+                if launcher == nil, defaultXcodeLauncher is XcodeProcessLauncher {
+                    let custody = try GateSimulatorCustodySession.startPreparing(
+                        destination: destination,
+                        registrationURL: URL(fileURLWithPath: registrationPath),
+                        cacheRoot: URL(fileURLWithPath: root, isDirectory: true),
+                        gateRunNonce: nonce, guideLockInode: inode,
+                        guideLockFD: guideLockFD,
+                        executableURL: gateSupervisorExecutableURL, xcrunURL: xcrunURL)
+                    try custody.acknowledgePreparation()
+                } else {
+                    _ = try await manager.prepareGateSimulator(
+                        destination: destination,
+                        cacheRoot: URL(fileURLWithPath: root, isDirectory: true),
+                        registrationURL: URL(fileURLWithPath: registrationPath),
+                        gateRunNonce: nonce,
+                        guideLockInode: inode
+                    )
+                }
             } else {
                 try await manager.cleanupGateSimulator(
                     registrationURL: URL(fileURLWithPath: registrationPath),
@@ -154,8 +190,6 @@ public struct SwiftMutationTesting {
                     guideLockInode: inode, invocationNonce: invocationNonce,
                     wrapperLeaseFD: wrapperLeaseFD, guideLockFD: guideLockFD)
             }
-            executionLauncher = SimulatorDeviceSetLauncher(
-                base: executionLauncher, deviceSetPath: registration.deviceSetPath)
         }
         let legacyBuildCounter: ObservedBuildCountingLauncher?
         if parsed.cache.mode == .legacyBenchmark {

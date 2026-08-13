@@ -1,7 +1,59 @@
 import Darwin
 import Foundation
 
+struct GateSimulatorSystemCalls: Sendable {
+    var pipe: @Sendable (UnsafeMutablePointer<Int32>) -> Int32 = { Darwin.pipe($0) }
+    var poll: @Sendable (UnsafeMutablePointer<pollfd>, nfds_t, Int32) -> Int32 = {
+        Darwin.poll($0, $1, $2)
+    }
+    var waitpid: @Sendable (Int32, UnsafeMutablePointer<Int32>, Int32) -> Int32 = {
+        Darwin.waitpid($0, $1, $2)
+    }
+    var configureSpawnAttributes: @Sendable (UnsafeMutablePointer<posix_spawnattr_t?>) -> Int32 = {
+        _ = posix_spawnattr_init($0)
+        _ = posix_spawnattr_setflags($0, Int16(POSIX_SPAWN_SETPGROUP))
+        return posix_spawnattr_setpgroup($0, 0)
+    }
+    var destroySpawnAttributes: @Sendable (UnsafeMutablePointer<posix_spawnattr_t?>) -> Int32 = {
+        posix_spawnattr_destroy($0)
+    }
+}
+
 enum GateSimulatorSupervisor {
+    nonisolated(unsafe) static var systemCalls = GateSimulatorSystemCalls()
+    static func runPreparing(_ arguments: [String]) async -> Int32 {
+        guard arguments.count == 9,
+            let inode = UInt64(arguments[2]),
+            let guideFD = Int32(arguments[5]),
+            let controlFD = Int32(arguments[6]),
+            let readinessFD = Int32(arguments[7]),
+            descriptorInode(guideFD) == inode
+        else { return 64 }
+        let registrationURL = URL(fileURLWithPath: arguments[0])
+        let cacheRoot = URL(fileURLWithPath: arguments[1], isDirectory: true)
+        let nonce = arguments[3]
+        let destination = arguments[4]
+        let manager = SimulatorManager(
+            launcher: XcodeProcessLauncher(), executableURL: URL(fileURLWithPath: arguments[8]))
+        do {
+            let prepareChild = try PrepareLifecycleChildIdentity.current()
+            _ = try await manager.prepareGateSimulator(
+                destination: destination, cacheRoot: cacheRoot,
+                registrationURL: registrationURL, gateRunNonce: nonce,
+                guideLockInode: inode, prepareLifecycleChild: prepareChild)
+        } catch { return 67 }
+        var ready: UInt8 = 1
+        guard Darwin.write(readinessFD, &ready, 1) == 1 else {
+            return await cleanup(manager, registrationURL, cacheRoot, inode)
+        }
+        _ = close(readinessFD)
+        var acknowledgment: UInt8 = 0
+        guard Darwin.read(controlFD, &acknowledgment, 1) == 1, acknowledgment == 3 else {
+            return await cleanup(manager, registrationURL, cacheRoot, inode)
+        }
+        return 0
+    }
+
     static func run(_ arguments: [String]) async -> Int32 {
         guard arguments.count == 10,
             let inode = UInt64(arguments[2]),
@@ -21,7 +73,7 @@ enum GateSimulatorSupervisor {
             registration.guideLockInode == inode,
             registration.state == .active,
             registration.activeInvocationNonce == invocationNonce,
-            canonicalDeviceSet(registration, root: cacheRoot)
+            canonicalDefaultDeviceSet(registration)
         else { return 65 }
 
         let manager = SimulatorManager(launcher: XcodeProcessLauncher(), executableURL: xcrunURL)
@@ -38,8 +90,8 @@ enum GateSimulatorSupervisor {
             pollfd(fd: controlFD, events: Int16(POLLIN | POLLHUP), revents: 0),
             pollfd(fd: wrapperFD, events: Int16(POLLIN | POLLHUP), revents: 0),
         ]
-        while true {
-            let result = poll(&descriptors, nfds_t(descriptors.count), -1)
+        repeat {
+            let result = systemCalls.poll(&descriptors, nfds_t(descriptors.count), -1)
             if result < 0, errno == EINTR { continue }
             guard result > 0 else { return await cleanup(manager, registrationURL, cacheRoot, inode) }
             if descriptors[1].revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
@@ -51,10 +103,8 @@ enum GateSimulatorSupervisor {
                 if count == 1, command == 2 { return 0 }
                 if count <= 0 { return await cleanup(manager, registrationURL, cacheRoot, inode) }
             }
-            if descriptors[0].revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
-                return await cleanup(manager, registrationURL, cacheRoot, inode)
-            }
-        }
+            if descriptors[0].revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 { return await cleanup(manager, registrationURL, cacheRoot, inode) }
+        } while true
     }
 
     private static func descriptorInode(_ descriptor: Int32) -> UInt64? {
@@ -62,9 +112,9 @@ enum GateSimulatorSupervisor {
         return fstat(descriptor, &metadata) == 0 ? UInt64(metadata.st_ino) : nil
     }
 
-    private static func canonicalDeviceSet(_ registration: GateSimulatorRegistration, root: URL) -> Bool {
-        let expected = root.resolvingSymlinksInPath().standardizedFileURL
-            .appendingPathComponent("gate-simulator-\(registration.gateRunNonce)", isDirectory: true)
+    private static func canonicalDefaultDeviceSet(_ registration: GateSimulatorRegistration) -> Bool {
+        let expected = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true)
             .resolvingSymlinksInPath().standardizedFileURL
         return URL(fileURLWithPath: registration.deviceSetPath, isDirectory: true)
             .resolvingSymlinksInPath().standardizedFileURL == expected
@@ -75,17 +125,12 @@ enum GateSimulatorSupervisor {
     ) async -> Bool {
         guard let result = try? await manager.launcher.launchCapturing(ProcessRequest(
             executableURL: manager.executableURL,
-            arguments: ["simctl", "--set", registration.deviceSetPath, "list", "devices", "--json"],
+            arguments: ["simctl", "list", "devices", "--json"],
             environment: nil, additionalEnvironment: [:],
             workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 30)),
-            result.exitCode == 0,
-            let data = result.output.data(using: .utf8),
-            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let devices = object["devices"] as? [String: [[String: Any]]]
+            result.exitCode == 0
         else { return false }
-        return devices.values.flatMap({ $0 }).contains(where: {
-            $0["udid"] as? String == registration.udid
-        })
+        return SimulatorManager.containsRegistration(registration, in: result.output)
     }
 
     private static func cleanup(
@@ -101,6 +146,7 @@ enum GateSimulatorSupervisor {
 }
 
 final class GateSimulatorCustodySession: @unchecked Sendable {
+    nonisolated(unsafe) static var systemCalls = GateSimulatorSystemCalls()
     private let pid: Int32
     private var controlWrite: Int32
     private let lock = NSLock()
@@ -117,7 +163,7 @@ final class GateSimulatorCustodySession: @unchecked Sendable {
     ) throws -> GateSimulatorCustodySession {
         var control: [Int32] = [-1, -1]
         var readiness: [Int32] = [-1, -1]
-        guard pipe(&control) == 0, pipe(&readiness) == 0 else {
+        guard systemCalls.pipe(&control) == 0, systemCalls.pipe(&readiness) == 0 else {
             throw PreparedCacheError.unverifiableProcessIdentity
         }
         let childDescriptors = [control[0], readiness[1], Int32(guideLockFD), Int32(wrapperLeaseFD)]
@@ -139,10 +185,14 @@ final class GateSimulatorCustodySession: @unchecked Sendable {
             envp.dropLast().forEach { free($0) }
         }
         var childPID: Int32 = 0
+        var attributes: posix_spawnattr_t?
+        defer { if attributes != nil { _ = systemCalls.destroySpawnAttributes(&attributes) } }
+        guard systemCalls.configureSpawnAttributes(&attributes) == 0
+        else { throw PreparedCacheError.unverifiableProcessIdentity }
         let spawnResult = argv.withUnsafeBufferPointer { argvBuffer in
             envp.withUnsafeBufferPointer { envBuffer in
                 posix_spawn(
-                    &childPID, executable, nil, nil,
+                    &childPID, executable, nil, &attributes,
                     UnsafeMutablePointer(mutating: argvBuffer.baseAddress!),
                     UnsafeMutablePointer(mutating: envBuffer.baseAddress!))
             }
@@ -174,6 +224,73 @@ final class GateSimulatorCustodySession: @unchecked Sendable {
         return GateSimulatorCustodySession(pid: childPID, controlWrite: control[1])
     }
 
+    static func startPreparing(
+        destination: String,
+        registrationURL: URL,
+        cacheRoot: URL,
+        gateRunNonce: String,
+        guideLockInode: UInt64,
+        guideLockFD: Int = 4,
+        executableURL: URL = URL(fileURLWithPath: CommandLine.arguments[0]),
+        xcrunURL: URL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    ) throws -> GateSimulatorCustodySession {
+        var control: [Int32] = [-1, -1]
+        var readiness: [Int32] = [-1, -1]
+        guard systemCalls.pipe(&control) == 0, systemCalls.pipe(&readiness) == 0 else {
+            throw PreparedCacheError.unverifiableProcessIdentity
+        }
+        for descriptor in [control[0], readiness[1], Int32(guideLockFD)] {
+            _ = fcntl(descriptor, F_SETFD, 0)
+        }
+        _ = fcntl(readiness[1], F_SETNOSIGPIPE, 1)
+        _ = fcntl(control[1], F_SETFD, FD_CLOEXEC)
+        _ = fcntl(readiness[0], F_SETFD, FD_CLOEXEC)
+        let childArguments = [
+            "--gate-simulator-prepare-supervisor", registrationURL.path, cacheRoot.path,
+            String(guideLockInode), gateRunNonce, destination, String(guideLockFD),
+            String(control[0]), String(readiness[1]), xcrunURL.path,
+        ]
+        let executable = executableURL.standardizedFileURL.path
+        let argv = ([executable] + childArguments).map { strdup($0) } + [nil]
+        let environment = ProcessInfo.processInfo.environment.map { "\($0.key)=\($0.value)" }.sorted()
+        let envp = environment.map { strdup($0) } + [nil]
+        defer {
+            argv.dropLast().forEach { free($0) }
+            envp.dropLast().forEach { free($0) }
+        }
+        var childPID: Int32 = 0
+        var attributes: posix_spawnattr_t?
+        defer { if attributes != nil { _ = systemCalls.destroySpawnAttributes(&attributes) } }
+        guard systemCalls.configureSpawnAttributes(&attributes) == 0
+        else { throw PreparedCacheError.unverifiableProcessIdentity }
+        let spawnResult = argv.withUnsafeBufferPointer { argvBuffer in
+            envp.withUnsafeBufferPointer { envBuffer in
+                posix_spawn(
+                    &childPID, executable, nil, &attributes,
+                    UnsafeMutablePointer(mutating: argvBuffer.baseAddress!),
+                    UnsafeMutablePointer(mutating: envBuffer.baseAddress!))
+            }
+        }
+        if spawnResult != 0 || childPID <= 0 {
+            control.forEach { _ = close($0) }
+            readiness.forEach { _ = close($0) }
+            throw PreparedCacheError.unverifiableProcessIdentity
+        }
+        _ = close(control[0])
+        _ = close(readiness[1])
+        var ready: UInt8 = 0
+        let readyCount = Darwin.read(readiness[0], &ready, 1)
+        _ = close(readiness[0])
+        guard readyCount == 1, ready == 1 else {
+            _ = close(control[1])
+            _ = waitForExit(childPID)
+            throw PreparedCacheError.unverifiableProcessIdentity
+        }
+        _ = fcntl(control[1], F_SETFD, FD_CLOEXEC)
+        _ = fcntl(Int32(guideLockFD), F_SETFD, FD_CLOEXEC)
+        return GateSimulatorCustodySession(pid: childPID, controlWrite: control[1])
+    }
+
     static func startIfNeeded(
         enabled: Bool,
         registrationURL: URL,
@@ -181,13 +298,15 @@ final class GateSimulatorCustodySession: @unchecked Sendable {
         guideLockInode: UInt64,
         invocationNonce: String,
         wrapperLeaseFD: Int,
-        guideLockFD: Int
+        guideLockFD: Int,
+        executableURL: URL = URL(fileURLWithPath: CommandLine.arguments[0]),
+        xcrunURL: URL = URL(fileURLWithPath: "/usr/bin/xcrun")
     ) throws -> GateSimulatorCustodySession? {
-        guard enabled else { return nil }
-        return try start(
+        return enabled ? try start(
             registrationURL: registrationURL, cacheRoot: cacheRoot,
             guideLockInode: guideLockInode, invocationNonce: invocationNonce,
-            wrapperLeaseFD: wrapperLeaseFD, guideLockFD: guideLockFD)
+            wrapperLeaseFD: wrapperLeaseFD, guideLockFD: guideLockFD,
+            executableURL: executableURL, xcrunURL: xcrunURL) : nil
     }
 
     private init(pid: Int32, controlWrite: Int32) {
@@ -213,6 +332,24 @@ final class GateSimulatorCustodySession: @unchecked Sendable {
         }
     }
 
+    func acknowledgePreparation() throws {
+        let descriptor = lock.withLock { () -> Int32 in
+            let value = controlWrite
+            controlWrite = -1
+            return value
+        }
+        guard descriptor >= 0 else { return }
+        var acknowledgment: UInt8 = 3
+        guard Darwin.write(descriptor, &acknowledgment, 1) == 1 else {
+            _ = close(descriptor)
+            throw PreparedCacheError.unverifiableProcessIdentity
+        }
+        _ = close(descriptor)
+        guard Self.waitForExit(pid) == 0 else {
+            throw PreparedCacheError.unverifiableProcessIdentity
+        }
+    }
+
     deinit {
         let descriptor = lock.withLock { () -> Int32 in
             let value = controlWrite
@@ -225,7 +362,10 @@ final class GateSimulatorCustodySession: @unchecked Sendable {
 
     private static func waitForExit(_ pid: Int32) -> Int32 {
         var status: Int32 = 0
-        while waitpid(pid, &status, 0) < 0, errno == EINTR {}
+        var result: Int32
+        repeat { result = systemCalls.waitpid(pid, &status, 0) }
+        while result < 0 && errno == EINTR
+        guard result == pid else { return -1 }
         return status & 0x7f == 0 ? (status >> 8) & 0xff : -1
     }
 }

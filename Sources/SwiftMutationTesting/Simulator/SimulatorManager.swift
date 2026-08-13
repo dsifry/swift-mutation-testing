@@ -1,5 +1,25 @@
 import Foundation
 
+struct PrepareLifecycleChildIdentity: Codable, Equatable, Sendable {
+    let pid: Int32
+    let pgid: Int32
+    let birthIdentity: String
+
+    static func current(
+        identity: (Int32) throws -> CustodiedProcessGroup = {
+            try SystemProcessIdentity.group(for: $0)
+        }
+    ) throws -> Self {
+        let pid = getpid()
+        let process = try identity(pid)
+        guard process.processGroupID == pid
+        else { throw PreparedCacheError.unverifiableProcessIdentity }
+        return Self(
+            pid: process.pid, pgid: process.processGroupID,
+            birthIdentity: process.birthIdentity)
+    }
+}
+
 struct GateSimulatorRegistration: Codable, Equatable, Sendable {
     enum State: String, Codable, Sendable { case creating, idle, active, cleaning, deleted }
 
@@ -13,10 +33,12 @@ struct GateSimulatorRegistration: Codable, Equatable, Sendable {
     let generation: Int
     let state: State
     let activeInvocationNonce: String?
+    let prepareLifecycleChild: PrepareLifecycleChildIdentity
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case schemaVersion, gateRunNonce, guideLockInode, deviceSetPath, udid
         case runtimeIdentifier, deviceTypeIdentifier, generation, state, activeInvocationNonce
+        case prepareLifecycleChild
     }
 
     init(
@@ -29,7 +51,9 @@ struct GateSimulatorRegistration: Codable, Equatable, Sendable {
         deviceTypeIdentifier: String,
         generation: Int,
         state: State,
-        activeInvocationNonce: String?
+        activeInvocationNonce: String?,
+        prepareLifecycleChild: PrepareLifecycleChildIdentity = .init(
+            pid: 1, pgid: 1, birthIdentity: "0:0")
     ) {
         self.schemaVersion = schemaVersion
         self.gateRunNonce = gateRunNonce
@@ -41,6 +65,7 @@ struct GateSimulatorRegistration: Codable, Equatable, Sendable {
         self.generation = generation
         self.state = state
         self.activeInvocationNonce = activeInvocationNonce
+        self.prepareLifecycleChild = prepareLifecycleChild
     }
 
     init(from decoder: Decoder) throws {
@@ -55,6 +80,8 @@ struct GateSimulatorRegistration: Codable, Equatable, Sendable {
         generation = try container.decode(Int.self, forKey: .generation)
         state = try container.decode(State.self, forKey: .state)
         activeInvocationNonce = try container.decodeIfPresent(String.self, forKey: .activeInvocationNonce)
+        prepareLifecycleChild = try container.decode(
+            PrepareLifecycleChildIdentity.self, forKey: .prepareLifecycleChild)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -73,12 +100,20 @@ struct GateSimulatorRegistration: Codable, Equatable, Sendable {
         } else {
             try container.encodeNil(forKey: .activeInvocationNonce)
         }
+        try container.encode(prepareLifecycleChild, forKey: .prepareLifecycleChild)
     }
 
     static func load(from url: URL) throws -> Self {
         let data = try Data(contentsOf: url)
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-            Set(object.keys) == Set(CodingKeys.allCases.map(\.rawValue))
+            Set(object.keys) == Set(CodingKeys.allCases.map(\.rawValue)),
+            let child = object[CodingKeys.prepareLifecycleChild.rawValue] as? [String: Any],
+            Set(child.keys) == Set(["pid", "pgid", "birthIdentity"]),
+            let pid = child["pid"] as? Int, pid > 0,
+            let pgid = child["pgid"] as? Int, pgid == pid,
+            let birthIdentity = child["birthIdentity"] as? String,
+            birthIdentity.range(of: #"^[0-9]{1,20}:[0-9]{1,6}$"#,
+                options: .regularExpression) != nil
         else { throw SimulatorError.cloneFailed(udid: "invalid gate registration") }
         return try JSONDecoder().decode(Self.self, from: data)
     }
@@ -88,7 +123,8 @@ struct GateSimulatorRegistration: Codable, Equatable, Sendable {
             schemaVersion: schemaVersion, gateRunNonce: gateRunNonce,
             guideLockInode: guideLockInode, deviceSetPath: deviceSetPath, udid: udid,
             runtimeIdentifier: runtimeIdentifier, deviceTypeIdentifier: deviceTypeIdentifier,
-            generation: generation, state: state, activeInvocationNonce: nil
+            generation: generation, state: state, activeInvocationNonce: nil,
+            prepareLifecycleChild: prepareLifecycleChild
         )
     }
 }
@@ -96,6 +132,9 @@ struct GateSimulatorRegistration: Codable, Equatable, Sendable {
 struct SimulatorManager: Sendable {
     let launcher: any ProcessLaunching
     var executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    var defaultDeviceSetURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true)
+        .resolvingSymlinksInPath().standardizedFileURL
 
     static func requiresSimulatorPool(for destination: String) -> Bool {
         guard !destination.contains("platform=macOS") else { return false }
@@ -107,7 +146,8 @@ struct SimulatorManager: Sendable {
         cacheRoot: URL,
         registrationURL: URL,
         gateRunNonce: String,
-        guideLockInode: UInt64
+        guideLockInode: UInt64,
+        prepareLifecycleChild: PrepareLifecycleChildIdentity? = nil
     ) async throws -> GateSimulatorRegistration {
         guard !FileManager.default.fileExists(atPath: registrationURL.path) else {
             throw SimulatorError.cloneFailed(udid: "existing gate registration")
@@ -121,38 +161,62 @@ struct SimulatorManager: Sendable {
             list: "runtimes", collection: "runtimes", matchingName: nil,
             fallback: "com.apple.CoreSimulator.SimRuntime.iOS"
         )
-        let deviceSet = cacheRoot.appendingPathComponent("gate-simulator-\(gateRunNonce)", isDirectory: true)
-        try FileManager.default.createDirectory(at: deviceSet, withIntermediateDirectories: false)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: deviceSet.path)
-
-        let creating = GateSimulatorRegistration(
-            schemaVersion: 1, gateRunNonce: gateRunNonce, guideLockInode: guideLockInode,
-            deviceSetPath: deviceSet.path, udid: "", runtimeIdentifier: runtime,
-            deviceTypeIdentifier: deviceType, generation: 1, state: .creating,
-            activeInvocationNonce: nil
-        )
-        try write(creating, to: registrationURL)
+        let sourceUDID = try await sourceUDID(
+            destination: destination, runtimeIdentifier: runtime,
+            deviceTypeIdentifier: deviceType)
+        guard try await launch(["simctl", "shutdown", sourceUDID], timeout: 30) == 0 else {
+            throw SimulatorError.cloneFailed(udid: sourceUDID)
+        }
+        let cloneName = "SwiftMutationGate-\(gateRunNonce)"
+        let prepareChild = prepareLifecycleChild ?? .init(pid: 1, pgid: 1, birthIdentity: "0:0")
+        var clonedUDID: String?
         do {
             let result = try await launchCapturing(
-                ["simctl", "--set", deviceSet.path, "create", "SwiftMutationGate", deviceType, runtime]
+                ["simctl", "clone", sourceUDID, cloneName], timeout: 60
             )
             guard result.exitCode == 0 else { throw SimulatorError.cloneFailed(udid: "gate simulator") }
             let udid = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !udid.isEmpty else { throw SimulatorError.cloneFailed(udid: "gate simulator") }
+            clonedUDID = udid
+            let creating = GateSimulatorRegistration(
+                schemaVersion: 1, gateRunNonce: gateRunNonce, guideLockInode: guideLockInode,
+                deviceSetPath: defaultDeviceSetURL.path, udid: udid,
+                runtimeIdentifier: runtime, deviceTypeIdentifier: deviceType,
+                generation: 1, state: .creating, activeInvocationNonce: nil,
+                prepareLifecycleChild: prepareChild)
+            try write(creating, to: registrationURL)
             let idle = GateSimulatorRegistration(
                 schemaVersion: 1, gateRunNonce: gateRunNonce, guideLockInode: guideLockInode,
-                deviceSetPath: deviceSet.path, udid: udid, runtimeIdentifier: runtime,
+                deviceSetPath: defaultDeviceSetURL.path, udid: udid, runtimeIdentifier: runtime,
                 deviceTypeIdentifier: deviceType, generation: 1, state: .idle,
-                activeInvocationNonce: nil
+                activeInvocationNonce: nil, prepareLifecycleChild: prepareChild
             )
-            guard try await launch(["simctl", "--set", deviceSet.path, "boot", udid], timeout: 60) == 0,
-                try await launch(["simctl", "--set", deviceSet.path, "bootstatus", udid, "-b"], timeout: 60) == 0
+            guard try await launch(["simctl", "boot", udid], timeout: 60) == 0,
+                try await launch(["simctl", "bootstatus", udid, "-b"], timeout: 60) == 0,
+                try await deviceExists(udid: udid)
             else { throw SimulatorError.cloneFailed(udid: udid) }
             try write(idle, to: registrationURL)
             return idle
         } catch {
-            try? FileManager.default.removeItem(at: deviceSet)
-            try? FileManager.default.removeItem(at: registrationURL)
+            if FileManager.default.fileExists(atPath: registrationURL.path) {
+                try? await cleanupGateSimulator(
+                    registrationURL: registrationURL, expectedGateRunNonce: gateRunNonce,
+                    expectedGuideLockInode: guideLockInode, expectedCacheRoot: cacheRoot)
+            } else if let clonedUDID {
+                _ = try? await launch(["simctl", "shutdown", clonedUDID], timeout: 30)
+                let deleteCode = try? await launch(["simctl", "delete", clonedUDID], timeout: 30)
+                let listed = try? await launchCapturing(["simctl", "list", "devices", "--json"])
+                guard deleteCode == 0, let listed, listed.exitCode == 0,
+                    !Self.containsUDID(clonedUDID, in: listed.output)
+                else { throw SimulatorError.cloneFailed(udid: clonedUDID) }
+                let deleted = GateSimulatorRegistration(
+                    schemaVersion: 1, gateRunNonce: gateRunNonce,
+                    guideLockInode: guideLockInode, deviceSetPath: defaultDeviceSetURL.path,
+                    udid: clonedUDID, runtimeIdentifier: runtime,
+                    deviceTypeIdentifier: deviceType, generation: 1, state: .deleted,
+                    activeInvocationNonce: nil, prepareLifecycleChild: prepareChild)
+                try? write(deleted, to: registrationURL)
+            }
             throw error
         }
     }
@@ -166,30 +230,40 @@ struct SimulatorManager: Sendable {
         let registration = try GateSimulatorRegistration.load(from: registrationURL)
         let registeredDeviceSet = URL(fileURLWithPath: registration.deviceSetPath, isDirectory: true)
             .resolvingSymlinksInPath().standardizedFileURL
-        let expectedDeviceSet = expectedCacheRoot?.resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent(
-            "gate-simulator-\(registration.gateRunNonce)", isDirectory: true)
-            .resolvingSymlinksInPath().standardizedFileURL
         guard registration.schemaVersion == 1,
             expectedGateRunNonce.map({ registration.gateRunNonce == $0 }) ?? true,
             registration.guideLockInode == expectedGuideLockInode,
             registration.generation == 1,
-            registration.state == .idle || registration.state == .active,
+            registration.state == .creating || registration.state == .idle
+                || registration.state == .active || registration.state == .cleaning,
             registration.state == .active || registration.activeInvocationNonce == nil,
             !registration.udid.isEmpty,
-            expectedDeviceSet.map({ registeredDeviceSet == $0 }) ?? true
+            registeredDeviceSet == defaultDeviceSetURL
         else { throw SimulatorError.cloneFailed(udid: "invalid gate registration") }
-        try write(registration.replacing(state: .cleaning), to: registrationURL)
-        guard try await launch(
-            ["simctl", "--set", registration.deviceSetPath, "shutdown", registration.udid], timeout: 30) == 0,
-            try await launch(
-                ["simctl", "--set", registration.deviceSetPath, "delete", registration.udid], timeout: 30) == 0
-        else { throw SimulatorError.cloneFailed(udid: registration.udid) }
-        let listed = try await launchCapturing(
-            ["simctl", "--set", registration.deviceSetPath, "list", "devices", "--json"])
-        guard listed.exitCode == 0, !listed.output.contains(registration.udid) else {
+        let beforeCleanup = try await launchCapturing(
+            ["simctl", "list", "devices", "--json"])
+        guard beforeCleanup.exitCode == 0 else {
             throw SimulatorError.cloneFailed(udid: registration.udid)
         }
-        try FileManager.default.removeItem(atPath: registration.deviceSetPath)
+        if !Self.containsRegistration(registration, in: beforeCleanup.output) {
+            guard registration.state == .cleaning,
+                !Self.containsUDID(registration.udid, in: beforeCleanup.output)
+            else { throw SimulatorError.cloneFailed(udid: registration.udid) }
+            try write(registration.replacing(state: .deleted), to: registrationURL)
+            return
+        }
+        if registration.state != .cleaning {
+            try write(registration.replacing(state: .cleaning), to: registrationURL)
+        }
+        _ = try? await launch(["simctl", "shutdown", registration.udid], timeout: 30)
+        guard try await launch(
+            ["simctl", "delete", registration.udid], timeout: 30) == 0
+        else { throw SimulatorError.cloneFailed(udid: registration.udid) }
+        let listed = try await launchCapturing(
+            ["simctl", "list", "devices", "--json"])
+        guard listed.exitCode == 0, !Self.containsUDID(registration.udid, in: listed.output) else {
+            throw SimulatorError.cloneFailed(udid: registration.udid)
+        }
         try write(registration.replacing(state: .deleted), to: registrationURL)
     }
 
@@ -203,7 +277,11 @@ struct SimulatorManager: Sendable {
             registration.state == .idle,
             registration.activeInvocationNonce == nil,
             !registration.udid.isEmpty,
-            FileManager.default.fileExists(atPath: registration.deviceSetPath)
+            URL(fileURLWithPath: registration.deviceSetPath, isDirectory: true)
+                .resolvingSymlinksInPath().standardizedFileURL
+                == FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent("Library/Developer/CoreSimulator/Devices", isDirectory: true)
+                    .resolvingSymlinksInPath().standardizedFileURL
         else { throw SimulatorError.cloneFailed(udid: "invalid gate registration") }
         return registration
     }
@@ -215,21 +293,13 @@ struct SimulatorManager: Sendable {
     ) async throws -> GateSimulatorRegistration {
         let registration = try Self.validatedRegistration(
             at: url, expectedGuideLockInode: expectedGuideLockInode)
-        let root = expectedCacheRoot.resolvingSymlinksInPath().standardizedFileURL
-        let expectedDeviceSet = root.appendingPathComponent(
-            "gate-simulator-\(registration.gateRunNonce)", isDirectory: true)
-            .resolvingSymlinksInPath().standardizedFileURL
         guard URL(fileURLWithPath: registration.deviceSetPath, isDirectory: true)
-            .resolvingSymlinksInPath().standardizedFileURL == expectedDeviceSet else {
+            .resolvingSymlinksInPath().standardizedFileURL == defaultDeviceSetURL else {
             throw SimulatorError.cloneFailed(udid: "invalid gate registration")
         }
         let listed = try await launchCapturing(
-            ["simctl", "--set", registration.deviceSetPath, "list", "devices", "--json"])
-        guard listed.exitCode == 0,
-            let data = listed.output.data(using: .utf8),
-            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let devices = object["devices"] as? [String: [[String: Any]]],
-            devices.values.flatMap({ $0 }).contains(where: { $0["udid"] as? String == registration.udid })
+            ["simctl", "list", "devices", "--json"])
+        guard listed.exitCode == 0, Self.containsRegistration(registration, in: listed.output)
         else { throw SimulatorError.cloneFailed(udid: "invalid gate registration") }
         return registration
     }
@@ -248,7 +318,8 @@ struct SimulatorManager: Sendable {
             guideLockInode: registration.guideLockInode, deviceSetPath: registration.deviceSetPath,
             udid: registration.udid, runtimeIdentifier: registration.runtimeIdentifier,
             deviceTypeIdentifier: registration.deviceTypeIdentifier, generation: registration.generation,
-            state: .active, activeInvocationNonce: invocationNonce)
+            state: .active, activeInvocationNonce: invocationNonce,
+            prepareLifecycleChild: registration.prepareLifecycleChild)
         try write(active, to: url)
         return active
     }
@@ -284,6 +355,52 @@ struct SimulatorManager: Sendable {
         return fallback
     }
 
+    private func sourceUDID(
+        destination: String, runtimeIdentifier: String, deviceTypeIdentifier: String
+    ) async throws -> String {
+        let result = try await launchCapturing(["simctl", "list", "devices", "--json"])
+        let name = parseValue(for: "name", in: destination)
+        guard result.exitCode == 0,
+            let data = result.output.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let devices = object["devices"] as? [String: [[String: Any]]],
+            let entries = devices[runtimeIdentifier],
+            let udid = entries.first(where: {
+                ($0["isAvailable"] as? Bool) != false
+                    && $0["deviceTypeIdentifier"] as? String == deviceTypeIdentifier
+                    && (name == nil || $0["name"] as? String == name)
+            })?["udid"] as? String
+        else { throw SimulatorError.deviceNotFound(destination: destination) }
+        return udid
+    }
+
+    private func deviceExists(udid: String) async throws -> Bool {
+        let result = try await launchCapturing(["simctl", "list", "devices", "--json"])
+        return result.exitCode == 0 && Self.containsUDID(udid, in: result.output)
+    }
+
+    static func containsUDID(_ udid: String, in output: String) -> Bool {
+        guard let data = output.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let devices = object["devices"] as? [String: [[String: Any]]]
+        else { return false }
+        return devices.values.flatMap({ $0 }).contains { $0["udid"] as? String == udid }
+    }
+
+    static func containsRegistration(
+        _ registration: GateSimulatorRegistration, in output: String
+    ) -> Bool {
+        guard let data = output.data(using: .utf8),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let devices = object["devices"] as? [String: [[String: Any]]],
+            let runtimeDevices = devices[registration.runtimeIdentifier]
+        else { return false }
+        return runtimeDevices.contains {
+            $0["udid"] as? String == registration.udid
+                && $0["deviceTypeIdentifier"] as? String == registration.deviceTypeIdentifier
+        }
+    }
+
     private func launch(_ arguments: [String], timeout: Double) async throws -> Int32 {
         try await launcher.launch(
             executableURL: executableURL, arguments: arguments,
@@ -291,11 +408,13 @@ struct SimulatorManager: Sendable {
         )
     }
 
-    private func launchCapturing(_ arguments: [String]) async throws -> (exitCode: Int32, output: String) {
+    private func launchCapturing(
+        _ arguments: [String], timeout: Double = 30
+    ) async throws -> (exitCode: Int32, output: String) {
         try await launcher.launchCapturing(ProcessRequest(
             executableURL: executableURL, arguments: arguments,
             environment: nil, additionalEnvironment: [:],
-            workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 30
+            workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: timeout
         ))
     }
 
