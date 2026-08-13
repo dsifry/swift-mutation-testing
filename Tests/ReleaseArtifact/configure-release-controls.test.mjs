@@ -202,7 +202,7 @@ test('release docs order checksum verification after extraction and provide exec
 });
 
 test('release architecture contains only the approved local-candidate authority', async () => {
-  const architecture = await readFile(path.join(root, 'docs/Architecture/06-immutable-release-artifact-promotion.md'), 'utf8');
+  const architecture = await readFile(path.join(root, 'Docs/Architecture/06-immutable-release-artifact-promotion.md'), 'utf8');
   assert.match(architecture, /local, owner-custodied macOS operation/u);
   assert.match(architecture, /no remote candidate artifact and no publication workflow/u);
   assert.doesNotMatch(architecture, /manually dispatched `release-candidate\.yml`|immutable GitHub Actions artifact|GitHub artifact attestations|`release\.yml` becomes/u);
