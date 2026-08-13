@@ -1,6 +1,16 @@
 struct FallbackExecutor: Sendable {
     let deps: ExecutionDeps
     let configuration: RunnerConfiguration
+    let buildDestination: String?
+
+    init(
+        deps: ExecutionDeps, configuration: RunnerConfiguration,
+        buildDestination: String? = nil
+    ) {
+        self.deps = deps
+        self.configuration = configuration
+        self.buildDestination = buildDestination
+    }
 
     func execute(input: RunnerInput, pool: SimulatorPool) async throws -> [ExecutionResult] {
         var results: [ExecutionResult] = []
@@ -40,7 +50,7 @@ struct FallbackExecutor: Sendable {
                 artifact = try await BuildStage(launcher: deps.launcher).build(
                     sandbox: sandbox,
                     scheme: scheme,
-                    destination: destination,
+                    destination: buildDestination ?? destination,
                     timeout: configuration.build.timeout
                 )
                 await deps.reporter.report(.fallbackBuildFinished(filePath: file.originalPath, success: true))
