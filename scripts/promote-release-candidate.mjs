@@ -358,6 +358,8 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
     stdout = (value) => process.stdout.write(value),
     readFile: readFileImpl = readFile,
     lstat: lstatImpl = lstat,
+    mkdir: mkdirImpl = mkdir,
+    chmod: chmodImpl = chmod,
   } = dependencies;
   if (typeof env.GH_TOKEN !== 'string' || env.GH_TOKEN.length === 0) promotionFail('GH_TOKEN authentication is required');
   const { input, roots, paths } = parseCliArguments(argv);
@@ -366,6 +368,13 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
     if (!metadata.isFile() || metadata.nlink !== 1 || (metadata.mode & 0o777) !== 0o600) promotionFail('local bundle files must be owner-only regular files');
   }
   const localBundle = { archiveBytes: await readFileImpl(paths.archivePath), manifestBytes: await readFileImpl(paths.manifestPath), provenanceBytes: await readFileImpl(paths.provenancePath) };
+  await mkdirImpl(roots.workRoot, { mode: 0o700, recursive: false });
+  await chmodImpl(roots.workRoot, 0o700);
+  const workRootMetadata = await lstatImpl(roots.workRoot);
+  if (!workRootMetadata.isDirectory() || (workRootMetadata.mode & 0o777) !== 0o700
+    || (typeof process.getuid === 'function' && workRootMetadata.uid !== process.getuid())) {
+    promotionFail('work root must be an owner-private directory');
+  }
   const github = createAdapter({ token: env.GH_TOKEN, input, ...roots });
   const result = await promote(input, github, { localBundle });
   stdout(`${JSON.stringify(result)}\n`);

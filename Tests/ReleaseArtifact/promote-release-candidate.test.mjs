@@ -516,7 +516,11 @@ test('CLI parses the exact proof-bound inputs and executes promotion with GH_TOK
       observed = { input, github };
       return { mutations: ['publish-existing-draft'] };
     },
-    lstat: async () => ({ isFile: () => true, nlink: 1, mode: 0o100600 }),
+    mkdir: async () => {},
+    chmod: async () => {},
+    lstat: async (target) => target === '/work'
+      ? ({ isDirectory: () => true, mode: 0o40700, uid: process.getuid() })
+      : ({ isFile: () => true, nlink: 1, mode: 0o100600 }),
     readFile: async (filePath) => filePath.endsWith('tar.gz') ? archiveBytes : filePath.endsWith('v2.json') ? manifestBytes : localProvenanceBytes,
     stdout: (value) => output.push(value),
   });
@@ -524,6 +528,49 @@ test('CLI parses the exact proof-bound inputs and executes promotion with GH_TOK
   assert.equal(observed.github.options.token, 'secret');
   assert.equal(observed.github.options.controlRoot, '/control');
   assert.deepEqual(output, ['{"mutations":["publish-existing-draft"]}\n']);
+});
+
+test('production CLI creates and authenticates its private work root before native publication', async () => {
+  const events = [];
+  const fileMetadata = { isFile: () => true, isDirectory: () => false, nlink: 1, mode: 0o100600, uid: process.getuid() };
+  const directoryMetadata = { isFile: () => false, isDirectory: () => true, nlink: 2, mode: 0o40700, uid: process.getuid() };
+  await promotionOwner.runCli(validCliArguments(), {
+    env: { GH_TOKEN: 'secret' },
+    mkdir: async (root, options) => { events.push(['mkdir', root, options]); },
+    chmod: async (root, mode) => { events.push(['chmod', root, mode]); },
+    lstat: async (target) => {
+      events.push(['lstat', target]);
+      return target === '/work' ? directoryMetadata : fileMetadata;
+    },
+    readFile: async (filePath) => filePath.endsWith('tar.gz') ? archiveBytes : filePath.endsWith('v2.json') ? manifestBytes : localProvenanceBytes,
+    createNativeGitHubAdapter: (options) => { events.push(['adapter', options.workRoot]); return {}; },
+    promoteReleaseCandidate: async () => { events.push(['promote']); return { mutations: [] }; },
+    stdout() {},
+  });
+  assert.deepEqual(events.filter(([event, target]) => ['mkdir', 'chmod', 'lstat'].includes(event) && target === '/work'), [
+    ['mkdir', '/work', { mode: 0o700, recursive: false }],
+    ['chmod', '/work', 0o700],
+    ['lstat', '/work'],
+  ]);
+  assert.equal(events.findIndex(([event]) => event === 'adapter') > events.findIndex(([event]) => event === 'lstat'), true);
+  assert.equal(events.findIndex(([event]) => event === 'promote') > events.findIndex(([event]) => event === 'adapter'), true);
+});
+
+test('production CLI rejects a work root without exact owner-private custody before publication', async () => {
+  for (const workRootMetadata of [
+    { isDirectory: () => false, mode: 0o100700, uid: process.getuid() },
+    { isDirectory: () => true, mode: 0o40755, uid: process.getuid() },
+    { isDirectory: () => true, mode: 0o40700, uid: process.getuid() + 1 },
+  ]) {
+    let adapterCreated = false;
+    await assert.rejects(() => promotionOwner.runCli(validCliArguments(), {
+      env: { GH_TOKEN: 'secret' }, mkdir: async () => {}, chmod: async () => {},
+      lstat: async (target) => target === '/work' ? workRootMetadata : ({ isFile: () => true, nlink: 1, mode: 0o100600 }),
+      readFile: async (filePath) => filePath.endsWith('tar.gz') ? archiveBytes : filePath.endsWith('v2.json') ? manifestBytes : localProvenanceBytes,
+      createNativeGitHubAdapter: () => { adapterCreated = true; return {}; },
+    }), /owner-private/i);
+    assert.equal(adapterCreated, false);
+  }
 });
 
 test('CLI fails closed for absent auth or any missing, duplicate, or unknown input', async () => {
@@ -576,7 +623,8 @@ test('promotion rejects absent verification and changed/public bytes', async () 
 });
 
 test('CLI rejects malformed values and main covers both dispatch paths', async () => {
-  const valid=validCliArguments(), dependencies={env:{GH_TOKEN:'secret'},createNativeGitHubAdapter:()=>({}),promoteReleaseCandidate:async()=>({mutations:[]}),stdout() {},lstat:async()=>({isFile:()=>true,nlink:1,mode:0o100600}),readFile:async(filePath)=>filePath.endsWith('tar.gz')?archiveBytes:filePath.endsWith('v2.json')?manifestBytes:localProvenanceBytes};
+  const dependencies={env:{GH_TOKEN:'secret'},createNativeGitHubAdapter:()=>({}),promoteReleaseCandidate:async()=>({mutations:[]}),stdout() {},mkdir:async()=>{},chmod:async()=>{},lstat:async(target)=>target==='/work'?{isDirectory:()=>true,mode:0o40700,uid:process.getuid()}:{isFile:()=>true,nlink:1,mode:0o100600},readFile:async(filePath)=>filePath.endsWith('tar.gz')?archiveBytes:filePath.endsWith('v2.json')?manifestBytes:localProvenanceBytes};
+  const valid=validCliArguments();
   const mutate=(flag,value)=>{const copy=[...valid];copy[copy.indexOf(flag)+1]=value;return copy;};
   await assert.rejects(()=>promotionOwner.runCli(mutate('--control-root','relative'),dependencies),/absolute/);
   await assert.rejects(()=>promotionOwner.runCli(mutate('--archive-path','relative'),dependencies),/absolute/);
