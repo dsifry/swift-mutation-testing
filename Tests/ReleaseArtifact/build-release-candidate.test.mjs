@@ -292,6 +292,52 @@ test('input, parsing, and native command decisions fail closed', async (t) => {
   assert.deepEqual(await commands.file.inspect('/binary'), { type: 'other' });
 });
 
+test('archive command parses the exact macOS tar listing and rejects additional members', async () => {
+  const captured = '-rwxr-xr-x  0 dsifry staff 21708424 Aug 11 10:21 swift-mutation-testing\n';
+  const commands = artifactCommands(async (_command, argv) => ({
+    stdout: argv[0] === '-tvzf' ? captured : '',
+    exitCode: 0,
+  }), '/control');
+
+  assert.deepEqual(await commands.tar.list('/archive'), [{
+    path: 'swift-mutation-testing',
+    type: 'file',
+    linkCount: 1,
+    mode: '0755',
+    size: 21_708_424,
+  }]);
+
+  const compactOwnerGroup = artifactCommands(async () => ({
+    stdout: '-rwxr-xr-x 0 dsifry/staff 21708424 Aug 11 10:21 swift-mutation-testing\n',
+    exitCode: 0,
+  }), '/control');
+  assert.deepEqual(await compactOwnerGroup.tar.list('/archive'), [{
+    path: 'swift-mutation-testing',
+    type: 'file',
+    linkCount: 1,
+    mode: '0755',
+    size: 21_708_424,
+  }]);
+
+  const extraMember = artifactCommands(async () => ({
+    stdout: `${captured}-rw-------  0 dsifry staff 1 Aug 11 10:21 extra\n`,
+    exitCode: 0,
+  }), '/control');
+  await assert.rejects(() => extraMember.tar.list('/archive'), /listing/);
+
+  for (const malformed of [
+    '',
+    '-rwxr-xr-x 0 owner group extra 21708424 Aug 11 10:21 swift-mutation-testing\n',
+    '-rw-r--r-- 0 owner group 21708424 Aug 11 10:21 swift-mutation-testing\n',
+    '-rwxr-xr-x 1 owner group 21708424 Aug 11 10:21 swift-mutation-testing\n',
+    '-rwxr-xr-x 0 owner group NaN Aug 11 10:21 swift-mutation-testing\n',
+    '-rwxr-xr-x 0 owner group 21708424 Aug 11 10:21 other\n',
+  ]) {
+    const invalid = artifactCommands(async () => ({ stdout: malformed, exitCode: 0 }), '/control');
+    await assert.rejects(() => invalid.tar.list('/archive'), /listing/);
+  }
+});
+
 test('owned file reads reject links, escapes, and post-resolution replacement', async (t) => {
   const root=await mkdtemp(path.join(os.tmpdir(),'task6-owned-')); t.after(()=>rm(root,{recursive:true,force:true}));
   const file=path.join(root,'file'); await writeFile(file,'x');

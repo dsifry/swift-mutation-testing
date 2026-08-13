@@ -162,9 +162,15 @@ export function artifactCommands(runCommand, controlRoot) {
     tar: {
       list: async (archivePath) => {
         const listing = await runChecked(runCommand, 'tar', ['-tvzf', archivePath], { cwd: controlRoot }, 'candidate archive listing');
-        const match = /^-rwxr-xr-x\s+0\s+\S+\s+\S+\s+(\d+)\s+\S+\s+\d+\s+(?:\d{2}:\d{2}|\d{4})\s+(swift-mutation-testing)$/m.exec(listing);
-        if (!match) fail('candidate archive listing is malformed');
-        return [{ path: match[2], type: 'file', linkCount: 1, mode: '0755', size: Number(match[1]) }];
+        const lines = listing.trimEnd().split(/\r?\n/u);
+        const fields = lines[0].trim().split(/\s+/u);
+        const prefix = fields.slice(0, -5);
+        const size = fields.at(-5);
+        const member = fields.at(-1);
+        if (lines.length !== 1 || ![3, 4].includes(prefix.length) || prefix[0] !== '-rwxr-xr-x' || prefix[1] !== '0' || !/^\d+$/u.test(size) || member !== executableName) {
+          fail('candidate archive listing is malformed');
+        }
+        return [{ path: member, type: 'file', linkCount: 1, mode: '0755', size: Number(size) }];
       },
       extract: async (archivePath, directory) => runChecked(runCommand, 'tar', ['-xzf', archivePath, '-C', directory], { cwd: controlRoot }, 'candidate archive extraction'),
     },
