@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile as execFileCallback } from 'node:child_process';
-import { chmod, lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -358,16 +358,25 @@ export async function runCli(argv = process.argv.slice(2), dependencies = {}) {
     stdout = (value) => process.stdout.write(value),
     readFile: readFileImpl = readFile,
     lstat: lstatImpl = lstat,
+    open: openImpl = open,
     mkdir: mkdirImpl = mkdir,
     chmod: chmodImpl = chmod,
   } = dependencies;
   if (typeof env.GH_TOKEN !== 'string' || env.GH_TOKEN.length === 0) promotionFail('GH_TOKEN authentication is required');
   const { input, roots, paths } = parseCliArguments(argv);
-  for (const filePath of Object.values(paths)) {
-    const metadata = await lstatImpl(filePath);
-    if (!metadata.isFile() || metadata.nlink !== 1 || (metadata.mode & 0o777) !== 0o600) promotionFail('local bundle files must be owner-only regular files');
+  const bundleBytes = {};
+  for (const [key, filePath] of Object.entries(paths)) {
+    const handle = await openImpl(filePath, 'r');
+    try {
+      const metadata = await handle.stat();
+      if (!metadata.isFile() || metadata.nlink !== 1 || (metadata.mode & 0o777) !== 0o600
+        || (typeof process.getuid === 'function' && metadata.uid !== process.getuid())) promotionFail('local bundle files must be owner-only regular files');
+      bundleBytes[key] = await handle.readFile();
+    } finally {
+      await handle.close();
+    }
   }
-  const localBundle = { archiveBytes: await readFileImpl(paths.archivePath), manifestBytes: await readFileImpl(paths.manifestPath), provenanceBytes: await readFileImpl(paths.provenancePath) };
+  const localBundle = { archiveBytes: bundleBytes.archivePath, manifestBytes: bundleBytes.manifestPath, provenanceBytes: bundleBytes.provenancePath };
   await mkdirImpl(roots.workRoot, { mode: 0o700, recursive: false });
   await chmodImpl(roots.workRoot, 0o700);
   const workRootMetadata = await lstatImpl(roots.workRoot);

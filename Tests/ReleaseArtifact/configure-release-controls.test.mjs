@@ -201,6 +201,13 @@ test('release docs order checksum verification after extraction and provide exec
   for (const command of ['gh workflow run release-candidate.yml', 'gh run download', 'git tag -s', 'gh workflow run release.yml', 'gh run rerun']) assert.match(building, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 
+test('release architecture contains only the approved local-candidate authority', async () => {
+  const architecture = await readFile(path.join(root, 'docs/Architecture/06-immutable-release-artifact-promotion.md'), 'utf8');
+  assert.match(architecture, /local, owner-custodied macOS operation/u);
+  assert.match(architecture, /no remote candidate artifact and no publication workflow/u);
+  assert.doesNotMatch(architecture, /manually dispatched `release-candidate\.yml`|immutable GitHub Actions artifact|GitHub artifact attestations|`release\.yml` becomes/u);
+});
+
 test('CLI defaults to check, requires explicit apply maintainer, and emits JSON', async () => {
   const { runCli, runMain } = await owner();
   const output = [];

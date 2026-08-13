@@ -40,6 +40,14 @@ const localProvenanceBytes = Buffer.from(`${JSON.stringify(localProvenance)}\n`)
 const localDescriptorSHA256 = sha256(localProvenanceBytes);
 const localBundle = { archiveBytes, manifestBytes, provenanceBytes: localProvenanceBytes };
 
+function bytesForBundlePath(filePath) {
+  return filePath.endsWith('tar.gz') ? archiveBytes : filePath.endsWith('v2.json') ? manifestBytes : localProvenanceBytes;
+}
+
+function openBundle(metadata = { isFile: () => true, nlink: 1, mode: 0o100600, uid: process.getuid() }) {
+  return async (filePath) => ({ stat: async () => metadata, readFile: async () => bytesForBundlePath(filePath), close: async () => {} });
+}
+
 test('local bundle custody authenticates canonical provenance before any GitHub mutation', async () => {
   const provenance = {
     schemaVersion: 'local-release-provenance-v1', repository: 'dsifry/swift-mutation-testing', sourceCommit: commit,
@@ -282,6 +290,13 @@ test('Guide proof binds a distinct Guide repository and commit plus all receipt 
   }
 });
 
+test('promotion authority accepts a frozen caller input without mutation', () => {
+  const input = Object.freeze(promotionInput());
+  const result = verifyPromotionAuthority(input, state());
+  assert.equal(Object.hasOwn(input, 'provenance'), false);
+  assert.deepEqual(result.provenance, localProvenance);
+});
+
 for (const [name, mutate] of [
   ['input digest mismatch', (value) => { value.manifestBytes = Buffer.from(JSON.stringify(candidate)); }],
   ['wrong proof digest', (value) => { value.guideProofBytes = proofBytes(); }],
@@ -521,7 +536,7 @@ test('CLI parses the exact proof-bound inputs and executes promotion with GH_TOK
     lstat: async (target) => target === '/work'
       ? ({ isDirectory: () => true, mode: 0o40700, uid: process.getuid() })
       : ({ isFile: () => true, nlink: 1, mode: 0o100600 }),
-    readFile: async (filePath) => filePath.endsWith('tar.gz') ? archiveBytes : filePath.endsWith('v2.json') ? manifestBytes : localProvenanceBytes,
+    open: openBundle(),
     stdout: (value) => output.push(value),
   });
   assert.deepEqual(observed.input, promotionInput());
@@ -542,7 +557,7 @@ test('production CLI creates and authenticates its private work root before nati
       events.push(['lstat', target]);
       return target === '/work' ? directoryMetadata : fileMetadata;
     },
-    readFile: async (filePath) => filePath.endsWith('tar.gz') ? archiveBytes : filePath.endsWith('v2.json') ? manifestBytes : localProvenanceBytes,
+    open: openBundle(fileMetadata),
     createNativeGitHubAdapter: (options) => { events.push(['adapter', options.workRoot]); return {}; },
     promoteReleaseCandidate: async () => { events.push(['promote']); return { mutations: [] }; },
     stdout() {},
@@ -556,6 +571,30 @@ test('production CLI creates and authenticates its private work root before nati
   assert.equal(events.findIndex(([event]) => event === 'promote') > events.findIndex(([event]) => event === 'adapter'), true);
 });
 
+test('production CLI authenticates and reads each bundle file through one opened handle', async () => {
+  const events = [];
+  await promotionOwner.runCli(validCliArguments(), {
+    env: { GH_TOKEN: 'secret' }, mkdir: async () => {}, chmod: async () => {},
+    lstat: async (target) => {
+      if (target !== '/work') throw new Error('path metadata forbidden');
+      return { isDirectory: () => true, mode: 0o40700, uid: process.getuid() };
+    },
+    readFile: async () => { throw new Error('path read forbidden'); },
+    open: async (filePath, flags) => {
+      events.push(['open', filePath, flags]);
+      return {
+        stat: async () => { events.push(['fstat', filePath]); return { isFile: () => true, nlink: 1, mode: 0o100600, uid: process.getuid() }; },
+        readFile: async () => { events.push(['read', filePath]); return bytesForBundlePath(filePath); },
+        close: async () => { events.push(['close', filePath]); },
+      };
+    },
+    createNativeGitHubAdapter: () => ({}), promoteReleaseCandidate: async () => ({ mutations: [] }), stdout() {},
+  });
+  for (const filePath of ['/bundle/archive.tar.gz', '/bundle/release-candidate-v2.json', '/bundle/local-release-provenance-v1.json']) {
+    assert.deepEqual(events.filter(([, observed]) => observed === filePath).map(([event]) => event), ['open', 'fstat', 'read', 'close']);
+  }
+});
+
 test('production CLI rejects a work root without exact owner-private custody before publication', async () => {
   for (const workRootMetadata of [
     { isDirectory: () => false, mode: 0o100700, uid: process.getuid() },
@@ -565,8 +604,8 @@ test('production CLI rejects a work root without exact owner-private custody bef
     let adapterCreated = false;
     await assert.rejects(() => promotionOwner.runCli(validCliArguments(), {
       env: { GH_TOKEN: 'secret' }, mkdir: async () => {}, chmod: async () => {},
-      lstat: async (target) => target === '/work' ? workRootMetadata : ({ isFile: () => true, nlink: 1, mode: 0o100600 }),
-      readFile: async (filePath) => filePath.endsWith('tar.gz') ? archiveBytes : filePath.endsWith('v2.json') ? manifestBytes : localProvenanceBytes,
+      lstat: async () => workRootMetadata,
+      open: openBundle(),
       createNativeGitHubAdapter: () => { adapterCreated = true; return {}; },
     }), /owner-private/i);
     assert.equal(adapterCreated, false);
@@ -575,7 +614,7 @@ test('production CLI rejects a work root without exact owner-private custody bef
 
 test('CLI fails closed for absent auth or any missing, duplicate, or unknown input', async () => {
   const valid = validCliArguments();
-  const dependencies = { env: { GH_TOKEN: 'secret' }, createNativeGitHubAdapter: () => ({}), promoteReleaseCandidate: async () => ({ mutations: [] }) };
+  const dependencies = { env: { GH_TOKEN: 'secret' }, createNativeGitHubAdapter: () => ({}), promoteReleaseCandidate: async () => ({ mutations: [] }), open: openBundle() };
   await assert.rejects(() => promotionOwner.runCli(valid, { ...dependencies, env: {} }), /GH_TOKEN|auth/i);
   await assert.rejects(() => promotionOwner.runCli(valid.slice(2), dependencies), /usage|input/i);
   await assert.rejects(() => promotionOwner.runCli([...valid, '--version', '1.3.1'], dependencies), /usage|duplicate/i);
@@ -584,7 +623,7 @@ test('CLI fails closed for absent auth or any missing, duplicate, or unknown inp
     { isFile: () => false, nlink: 1, mode: 0o100600 },
     { isFile: () => true, nlink: 2, mode: 0o100600 },
     { isFile: () => true, nlink: 1, mode: 0o100644 },
-  ]) await assert.rejects(() => promotionOwner.runCli(valid, { ...dependencies, lstat: async () => metadata }), /owner-only/i);
+  ]) await assert.rejects(() => promotionOwner.runCli(valid, { ...dependencies, open: openBundle({ ...metadata, uid: process.getuid() }) }), /owner-only/i);
 });
 
 test('promotion decision seams reject incomplete downloads, assets, adapters, and malformed JSON', () => {
@@ -623,7 +662,7 @@ test('promotion rejects absent verification and changed/public bytes', async () 
 });
 
 test('CLI rejects malformed values and main covers both dispatch paths', async () => {
-  const dependencies={env:{GH_TOKEN:'secret'},createNativeGitHubAdapter:()=>({}),promoteReleaseCandidate:async()=>({mutations:[]}),stdout() {},mkdir:async()=>{},chmod:async()=>{},lstat:async(target)=>target==='/work'?{isDirectory:()=>true,mode:0o40700,uid:process.getuid()}:{isFile:()=>true,nlink:1,mode:0o100600},readFile:async(filePath)=>filePath.endsWith('tar.gz')?archiveBytes:filePath.endsWith('v2.json')?manifestBytes:localProvenanceBytes};
+  const dependencies={env:{GH_TOKEN:'secret'},createNativeGitHubAdapter:()=>({}),promoteReleaseCandidate:async()=>({mutations:[]}),stdout() {},mkdir:async()=>{},chmod:async()=>{},lstat:async()=>({isDirectory:()=>true,mode:0o40700,uid:process.getuid()}),open:openBundle()};
   const valid=validCliArguments();
   const mutate=(flag,value)=>{const copy=[...valid];copy[copy.indexOf(flag)+1]=value;return copy;};
   await assert.rejects(()=>promotionOwner.runCli(mutate('--control-root','relative'),dependencies),/absolute/);

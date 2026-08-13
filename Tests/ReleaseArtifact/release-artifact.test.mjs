@@ -58,6 +58,8 @@ test('local provenance is closed canonical evidence for exact prebuilt bytes', (
   assert.throws(() => parseLocalProvenance(Buffer.from(`${JSON.stringify({ ...value, remoteRunId: 1 })}\n`)), /exactly/u);
   assert.throws(() => parseLocalProvenance(Buffer.from(`${JSON.stringify({ ...value, codesignVerified: false })}\n`)), /codesign/u);
   assert.throws(() => parseLocalProvenance(Buffer.from(JSON.stringify(value))), /canonical/u);
+  const reordered = Object.fromEntries([...Object.entries(value)].reverse());
+  assert.throws(() => parseLocalProvenance(Buffer.from(`${JSON.stringify(reordered)}\n`)), /order|canonical/u);
 });
 
 test('native filesystem and parsing decisions fail closed', async (t) => {

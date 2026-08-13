@@ -229,6 +229,7 @@ export function parseCandidateManifest(bytes) {
 export function parseLocalProvenance(bytes) {
   const value = parseJSONRejectingDuplicateKeys(bytes);
   assertExactKeys(value, LOCAL_PROVENANCE_KEYS, 'local provenance');
+  if (Object.keys(value).some((key, index) => key !== LOCAL_PROVENANCE_KEYS[index])) fail('candidate manifest', 'local provenance keys are out of canonical order');
   assertExact(value.schemaVersion, 'local-release-provenance-v1', 'schemaVersion');
   assertExact(value.repository, 'dsifry/swift-mutation-testing', 'repository');
   assertCommit(value.sourceCommit, 'sourceCommit');
@@ -474,22 +475,22 @@ function assertPromotionInput(input) {
   requirePromotion(!Object.hasOwn(input, 'downloadUrl') && !Object.hasOwn(input, 'downloadURL'), 'untrusted download URL is forbidden');
 }
 
-function verifyProofBinding(input, proof) {
+function verifyProofBinding(input, proof, provenance) {
   requirePromotion(proof.repository === 'dsifry/theguide' && proof.guideCommit === input.guideCommit, 'Guide proof repository or commit does not match promotion input');
   const expected = {
     descriptorSHA256: input.candidateDescriptorSHA256,
     repository: input.repository,
     sourceCommit: input.sourceCommit,
-    versionOutput: input.provenance.versionOutput,
-    capability: input.provenance.capability,
+    versionOutput: provenance.versionOutput,
+    capability: provenance.capability,
     manifestSHA256: input.manifestSHA256,
     archiveSHA256: input.archiveSHA256,
     executableSHA256: input.executableSHA256,
-    swiftVersionOutput: input.provenance.swiftVersionOutput,
-    sdkVersionOutput: input.provenance.sdkVersionOutput,
-    targetTriple: input.provenance.targetTriple,
-    configuration: input.provenance.configuration,
-    codesignVerified: input.provenance.codesignVerified,
+    swiftVersionOutput: provenance.swiftVersionOutput,
+    sdkVersionOutput: provenance.sdkVersionOutput,
+    targetTriple: provenance.targetTriple,
+    configuration: provenance.configuration,
+    codesignVerified: provenance.codesignVerified,
   };
   requirePromotion(JSON.stringify(proof.candidate) === JSON.stringify(expected), 'Guide proof candidate descriptor does not match promotion input');
 }
@@ -504,9 +505,8 @@ export function verifyPromotionAuthority(input, githubState) {
   const manifest = parseCandidateManifest(githubState.manifestBytes);
   const provenance = parseLocalProvenance(githubState.provenanceBytes);
   requirePromotion(sha256(githubState.provenanceBytes) === input.provenanceSHA256, 'local provenance digest does not match input');
-  input.provenance = provenance;
   requirePromotion(input.candidateDescriptorSHA256 === input.provenanceSHA256, 'candidate descriptor digest must equal parsed provenance digest');
-  verifyProofBinding(input, proof);
+  verifyProofBinding(input, proof, provenance);
   requirePromotion(sha256(githubState.manifestBytes) === input.manifestSHA256, 'candidate manifest digest does not match input');
   requirePromotion(manifest.repository === input.repository
     && manifest.sourceCommit === input.sourceCommit
