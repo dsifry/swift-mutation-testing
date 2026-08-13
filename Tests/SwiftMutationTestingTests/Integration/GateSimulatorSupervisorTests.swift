@@ -384,6 +384,30 @@ struct GateSimulatorSupervisorTests {
                 guideLockInode: fixture.inode, invocationNonce: fixture.invocationNonce,
                 wrapperLeaseFD: Int(wrapper[0]), guideLockFD: Int(fixture.guideFD))
         }
+        let destroyed = LockedCounter()
+        GateSimulatorCustodySession.systemCalls.configureSpawnAttributes = { attributes in
+            _ = posix_spawnattr_init(attributes)
+            return -1
+        }
+        GateSimulatorCustodySession.systemCalls.destroySpawnAttributes = { attributes in
+            _ = destroyed.increment()
+            return posix_spawnattr_destroy(attributes)
+        }
+        #expect(throws: PreparedCacheError.self) {
+            _ = try GateSimulatorCustodySession.start(
+                registrationURL: fixture.registrationURL, cacheRoot: fixture.root,
+                guideLockInode: fixture.inode, invocationNonce: fixture.invocationNonce,
+                wrapperLeaseFD: Int(wrapper[0]), guideLockFD: Int(fixture.guideFD))
+        }
+        #expect(throws: PreparedCacheError.self) {
+            _ = try GateSimulatorCustodySession.startPreparing(
+                destination: fixture.destination, registrationURL: fixture.registrationURL,
+                cacheRoot: fixture.root, gateRunNonce: fixture.gateNonce,
+                guideLockInode: fixture.inode, guideLockFD: Int(fixture.guideFD))
+        }
+        #expect(destroyed.value == 2)
+        GateSimulatorCustodySession.systemCalls.destroySpawnAttributes =
+            originalSession.destroySpawnAttributes
         #expect(throws: PreparedCacheError.self) {
             _ = try GateSimulatorCustodySession.startPreparing(
                 destination: fixture.destination, registrationURL: fixture.registrationURL,
@@ -461,6 +485,19 @@ struct GateSimulatorSupervisorTests {
             executableURL: child, xcrunURL: fixture.xcrunURL)
         #expect(throws: PreparedCacheError.self) { try session.finish() }
         #expect(waitCalls.value >= 2)
+
+        GateSimulatorCustodySession.systemCalls.waitpid = { pid, status, options in
+            _ = Darwin.waitpid(pid, status, options)
+            errno = EIO
+            return -1
+        }
+        let successfulChild = try fixture.childScript(readinessArgument: 9)
+        let failedWait = try GateSimulatorCustodySession.start(
+            registrationURL: fixture.registrationURL, cacheRoot: fixture.root,
+            guideLockInode: fixture.inode, invocationNonce: fixture.invocationNonce,
+            wrapperLeaseFD: Int(wrapper[0]), guideLockFD: Int(fixture.guideFD),
+            executableURL: successfulChild, xcrunURL: fixture.xcrunURL)
+        #expect(throws: PreparedCacheError.self) { try failedWait.finish() }
     }
 
     @Test("Invalid descriptors and closed child controls fail closed")

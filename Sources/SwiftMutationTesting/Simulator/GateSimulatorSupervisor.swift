@@ -14,6 +14,9 @@ struct GateSimulatorSystemCalls: Sendable {
         _ = posix_spawnattr_setflags($0, Int16(POSIX_SPAWN_SETPGROUP))
         return posix_spawnattr_setpgroup($0, 0)
     }
+    var destroySpawnAttributes: @Sendable (UnsafeMutablePointer<posix_spawnattr_t?>) -> Int32 = {
+        posix_spawnattr_destroy($0)
+    }
 }
 
 enum GateSimulatorSupervisor {
@@ -183,9 +186,9 @@ final class GateSimulatorCustodySession: @unchecked Sendable {
         }
         var childPID: Int32 = 0
         var attributes: posix_spawnattr_t?
+        defer { if attributes != nil { _ = systemCalls.destroySpawnAttributes(&attributes) } }
         guard systemCalls.configureSpawnAttributes(&attributes) == 0
         else { throw PreparedCacheError.unverifiableProcessIdentity }
-        defer { posix_spawnattr_destroy(&attributes) }
         let spawnResult = argv.withUnsafeBufferPointer { argvBuffer in
             envp.withUnsafeBufferPointer { envBuffer in
                 posix_spawn(
@@ -257,9 +260,9 @@ final class GateSimulatorCustodySession: @unchecked Sendable {
         }
         var childPID: Int32 = 0
         var attributes: posix_spawnattr_t?
+        defer { if attributes != nil { _ = systemCalls.destroySpawnAttributes(&attributes) } }
         guard systemCalls.configureSpawnAttributes(&attributes) == 0
         else { throw PreparedCacheError.unverifiableProcessIdentity }
-        defer { posix_spawnattr_destroy(&attributes) }
         let spawnResult = argv.withUnsafeBufferPointer { argvBuffer in
             envp.withUnsafeBufferPointer { envBuffer in
                 posix_spawn(
@@ -359,7 +362,10 @@ final class GateSimulatorCustodySession: @unchecked Sendable {
 
     private static func waitForExit(_ pid: Int32) -> Int32 {
         var status: Int32 = 0
-        while systemCalls.waitpid(pid, &status, 0) < 0, errno == EINTR {}
+        var result: Int32
+        repeat { result = systemCalls.waitpid(pid, &status, 0) }
+        while result < 0 && errno == EINTR
+        guard result == pid else { return -1 }
         return status & 0x7f == 0 ? (status >> 8) & 0xff : -1
     }
 }
