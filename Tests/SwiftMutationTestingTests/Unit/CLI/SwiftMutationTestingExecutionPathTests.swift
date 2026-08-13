@@ -9,6 +9,8 @@ struct SwiftMutationTestingExecutionPathTests {
     @Test("Hidden simulator supervisor mode rejects an incomplete internal frame")
     func simulatorSupervisorDispatchRejectsIncompleteFrame() async {
         #expect(await SwiftMutationTesting.main(args: ["--gate-simulator-supervisor"]) == 64)
+        #expect(await SwiftMutationTesting.main(
+            args: ["--gate-simulator-prepare-supervisor"]) == 64)
     }
     @Test("Shipping CLI prepares and cleans the authenticated gate simulator")
     func gateSimulatorDispatch() async throws {
@@ -124,6 +126,7 @@ struct SwiftMutationTestingExecutionPathTests {
         #expect(receipt.attemptOrdinal == 1)
         #expect(receipt.counters.fullBuilds == 1)
         #expect(receipt.counters.testWithoutBuildingRuns == 0)
+        #expect(await launcher.xcodeDeviceSetEnvironmentCount == 0)
         let reportPayload = try JSONSerialization.jsonObject(with: Data(contentsOf: report)) as? [String: Any]
         #expect(reportPayload?["schemaVersion"] as? String == "1")
         #expect(reportPayload?["projectRoot"] as? String == root.resolvingSymlinksInPath().path)
@@ -197,6 +200,46 @@ struct SwiftMutationTestingExecutionPathTests {
                 guideLockFD: Int(descriptor))),
             launcher: nil, defaultLauncher: launcher)
         #expect(try GateSimulatorRegistration.load(from: registration).state == .deleted)
+    }
+
+    @Test("Production prepare dispatch uses the hidden custody child and retains idle after ACK")
+    func productionPrepareCustodyDispatch() async throws {
+        let root = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(root) }
+        chmod(root.path, 0o700)
+        let lock = root.appendingPathComponent("lock")
+        FileManager.default.createFile(atPath: lock.path, contents: Data())
+        let descriptor = open(lock.path, O_RDONLY)
+        defer { _ = close(descriptor) }
+        let registration = root.appendingPathComponent("registration.json")
+        let fakeXcrun = root.appendingPathComponent("xcrun")
+        let script = """
+        #!/bin/sh
+        if echo "$*" | grep -q 'list devicetypes'; then echo '{"devicetypes":[{"name":"iPhone 16","identifier":"type"}]}'; exit 0; fi
+        if echo "$*" | grep -q 'list runtimes'; then echo '{"runtimes":[{"identifier":"runtime","isAvailable":true}]}'; exit 0; fi
+        if echo "$*" | grep -q ' clone SOURCE-UDID '; then echo 'GATE-UDID'; exit 0; fi
+        if echo "$*" | grep -q 'list devices'; then echo '{"devices":{"runtime":[{"name":"iPhone 16","udid":"SOURCE-UDID","deviceTypeIdentifier":"type","isAvailable":true},{"udid":"GATE-UDID","deviceTypeIdentifier":"type","isAvailable":true}]}}'; exit 0; fi
+        exit 0
+        """
+        try Data(script.utf8).write(to: fakeXcrun)
+        chmod(fakeXcrun.path, 0o700)
+        let buildRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build")
+        let cli = try #require(FileManager.default.enumerator(
+            at: buildRoot, includingPropertiesForKeys: nil)?.compactMap { $0 as? URL }.first {
+                $0.lastPathComponent == "swift-mutation-testing" && access($0.path, X_OK) == 0
+            })
+        let parsed = ParsedArguments(
+            build: .init(destination: "platform=iOS Simulator,name=iPhone 16"),
+            cache: .init(
+                mode: .simulatorPrepare, buildCacheRoot: root.path,
+                invocationNonce: "ABCDEFGHIJKLMNOPQRSTUV",
+                simulatorRegistration: registration.path, guideLockFD: Int(descriptor)))
+
+        #expect(try await SwiftMutationTesting.execute(
+            parsed: parsed, launcher: nil, defaultXcodeLauncher: XcodeProcessLauncher(),
+            gateSupervisorExecutableURL: cli, xcrunURL: fakeXcrun) == .success)
+        #expect(try GateSimulatorRegistration.load(from: registration).state == .idle)
     }
     @Test("Prepare and target dispatch complete through the CLI execution path")
     func successfulCacheCommandDispatch() async throws {
@@ -525,6 +568,7 @@ struct SwiftMutationTestingExecutionPathTests {
 private actor ExecutionGateSimulatorLauncher: ProcessLaunching {
     private var exists = false
     private(set) var deleteCount = 0
+    private(set) var xcodeDeviceSetEnvironmentCount = 0
     func launch(executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double) async throws -> Int32 {
         if arguments.contains("delete") {
             exists = false
@@ -533,6 +577,11 @@ private actor ExecutionGateSimulatorLauncher: ProcessLaunching {
         return 0
     }
     func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        if request.executableURL.path == "/usr/bin/xcodebuild",
+            request.additionalEnvironment["SIMULATOR_DEVICE_SET_PATH"] != nil
+        {
+            xcodeDeviceSetEnvironmentCount += 1
+        }
         if request.arguments.contains("build-for-testing"),
             let index = request.arguments.firstIndex(of: "-derivedDataPath")
         {
@@ -542,7 +591,7 @@ private actor ExecutionGateSimulatorLauncher: ProcessLaunching {
                 fromPropertyList: ["__xctestrun_metadata__": ["FormatVersion": 1]], format: .xml, options: 0)
             try plist.write(to: products.appendingPathComponent("App.xctestrun"))
         }
-        if request.arguments.contains("create") {
+        if request.arguments.contains("clone") {
             exists = true
             return (0, "GATE-UDID\n")
         }
@@ -553,8 +602,8 @@ private actor ExecutionGateSimulatorLauncher: ProcessLaunching {
             return (0, #"{"runtimes":[{"identifier":"runtime","isAvailable":true}]}"#)
         }
         return exists
-            ? (0, #"{"devices":{"runtime":[{"udid":"GATE-UDID"}]}}"#)
-            : (0, #"{"devices":{}}"#)
+            ? (0, #"{"devices":{"runtime":[{"name":"iPhone 16","udid":"SOURCE-UDID","deviceTypeIdentifier":"type","isAvailable":true},{"name":"SwiftMutationGate-ABCDEFGHIJKLMNOPQRSTUV","udid":"GATE-UDID","deviceTypeIdentifier":"type","isAvailable":true}]}}"#)
+            : (0, #"{"devices":{"runtime":[{"name":"iPhone 16","udid":"SOURCE-UDID","deviceTypeIdentifier":"type","isAvailable":true}]}}"#)
     }
 }
 

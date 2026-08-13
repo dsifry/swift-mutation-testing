@@ -15,6 +15,8 @@
     "Sources/SwiftMutationTesting/PreparedBuild/PreparedBuildCoordinator.swift",
     "Sources/SwiftMutationTesting/Infrastructure/ProcessRunner.swift",
     "Sources/SwiftMutationTesting/Infrastructure/XcodeProcessLauncher.swift",
+    "Sources/SwiftMutationTesting/Simulator/GateSimulatorSupervisor.swift",
+    "Sources/SwiftMutationTesting/Simulator/SimulatorManager.swift",
     "Sources/SwiftMutationTesting/SwiftMutationTesting.swift"
   ],
   "exclude": [],

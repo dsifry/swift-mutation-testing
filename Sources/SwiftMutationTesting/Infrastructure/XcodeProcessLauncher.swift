@@ -61,48 +61,6 @@ extension XcodeProcessLauncher: XcodeCustodyPreservingLauncher {
     }
 }
 
-struct SimulatorDeviceSetLauncher: Sendable, ProcessLaunching {
-    let base: any ProcessLaunching
-    let deviceSetPath: String
-
-    func launch(
-        executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
-    ) async throws -> Int32 {
-        try await base.launch(
-            executableURL: executableURL, arguments: arguments,
-            workingDirectoryURL: workingDirectoryURL, timeout: timeout)
-    }
-
-    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
-        guard request.executableURL.path == "/usr/bin/xcodebuild" else {
-            return try await base.launchCapturing(request)
-        }
-        var environment = request.additionalEnvironment
-        environment["SIMULATOR_DEVICE_SET_PATH"] = deviceSetPath
-        return try await base.launchCapturing(ProcessRequest(
-            executableURL: request.executableURL, arguments: request.arguments,
-            environment: request.environment, additionalEnvironment: environment,
-            workingDirectoryURL: request.workingDirectoryURL, timeout: request.timeout))
-    }
-}
-
-extension SimulatorDeviceSetLauncher: XcodeCustodyPreservingLauncher {
-    var supportsXcodeCustody: Bool {
-        (base as? any XcodeCustodyPreservingLauncher)?.supportsXcodeCustody == true
-    }
-
-    func applyingXcodeCustody(
-        _ custody: ProcessCustody?, captureRoot: URL?
-    ) -> any ProcessLaunching {
-        guard let preserving = base as? any XcodeCustodyPreservingLauncher,
-            preserving.supportsXcodeCustody
-        else { return self }
-        return SimulatorDeviceSetLauncher(
-            base: preserving.applyingXcodeCustody(custody, captureRoot: captureRoot),
-            deviceSetPath: deviceSetPath)
-    }
-}
-
 final class ProcessEscalationController: @unchecked Sendable {
     typealias Identity = @Sendable (Int32) -> CustodiedProcessGroup?
     typealias Status = @Sendable (CustodiedProcessGroup) -> ProcessIdentityStatus
