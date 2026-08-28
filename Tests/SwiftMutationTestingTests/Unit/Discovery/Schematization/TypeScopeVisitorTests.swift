@@ -73,26 +73,44 @@ struct TypeScopeVisitorTests {
         #expect(!visitor.isSchematizable(utf8Offset: mutation.utf8Offset))
     }
 
-    @Test("Given computed property with implicit getter, when walked, then mutation inside is schematizable")
-    func computedPropertyImplicitGetterIsSchematizable() {
+    @Test("Given result-builder getter, nested closure mutations remain exact-only")
+    func resultBuilderGetterAndNestedClosureAreExactOnly() {
+        let code = """
+        struct View {
+            @Builder var body: some Content {
+                Group { enabled && visible }
+            }
+        }
+        """
+        let source = makeParsedSource(code)
+        let visitor = TypeScopeVisitor()
+        visitor.walk(source.syntax)
+
+        let mutations = LogicalOperatorReplacement().mutations(in: source)
+        #expect(mutations.count == 1)
+        #expect(!visitor.isSchematizable(utf8Offset: mutations[0].utf8Offset))
+    }
+
+    @Test("Given computed property with implicit getter, mutation remains exact-only")
+    func computedPropertyImplicitGetterIsExactOnly() {
         let code = "struct S { var x: Bool { return true } }"
         let source = makeParsedSource(code)
         let visitor = TypeScopeVisitor()
         visitor.walk(source.syntax)
 
         let mutation = BooleanLiteralReplacement().mutations(in: source)[0]
-        #expect(visitor.isSchematizable(utf8Offset: mutation.utf8Offset))
+        #expect(!visitor.isSchematizable(utf8Offset: mutation.utf8Offset))
     }
 
-    @Test("Given computed property with explicit getter, when walked, then mutation inside is schematizable")
-    func computedPropertyExplicitGetterIsSchematizable() {
+    @Test("Given computed property with explicit getter, mutation remains exact-only")
+    func computedPropertyExplicitGetterIsExactOnly() {
         let code = "struct S { var x: Bool { get { return true } } }"
         let source = makeParsedSource(code)
         let visitor = TypeScopeVisitor()
         visitor.walk(source.syntax)
 
         let mutation = BooleanLiteralReplacement().mutations(in: source)[0]
-        #expect(visitor.isSchematizable(utf8Offset: mutation.utf8Offset))
+        #expect(!visitor.isSchematizable(utf8Offset: mutation.utf8Offset))
     }
 
     @Test("Given mutation inside global-scope closure, when checked, then isSchematizable returns true")
@@ -112,16 +130,16 @@ struct TypeScopeVisitorTests {
         #expect(visitor.scopes.count == 1)
     }
 
-    @Test("Given computed property with explicit setter, when walked, then mutation inside is schematizable")
-    func computedPropertyExplicitSetterIsSchematizable() {
+    @Test("Given computed property observer, mutation remains exact-only")
+    func computedPropertyObserverIsExactOnly() {
         let code = "class C { var x: Int = 0 { didSet { let enabled = true; _ = enabled } } }"
         let source = makeParsedSource(code)
         let visitor = TypeScopeVisitor()
         visitor.walk(source.syntax)
 
         let mutations = BooleanLiteralReplacement().mutations(in: source)
-        let insideBody = mutations.first { visitor.isSchematizable(utf8Offset: $0.utf8Offset) }
-        #expect(insideBody != nil)
+        #expect(!mutations.isEmpty)
+        #expect(mutations.allSatisfy { !visitor.isSchematizable(utf8Offset: $0.utf8Offset) })
     }
 
     @Test("Given offset outside all scopes, when innermostScope queried, then returns nil")

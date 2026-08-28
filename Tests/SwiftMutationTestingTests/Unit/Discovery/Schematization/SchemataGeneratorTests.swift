@@ -92,12 +92,12 @@ struct SchemataGeneratorTests {
         #expect(!Parser.parse(source: result).hasError)
     }
 
-    @Test("Given an implicit getter mutation, when generated, then the getter contains a parseable schema")
-    func implicitGetterProducesParseableSchema() {
+    @Test("Given an implicit getter mutation, generation preserves exact-only source")
+    func implicitGetterRemainsExactOnly() {
         let source = makeParsedSource("struct S { var enabled: Bool { true || false } }")
         let result = generator.generate(source: source, mutations: mutationsWithIndices(source))
 
-        #expect(result.contains("case \"swift-mutation-testing_0\""))
+        #expect(result == source.syntax.description)
         #expect(!Parser.parse(source: result).hasError)
         #expect(typeCheck(result) == 0)
     }
