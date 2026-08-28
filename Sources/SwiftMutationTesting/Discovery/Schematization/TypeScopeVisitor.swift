@@ -14,7 +14,6 @@ final class TypeScopeVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: InitializerDeclSyntax) -> SyntaxVisitorContinueKind {
-        record(body: node.body)
         return .visitChildren
     }
 

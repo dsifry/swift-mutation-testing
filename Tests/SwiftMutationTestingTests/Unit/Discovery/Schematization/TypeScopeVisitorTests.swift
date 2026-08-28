@@ -29,10 +29,26 @@ struct TypeScopeVisitorTests {
         #expect(visitor.scopes.count == 2)
     }
 
-    @Test("Given initializer with body, when walked, then records one scope")
-    func initializerRecordsScope() {
-        let visitor = makeTypeScopeVisitor("struct S { init() { let x = 1 } }")
-        #expect(visitor.scopes.count == 1)
+    @Test("Given Guide-shaped initializer, logical points remain exact-only")
+    func initializerDoesNotRecordSchematizableScope() {
+        let code = """
+        actor Store {
+            let defaults: Bool
+            let key: Bool
+            init(enabled: Bool?) {
+                defaults = enabled ?? false
+                key = defaults && enabled != nil
+                guard defaults == false, let enabled else { return }
+                _ = enabled
+            }
+        }
+        """
+        let visitor = makeTypeScopeVisitor(code)
+        let point = code.utf8.distance(
+            from: code.utf8.startIndex,
+            to: code.range(of: "defaults &&")!.lowerBound.samePosition(in: code.utf8)!)
+        #expect(visitor.scopes.isEmpty)
+        #expect(!visitor.isSchematizable(utf8Offset: point))
     }
 
     @Test("Given mutation offset inside function body, when checked, then isSchematizable returns true")
