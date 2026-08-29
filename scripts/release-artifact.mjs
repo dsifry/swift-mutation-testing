@@ -11,6 +11,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const CANDIDATE_RELEASES = Object.freeze(new Map([
   ['1.3.1', 'swift-mutation-testing 1.3.1 [arm64-macos26]'],
   ['1.3.2', 'swift-mutation-testing 1.3.2 [arm64-macos26]'],
+  ['1.3.3', 'swift-mutation-testing 1.3.3 [arm64-macos26]'],
 ]));
 const CANDIDATE_KEYS = Object.freeze([
   'schemaVersion', 'repository', 'workflow', 'dispatch', 'run', 'artifactName',

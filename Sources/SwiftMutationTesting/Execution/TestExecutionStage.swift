@@ -1,5 +1,11 @@
 import Foundation
 
+let mutationXCTestTimeoutArguments = [
+    "-test-timeouts-enabled", "YES",
+    "-default-test-execution-time-allowance", "5",
+    "-maximum-test-execution-time-allowance", "5",
+]
+
 struct TestExecutionStage: Sendable {
     let deps: ExecutionDeps
 
@@ -177,6 +183,7 @@ struct TestExecutionStage: Sendable {
             "-resultBundlePath", xcresultPath,
             "-derivedDataPath", context.artifact.derivedDataPath,
         ]
+        arguments += mutationXCTestTimeoutArguments
 
         if let testTarget = context.configuration.build.testTarget {
             arguments += ["-only-testing", testTarget]

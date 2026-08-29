@@ -191,14 +191,18 @@ test('candidate manifest accepts exactly the closed v1 schema', () => {
   assert.deepEqual(parseCandidateManifest(validCandidateBytes), validCandidate);
 });
 
-test('candidate manifest accepts the distinct 1.3.2 candidate contract', () => {
+test('candidate manifest accepts the distinct 1.3.2 and 1.3.3 candidate contracts', () => {
   assert.deepEqual(parseCandidateManifest(valid132CandidateBytes), valid132Candidate);
-  const unsupported = clone(valid132Candidate);
-  unsupported.release.version = '1.3.3';
-  unsupported.release.tag = 'v1.3.3';
-  unsupported.release.versionOutput = 'swift-mutation-testing 1.3.3 [arm64-macos26]';
-  unsupported.artifactName = 'swift-mutation-testing-v1.3.3-candidate-123456789-2';
-  assert.throws(() => parseCandidateManifest(Buffer.from(`${JSON.stringify(unsupported)}\n`)), /unsupported/u);
+  const candidate133 = clone(valid132Candidate);
+  candidate133.release.version = '1.3.3';
+  candidate133.release.tag = 'v1.3.3';
+  candidate133.release.versionOutput = 'swift-mutation-testing 1.3.3 [arm64-macos26]';
+  candidate133.artifactName = 'swift-mutation-testing-v1.3.3-candidate-123456789-2';
+  candidate133.archive.filename = 'swift-mutation-testing-v1.3.3-macos.tar.gz';
+  assert.deepEqual(
+    parseCandidateManifest(Buffer.from(`${JSON.stringify(candidate133)}\n`)),
+    candidate133,
+  );
 });
 
 test('candidate manifest rejects a missing nested key', () => {

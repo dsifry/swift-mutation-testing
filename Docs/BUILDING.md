@@ -93,9 +93,10 @@ pre-commit run --all-files
 
 ## Immutable release operations
 
-Release candidates are built once by `release-candidate.yml`, retained for 30
-days, proven by The Guide, and promoted unchanged by `release.yml`. Before a
-candidate dispatch, verify the protected environment and tag ruleset read-only:
+Release candidates are built once on an owner-custodied macOS host, proven by
+The Guide, and promoted unchanged. GitHub workflows run contract CI only and do
+not construct or retain candidate binaries. Before local construction, verify
+the protected environment and tag ruleset read-only:
 
 ```bash
 node scripts/configure-release-controls.mjs \
@@ -114,39 +115,40 @@ The exact reread requires `release-production` to have one authenticated user
 reviewer with self-review prevented, and the active `immutable-release-tags`
 ruleset to protect `refs/tags/v*` from updates and deletion with no bypass.
 
-Dispatch `release-candidate.yml` with a canonical version and reviewed source
-commit. Record the run ID, run attempt, artifact ID/name, manifest/archive/
-executable digests, and workflow/source commits in the Guide candidate
-descriptor. The Guide proof returns its commit, descriptor digest, and
-content-free release-proof digest for promotion.
+Use separate control and source checkouts and invoke the local candidate owner
+with the canonical version and reviewed source commit. The output directory
+must not already exist. Record the canonical builder receipt and preserve the
+three owner-only outputs: archive, manifest, and local provenance descriptor.
 
 ```bash
-gh workflow run release-candidate.yml --repo dsifry/swift-mutation-testing \
-  -f version=1.3.1 -f source_commit=FULL_40_CHARACTER_SOURCE_COMMIT
-gh run watch CANDIDATE_RUN_ID --repo dsifry/swift-mutation-testing --exit-status
-gh run download CANDIDATE_RUN_ID --repo dsifry/swift-mutation-testing \
-  --name CANDIDATE_ARTIFACT_NAME --dir candidate-evidence
+node scripts/build-release-candidate.mjs \
+  --control-root CONTROL_ROOT --source-root SOURCE_ROOT \
+  --output-root FRESH_OUTPUT_ROOT --version VERSION \
+  --source-commit SOURCE_COMMIT --workflow-commit CONTROL_COMMIT \
+  --run-id LOCAL_BUILD_ID --run-attempt 1 \
+  --artifact-name swift-mutation-testing-vVERSION-candidate-LOCAL_BUILD_ID-1
 ```
 
-Copy the authenticated run ID/attempt, artifact ID/name, workflow/source commits,
-and the three candidate digests into The Guide's release-candidate descriptor.
+Copy the canonical local provenance descriptor and its sibling archive and
+manifest into The Guide's owner-private candidate directory. The Guide verifies
+those exact bytes, executable digest and version, and strict code signature.
 After The Guide produces and reviewers merge its content-free proof, copy that
-proof into `Docs/ReleaseEvidence/v1.3.1-guide-proof.json` and record its Guide
+proof into `Docs/ReleaseEvidence/v1.3.3-guide-proof.json` and record its Guide
 commit, descriptor digest, and proof SHA-256.
 
 Create the already-reviewed release tag as a signed annotated tag and push it
 without rewriting any existing tag:
 
 ```bash
-git tag -s v1.3.1 SOURCE_COMMIT -m 'swift-mutation-testing 1.3.1'
-git push origin refs/tags/v1.3.1
+git tag -s v1.3.3 SOURCE_COMMIT -m 'swift-mutation-testing 1.3.3'
+git push origin refs/tags/v1.3.3
 ```
 
 Dispatch promotion using every required field shown by the workflow interface:
 
 ```bash
 gh workflow run release.yml --repo dsifry/swift-mutation-testing \
-  -f version=1.3.1 -f canonical_tag=v1.3.1 \
+  -f version=1.3.3 -f canonical_tag=v1.3.3 \
   -f candidate_run_id=RUN_ID -f candidate_run_attempt=ATTEMPT \
   -f candidate_artifact_id=ARTIFACT_ID -f candidate_artifact_name=ARTIFACT_NAME \
   -f candidate_workflow_commit=WORKFLOW_COMMIT -f source_commit=SOURCE_COMMIT \

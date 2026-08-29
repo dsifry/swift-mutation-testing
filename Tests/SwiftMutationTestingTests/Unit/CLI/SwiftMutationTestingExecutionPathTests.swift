@@ -149,7 +149,7 @@ struct SwiftMutationTestingExecutionPathTests {
         #expect(receipt.counters.testWithoutBuildingRuns == 0)
         #expect(await launcher.xcodeDeviceSetEnvironmentCount == 0)
         let reportPayload = try JSONSerialization.jsonObject(with: Data(contentsOf: report)) as? [String: Any]
-        #expect(reportPayload?["schemaVersion"] as? String == "1")
+        #expect(reportPayload?["schemaVersion"] as? String == "2")
         #expect(reportPayload?["projectRoot"] as? String == root.resolvingSymlinksInPath().path)
     }
 

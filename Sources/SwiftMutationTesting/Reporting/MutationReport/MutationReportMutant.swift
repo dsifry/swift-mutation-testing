@@ -7,4 +7,6 @@ struct MutationReportMutant: Sendable, Encodable {
     let status: String
     let description: String
     let killedBy: String?
+    let durationMilliseconds: Int
+    let effectiveConcurrency: Int
 }

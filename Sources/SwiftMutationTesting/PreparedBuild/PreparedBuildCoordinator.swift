@@ -65,7 +65,7 @@ struct BuildCountEvidence: Codable, Equatable, Sendable {
 
 enum BuildCountEvidenceWriter {
     static let capabilitySHA256 = ProjectInputManifest.sha256(Data(
-        "swift-mutation-testing-v1.3.2:gate-simulator-build-count".utf8
+        "swift-mutation-testing-v1.3.3:gate-simulator-build-count".utf8
     ))
 
     static func write(_ evidence: BuildCountEvidence, to url: URL) throws {

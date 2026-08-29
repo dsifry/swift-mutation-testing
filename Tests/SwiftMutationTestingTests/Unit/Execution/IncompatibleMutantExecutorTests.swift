@@ -5,6 +5,43 @@ import Testing
 
 @Suite("IncompatibleMutantExecutor")
 struct IncompatibleMutantExecutorTests {
+    @Test("Fallback XCTest mutant launches include the bounded timeout policy")
+    func fallbackXCTestLaunchIncludesBoundedTimeoutPolicy() async throws {
+        let dir = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(dir) }
+
+        let launcher = MutationRequestRecorder()
+        let executor = IncompatibleMutantExecutor(
+            deps: makeExecutionDeps(
+                launcher: launcher,
+                cacheStorePath: dir.appendingPathComponent("cache.json").path
+            ),
+            sandboxFactory: SandboxFactory()
+        )
+        let pool = makeSimulatorPool(launcher: launcher)
+        try await pool.setUp()
+        let mutant = makeMutantDescriptor(
+            id: "m0",
+            originalText: "a + b",
+            mutatedText: "a - b",
+            operatorIdentifier: "binaryOperator",
+            description: "Replace + with -",
+            mutatedSourceContent: "let x = 1"
+        )
+
+        _ = try await executor.execute(
+            [mutant],
+            configuration: makeRunnerConfiguration(projectPath: dir.path),
+            pool: pool
+        )
+
+        let request = try #require(await launcher.capturedRequests().first {
+            $0.executableURL.path == "/usr/bin/xcodebuild"
+                && $0.arguments.first == "test"
+        })
+        #expect(request.arguments.containsConsecutive(mutationXCTestTimeoutArguments))
+    }
+
     @Test("Given 3 mutants with content, when execute called, then 3 results are returned in order")
     func executeReturnsAllResultsInOrder() async throws {
         let dir = try FileHelpers.makeTemporaryDirectory()

@@ -12,13 +12,13 @@ struct JsonReporterTests {
 
         let outputPath = dir.appendingPathComponent("mutation.json").path
         let projectRoot = "/abs/MyApp"
-        let reporter = JsonReporter(outputPath: outputPath, projectRoot: projectRoot)
+        let reporter = JsonReporter(outputPath: outputPath, projectRoot: projectRoot, effectiveConcurrency: 1)
 
         let summary = RunnerSummary(
             results: [
                 makeExecutionResult(
                     id: "1", filePath: "/abs/MyApp/Sources/Calc.swift", line: 3, column: 24,
-                    status: .killed(by: "Suite.test"))
+                    status: .killed(by: "Suite.test"), testDuration: 1.25)
             ],
             totalDuration: 5
         )
@@ -28,10 +28,13 @@ struct JsonReporterTests {
         let data = try Data(contentsOf: URL(fileURLWithPath: outputPath))
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
 
-        #expect(json?["schemaVersion"] as? String == "1")
+        #expect(json?["schemaVersion"] as? String == "2")
         #expect(json?["projectRoot"] as? String == projectRoot)
         let files = json?["files"] as? [String: Any]
-        #expect(files?["/Sources/Calc.swift"] != nil)
+        let file = files?["/Sources/Calc.swift"] as? [String: Any]
+        let mutants = file?["mutants"] as? [[String: Any]]
+        #expect(mutants?.first?["durationMilliseconds"] as? Int == 1_250)
+        #expect(mutants?.first?["effectiveConcurrency"] as? Int == 1)
     }
 
     @Test("Given a killed mutant, when report called, then status string is Killed")
