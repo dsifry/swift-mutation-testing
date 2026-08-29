@@ -254,6 +254,7 @@ struct IncompatibleMutantExecutor: Sendable {
             "-resultBundlePath", xcresultPath,
             "-parallel-testing-enabled", "NO",
         ]
+        arguments += mutationXCTestTimeoutArguments
 
         if let testTarget = configuration.build.testTarget {
             arguments += ["-only-testing", testTarget]

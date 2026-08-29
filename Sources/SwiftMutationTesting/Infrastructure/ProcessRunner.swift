@@ -99,9 +99,18 @@ struct ProcessRunner: Sendable {
     final class KilledByUsFlag: @unchecked Sendable {
         private let lock = NSLock()
         private var flag = false
+        private var reconciledExitCode: Int32?
 
         var value: Bool { lock.withLock { flag } }
+        var reconciled: Int32? { lock.withLock { reconciledExitCode } }
         func mark() { lock.withLock { flag = true } }
+        func reconcile(_ exitCode: Int32) -> Bool {
+            lock.withLock {
+                guard !flag, reconciledExitCode == nil else { return false }
+                reconciledExitCode = exitCode
+                return true
+            }
+        }
     }
 
     func launch(
@@ -156,7 +165,12 @@ struct ProcessRunner: Sendable {
                 workingDirectoryURL: request.workingDirectoryURL,
                 outputDescriptor: captureDescriptor
             )
-            let exitCode = try await supervise(process: process, timeout: request.timeout) { status in status }
+            let exitCode = try await supervise(
+                process: process,
+                timeout: request.timeout,
+                terminalResultProbe: request.terminalResultProbe,
+                terminalResultGrace: request.terminalResultGrace
+            ) { status in status }
             guard let output = readCaptureDescriptor(captureDescriptor) else {
                 throw PreparedCacheError.unsafeCachePath
             }
@@ -182,6 +196,8 @@ struct ProcessRunner: Sendable {
     private func supervise<T: Sendable>(
         process: SpawnedProcess,
         timeout: Double,
+        terminalResultProbe: (@Sendable () async -> Int32?)? = nil,
+        terminalResultGrace: Double = 2,
         transform: @escaping @Sendable (Int32) -> T
     ) async throws -> T {
         let pid = process.pid
@@ -222,13 +238,32 @@ struct ProcessRunner: Sendable {
                     killedByUs.mark()
                     onTimeout(pid)
                 }
+                let terminalTask = Task {
+                    guard let terminalResultProbe else { return }
+                    let pollingAttempts = max(1, Int(ceil(timeout * 10)))
+                    for _ in 0 ..< pollingAttempts {
+                        if let exitCode = await terminalResultProbe() {
+                            try await Task.sleep(for: .seconds(max(0, terminalResultGrace)))
+                            guard !Task.isCancelled,
+                                  await terminalResultProbe() == exitCode,
+                                  killedByUs.reconcile(exitCode)
+                            else { return }
+                            onTimeout(pid)
+                            return
+                        }
+                        try await Task.sleep(for: .milliseconds(100))
+                    }
+                }
                 DispatchQueue.global().async {
                     let status = waitForExit(pid)
                     timeoutTask.cancel()
+                    terminalTask.cancel()
                     timeoutDidFinish(pid)
                     do {
                         try postTerminationCleanup?(pid)
-                        continuation.resume(returning: transform(killedByUs.value ? -1 : status))
+                        continuation.resume(returning: transform(
+                            killedByUs.reconciled ?? (killedByUs.value ? -1 : status)
+                        ))
                     } catch {
                         continuation.resume(throwing: error)
                     }

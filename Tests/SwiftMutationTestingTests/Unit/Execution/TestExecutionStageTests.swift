@@ -5,6 +5,53 @@ import Testing
 
 @Suite("TestExecutionStage")
 struct TestExecutionStageTests {
+    @Test("Mutation XCTest execution uses a five-second per-test allowance")
+    func mutationXCTestTimeoutPolicyIsBounded() {
+        #expect(mutationXCTestTimeoutArguments == [
+            "-test-timeouts-enabled", "YES",
+            "-default-test-execution-time-allowance", "5",
+            "-maximum-test-execution-time-allowance", "5",
+        ])
+    }
+
+    @Test("Prepared XCTest mutant launches include the bounded timeout policy")
+    func preparedXCTestLaunchIncludesBoundedTimeoutPolicy() async throws {
+        let dir = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(dir) }
+
+        let launcher = MutationRequestRecorder()
+        let pool = makeSimulatorPool(launcher: launcher)
+        try await pool.setUp()
+        let stage = TestExecutionStage(
+            deps: makeExecutionDeps(
+                launcher: launcher,
+                cacheStorePath: dir.appendingPathComponent("cache.json").path
+            )
+        )
+        let context = TestExecutionContext(
+            artifact: makeBuildArtifact(in: dir),
+            sandbox: Sandbox(rootURL: dir),
+            pool: pool,
+            configuration: makeRunnerConfiguration()
+        )
+        let mutant = makeMutantDescriptor(
+            id: "m0",
+            originalText: "a + b",
+            mutatedText: "a - b",
+            operatorIdentifier: "binaryOperator",
+            description: "Replace + with -",
+            isSchematizable: true
+        )
+
+        _ = try await stage.execute(mutants: [mutant], in: context)
+
+        let request = try #require(await launcher.capturedRequests().first {
+            $0.executableURL.path == "/usr/bin/xcodebuild"
+                && $0.arguments.first == "test-without-building"
+        })
+        #expect(request.arguments.containsConsecutive(mutationXCTestTimeoutArguments))
+    }
+
     @Test("Given 3 mutants and concurrency of 1, when execute called, then all 3 results are returned")
     func executeReturnsAllResults() async throws {
         let dir = try FileHelpers.makeTemporaryDirectory()
@@ -404,5 +451,36 @@ struct TestExecutionStageTests {
         let results = try await stage.execute(mutants: [mutant], in: context)
 
         #expect(results.count == 1)
+    }
+}
+
+actor MutationRequestRecorder: ProcessLaunching {
+    private var requests: [ProcessRequest] = []
+
+    func launch(
+        executableURL: URL,
+        arguments: [String],
+        workingDirectoryURL: URL,
+        timeout: Double
+    ) async throws -> Int32 {
+        0
+    }
+
+    func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        requests.append(request)
+        return (0, "")
+    }
+
+    func capturedRequests() -> [ProcessRequest] {
+        requests
+    }
+}
+
+extension Array where Element: Equatable {
+    func containsConsecutive(_ elements: [Element]) -> Bool {
+        guard !elements.isEmpty, elements.count <= count else { return false }
+        return indices.dropLast(elements.count - 1).contains { start in
+            Array(self[start ..< index(start, offsetBy: elements.count)]) == elements
+        }
     }
 }

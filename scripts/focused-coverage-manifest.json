@@ -15,6 +15,9 @@
     "Sources/SwiftMutationTesting/PreparedBuild/PreparedBuildCoordinator.swift",
     "Sources/SwiftMutationTesting/Infrastructure/ProcessRunner.swift",
     "Sources/SwiftMutationTesting/Infrastructure/XcodeProcessLauncher.swift",
+    "Sources/SwiftMutationTesting/Infrastructure/ProcessRequest.swift",
+    "Sources/SwiftMutationTesting/Execution/Parsing/XCResultParser.swift",
+    "Sources/SwiftMutationTesting/Execution/Parsing/XCResultTerminalSummaryReader.swift",
     "Sources/SwiftMutationTesting/Simulator/GateSimulatorSupervisor.swift",
     "Sources/SwiftMutationTesting/Simulator/SimulatorManager.swift",
     "Sources/SwiftMutationTesting/SwiftMutationTesting.swift"

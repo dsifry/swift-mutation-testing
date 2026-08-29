@@ -50,4 +50,32 @@ struct MutationRewriterTests {
         let result = rewriter.rewrite(source: source, applying: mutation)
         #expect(result == source)
     }
+
+    @Test("Given a descriptor, produces the exact individually rewritten mutant")
+    func rewritesDescriptor() {
+        let source = "let enabled = true"
+        let mutant = makeMutantDescriptor(
+            id: "m0", filePath: "Foo.swift", utf8Offset: 14, originalText: "true",
+            mutatedText: "false", operatorIdentifier: "BooleanLiteralReplacement",
+            replacementKind: .booleanLiteral, description: "true to false",
+            isSchematizable: true
+        )
+
+        let result = rewriter.rewrite(mutant: mutant, in: source)
+
+        #expect(result?.id == mutant.id)
+        #expect(result?.mutatedSourceContent == "let enabled = false")
+    }
+
+    @Test("Given a descriptor that cannot be applied, rejects it")
+    func rejectsUnrewritableDescriptor() {
+        let mutant = makeMutantDescriptor(
+            id: "m0", filePath: "Foo.swift", utf8Offset: 99, originalText: "true",
+            mutatedText: "false", operatorIdentifier: "BooleanLiteralReplacement",
+            replacementKind: .booleanLiteral, description: "true to false",
+            isSchematizable: true
+        )
+
+        #expect(rewriter.rewrite(mutant: mutant, in: "let enabled = true") == nil)
+    }
 }

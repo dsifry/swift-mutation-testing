@@ -345,7 +345,11 @@ public struct SwiftMutationTesting {
 
         if let output = configuration.reporting.output {
             writeReport(label: "JSON", to: output) {
-                try JsonReporter(outputPath: output, projectRoot: configuration.projectPath).report(summary)
+                try JsonReporter(
+                    outputPath: output,
+                    projectRoot: configuration.projectPath,
+                    effectiveConcurrency: configuration.build.concurrency
+                ).report(summary)
             }
         }
 

@@ -363,13 +363,15 @@ struct MutantExecutor: Sendable {
             buildDestination = nil
         }
         return try await FallbackExecutor(
-            deps: deps, configuration: configuration, buildDestination: buildDestination)
-            .execute(input: input, pool: pool)
+            deps: deps, configuration: configuration, buildDestination: buildDestination
+        )
+        .execute(input: input, pool: pool)
     }
 
     private func simulatorBoundDestination(_ destination: String) -> String {
         guard let registeredSimulatorUDID else { return destination }
-        let platform = destination.components(separatedBy: ",")
+        let platform =
+            destination.components(separatedBy: ",")
             .first(where: { $0.hasPrefix("platform=") }) ?? "platform=iOS Simulator"
         return "\(platform),id=\(registeredSimulatorUDID)"
     }
@@ -505,35 +507,7 @@ struct MutantExecutor: Sendable {
             source = loaded
         }
 
-        let point = MutationPoint(
-            operatorIdentifier: mutant.operatorIdentifier,
-            filePath: mutant.filePath,
-            line: mutant.line,
-            column: mutant.column,
-            utf8Offset: mutant.utf8Offset,
-            originalText: mutant.originalText,
-            mutatedText: mutant.mutatedText,
-            replacement: mutant.replacementKind,
-            description: mutant.description
-        )
-
-        let content = rewriter.rewrite(source: source, applying: point)
-        guard content != source else { return nil }
-
-        return MutantDescriptor(
-            id: mutant.id,
-            filePath: mutant.filePath,
-            line: mutant.line,
-            column: mutant.column,
-            utf8Offset: mutant.utf8Offset,
-            originalText: mutant.originalText,
-            mutatedText: mutant.mutatedText,
-            operatorIdentifier: mutant.operatorIdentifier,
-            replacementKind: mutant.replacementKind,
-            description: mutant.description,
-            isSchematizable: mutant.isSchematizable,
-            mutatedSourceContent: content
-        )
+        return rewriter.rewrite(mutant: mutant, in: source)
     }
 
     private func canonicalPath(_ path: String) -> String {

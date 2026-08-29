@@ -5,6 +5,46 @@ import Testing
 
 @Suite("MutantExecutor")
 struct MutantExecutorTests {
+    @Test("Given schema and fallback builds fail but the exact mutant is viable, executes the exact mutant")
+    func schemaFailureExecutesIndividuallyViableMutant() async throws {
+        let dir = try FileHelpers.makeTemporaryDirectory()
+        defer { FileHelpers.cleanup(dir) }
+
+        let sourceFile = dir.appendingPathComponent("Foo.swift")
+        try "let enabled = true".write(to: sourceFile, atomically: true, encoding: .utf8)
+        let launcher = SchemaFallbackExactMutationMock()
+        let executor = MutantExecutor(
+            configuration: makeRunnerConfiguration(projectPath: dir.path),
+            launcher: launcher
+        )
+        let mutant = makeMutantDescriptor(
+            id: "m0",
+            filePath: sourceFile.path,
+            originalText: "true",
+            mutatedText: "false",
+            operatorIdentifier: "BooleanLiteralReplacement",
+            replacementKind: .booleanLiteral,
+            description: "true to false",
+            isSchematizable: true,
+            mutatedSourceContent: "let enabled = false"
+        )
+        let input = makeRunnerInput(
+            projectPath: dir.path,
+            schematizedFiles: [
+                SchematizedFile(
+                    originalPath: sourceFile.path,
+                    schematizedContent: "invalid aggregate schema"
+                )
+            ],
+            mutants: [mutant]
+        )
+
+        let results = try await executor.execute(input)
+
+        #expect(results.count == 1)
+        #expect(results[0].status == .killed(by: "AppTests.ExactMutationTests.testBehavior"))
+    }
+
     @Test("Registered gate simulator binds legacy build-for-testing to its exact UDID")
     func registeredSimulatorBindsLegacyBuildDestination() async throws {
         let dir = try FileHelpers.makeTemporaryDirectory()
@@ -23,19 +63,21 @@ struct MutantExecutorTests {
             replacementKind: .booleanLiteral, isSchematizable: true,
             mutatedSourceContent: "let x = false")
 
-        _ = try await executor.execute(makeRunnerInput(
-            projectPath: dir.path,
-            projectType: .xcode(
-                scheme: "App", destination: "platform=iOS Simulator,name=iPhone 16"),
-            schematizedFiles: [.init(originalPath: source.path, schematizedContent: "let x = false")],
-            mutants: [mutant]))
+        _ = try await executor.execute(
+            makeRunnerInput(
+                projectPath: dir.path,
+                projectType: .xcode(
+                    scheme: "App", destination: "platform=iOS Simulator,name=iPhone 16"),
+                schematizedFiles: [.init(originalPath: source.path, schematizedContent: "let x = false")],
+                mutants: [mutant]))
 
         let builds = await launcher.buildArguments
         #expect(builds.count == 2)
         for arguments in builds {
             let destinationIndex = try #require(arguments.firstIndex(of: "-destination"))
-            #expect(arguments[destinationIndex + 1]
-                == "platform=iOS Simulator,id=REGISTERED-UDID")
+            #expect(
+                arguments[destinationIndex + 1]
+                    == "platform=iOS Simulator,id=REGISTERED-UDID")
         }
     }
 
@@ -826,6 +868,32 @@ struct MutantExecutorTests {
 
         #expect(results.count == 1)
         #expect(results[0].status == .unviable)
+    }
+}
+
+private actor SchemaFallbackExactMutationMock: ProcessLaunching {
+    func launch(
+        executableURL: URL,
+        arguments: [String],
+        workingDirectoryURL: URL,
+        timeout: Double
+    ) async throws -> Int32 {
+        0
+    }
+
+    func launchCapturing(
+        _ request: ProcessRequest
+    ) async throws -> (exitCode: Int32, output: String) {
+        if request.executableURL.lastPathComponent == "xcrun" {
+            return (1, "")
+        }
+        if request.arguments.first == "build-for-testing" {
+            return (1, "aggregate schema does not compile")
+        }
+        if request.arguments.first == "test" {
+            return (1, "Test Case '-[AppTests.ExactMutationTests testBehavior]' failed")
+        }
+        return (1, "")
     }
 }
 

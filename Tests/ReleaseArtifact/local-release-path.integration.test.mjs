@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import { canonicalLocalProvenance, sha256, verifyPromotionAuthority } from '../../scripts/release-artifact.mjs';
 import { runCli, verifyLocalBundleCustody } from '../../scripts/promote-release-candidate.mjs';
-import { loadMutationReleaseCandidate } from '/Users/dsifry/Developer/theguide/.worktrees/issue-51-warm-mutation-builds/tools/coverage/swift-mutation-release-candidate.mjs';
+import { loadMutationReleaseCandidate } from '/Users/dsifry/Developer/theguide/tools/coverage/swift-mutation-release-candidate.mjs';
 
 test('local producer descriptor passes Guide verifier and promotion dry-run unchanged', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'local-release-path-'));

@@ -8,13 +8,23 @@ protocol XcodeCustodyPreservingLauncher {
 }
 
 struct XcodeProcessLauncher: Sendable, ProcessLaunching {
-    init(custody: ProcessCustody? = nil, captureRoot: URL? = nil) {
+    init(
+        custody: ProcessCustody? = nil,
+        captureRoot: URL? = nil,
+        terminalSummaryReader: (@Sendable (String, URL) async -> Int32?)? = nil
+    ) {
         self.custody = custody
         self.captureRoot = captureRoot
+        self.terminalSummaryReader = terminalSummaryReader ?? { path, directory in
+            await XCResultTerminalSummaryReader(captureRoot: captureRoot).read(
+                path: path, workingDirectory: directory
+            )
+        }
     }
 
     private let custody: ProcessCustody?
     private let captureRoot: URL?
+    private let terminalSummaryReader: @Sendable (String, URL) async -> Int32?
 
     func launch(
         executableURL: URL,
@@ -33,7 +43,27 @@ struct XcodeProcessLauncher: Sendable, ProcessLaunching {
     func launchCapturing(
         _ request: ProcessRequest
     ) async throws -> (exitCode: Int32, output: String) {
-        try await makeRunner().launchCapturing(request)
+        try await makeRunner().launchCapturing(requestWithTerminalReconciliation(request))
+    }
+
+    func requestWithTerminalReconciliation(_ request: ProcessRequest) -> ProcessRequest {
+        guard request.executableURL.path == "/usr/bin/xcodebuild",
+              request.arguments.first == "test-without-building",
+              let resultFlag = request.arguments.firstIndex(of: "-resultBundlePath"),
+              request.arguments.indices.contains(resultFlag + 1)
+        else { return request }
+        let xcresultPath = request.arguments[resultFlag + 1]
+        return ProcessRequest(
+            executableURL: request.executableURL,
+            arguments: request.arguments,
+            environment: request.environment,
+            additionalEnvironment: request.additionalEnvironment,
+            workingDirectoryURL: request.workingDirectoryURL,
+            timeout: request.timeout,
+            terminalResultProbe: {
+                await terminalSummaryReader(xcresultPath, request.workingDirectoryURL)
+            }
+        )
     }
 
     func makeRunner() -> ProcessRunner {

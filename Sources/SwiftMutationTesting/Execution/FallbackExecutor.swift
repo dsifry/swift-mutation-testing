@@ -57,7 +57,8 @@ struct FallbackExecutor: Sendable {
             } catch {
                 await deps.reporter.report(.fallbackBuildFinished(filePath: file.originalPath, success: false))
                 try? sandbox.cleanup()
-                return await markUnviable(mutants: fileMutants)
+                return try await executeIndividually(
+                    mutants: fileMutants, pool: pool)
             }
 
         case .spm:
@@ -82,6 +83,26 @@ struct FallbackExecutor: Sendable {
         let stageResults = try await TestExecutionStage(deps: deps).execute(mutants: fileMutants, in: context)
         try? sandbox.cleanup()
         return stageResults
+    }
+
+    private func executeIndividually(
+        mutants: [MutantDescriptor],
+        pool: SimulatorPool
+    ) async throws -> [ExecutionResult] {
+        guard let source = try? String(contentsOfFile: mutants[0].filePath, encoding: .utf8) else {
+            return await markUnviable(mutants: mutants)
+        }
+
+        let rewriter = MutationRewriter()
+        let rewritten = mutants.compactMap { rewriter.rewrite(mutant: $0, in: source) }
+        let rewrittenIDs = Set(rewritten.map(\.id))
+        let unrewritable = mutants.filter { !rewrittenIDs.contains($0.id) }
+
+        var results = await markUnviable(mutants: unrewritable)
+        results += try await IncompatibleMutantExecutor(
+            deps: deps, sandboxFactory: SandboxFactory()
+        ).execute(rewritten, configuration: configuration, pool: pool)
+        return results
     }
 
     private func cachedResults(for mutants: [MutantDescriptor]) async -> [ExecutionResult]? {

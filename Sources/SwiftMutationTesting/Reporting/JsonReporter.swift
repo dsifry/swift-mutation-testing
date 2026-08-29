@@ -3,6 +3,13 @@ import Foundation
 struct JsonReporter: Sendable {
     let outputPath: String
     let projectRoot: String
+    let effectiveConcurrency: Int
+
+    init(outputPath: String, projectRoot: String, effectiveConcurrency: Int = 1) {
+        self.outputPath = outputPath
+        self.projectRoot = projectRoot
+        self.effectiveConcurrency = effectiveConcurrency
+    }
 
     func report(_ summary: RunnerSummary) throws {
         let payload = buildPayload(summary)
@@ -23,7 +30,7 @@ struct JsonReporter: Sendable {
         }
 
         return MutationReportPayload(
-            schemaVersion: "1",
+            schemaVersion: "2",
             thresholds: MutationReportThresholds(high: 80, low: 60),
             projectRoot: projectRoot,
             files: fileEntries
@@ -44,7 +51,9 @@ struct JsonReporter: Sendable {
             ),
             status: result.status.mutationReportStatus,
             description: descriptor.description,
-            killedBy: killedBy(from: result.status)
+            killedBy: killedBy(from: result.status),
+            durationMilliseconds: Int((result.testDuration * 1_000).rounded()),
+            effectiveConcurrency: effectiveConcurrency
         )
     }
 
