@@ -1002,6 +1002,99 @@ struct XcodeProcessLauncherTests {
         #expect(result.exitCode == -1)
     }
 
+    @Test("Given terminal evidence while a captured process survives, when grace expires, then exact process is reconciled")
+    func launchCapturingReconcilesTerminalEvidence() async throws {
+        actor Probe {
+            var calls = 0
+            func next() -> Int32? {
+                calls += 1
+                return calls == 1 ? nil : 1
+            }
+        }
+        let probe = Probe()
+        let started = ContinuousClock.now
+        let result = try await launcher.launchCapturing(
+            ProcessRequest(
+                executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                arguments: ["60"],
+                environment: nil,
+                additionalEnvironment: [:],
+                workingDirectoryURL: URL(fileURLWithPath: "/tmp"),
+                timeout: 30,
+                terminalResultProbe: { await probe.next() },
+                terminalResultGrace: 0.05
+            )
+        )
+
+        #expect(result.exitCode == 1)
+        #expect(ContinuousClock.now - started < .seconds(8))
+    }
+
+    @Test("Given incomplete evidence while a captured process survives, when timeout expires, then it remains a timeout")
+    func launchCapturingRejectsIncompleteTerminalEvidence() async throws {
+        let result = try await launcher.launchCapturing(
+            ProcessRequest(
+                executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                arguments: ["60"], environment: nil, additionalEnvironment: [:],
+                workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 0.2,
+                terminalResultProbe: { nil }, terminalResultGrace: 0.01
+            )
+        )
+        #expect(result.exitCode == -1)
+    }
+
+    @Test("Only a test-without-building request with one result bundle gains terminal reconciliation")
+    func terminalReconciliationRequestIsNarrow() async {
+        let reconcilingLauncher = XcodeProcessLauncher(terminalSummaryReader: { _, _ in 1 })
+        func request(_ executable: String, _ arguments: [String]) -> ProcessRequest {
+            ProcessRequest(
+                executableURL: URL(fileURLWithPath: executable), arguments: arguments,
+                environment: nil, additionalEnvironment: [:],
+                workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 10
+            )
+        }
+        let valid = reconcilingLauncher.requestWithTerminalReconciliation(request(
+            "/usr/bin/xcodebuild",
+            ["test-without-building", "-resultBundlePath", "/tmp/result.xcresult"]
+        ))
+        #expect(valid.terminalResultProbe != nil)
+        #expect(await valid.terminalResultProbe?() == 1)
+        #expect(launcher.requestWithTerminalReconciliation(
+            request("/usr/bin/xcodebuild", ["build-for-testing"])
+        ).terminalResultProbe == nil)
+        #expect(launcher.requestWithTerminalReconciliation(
+            request("/usr/bin/xcodebuild", ["test-without-building", "-resultBundlePath"])
+        ).terminalResultProbe == nil)
+        #expect(launcher.requestWithTerminalReconciliation(
+            request("/bin/echo", ["test-without-building", "-resultBundlePath", "/tmp/result"])
+        ).terminalResultProbe == nil)
+    }
+
+    @Test("Terminal evidence must remain identical through grace and cannot override timeout ownership")
+    func terminalEvidenceRevalidationFailsClosed() async throws {
+        actor Probe {
+            var calls = 0
+            func next() -> Int32? {
+                calls += 1
+                return calls == 1 ? 1 : nil
+            }
+        }
+        let probe = Probe()
+        let result = try await launcher.launchCapturing(
+            ProcessRequest(
+                executableURL: URL(fileURLWithPath: "/bin/sleep"), arguments: ["60"],
+                environment: nil, additionalEnvironment: [:],
+                workingDirectoryURL: URL(fileURLWithPath: "/tmp"), timeout: 0.2,
+                terminalResultProbe: { await probe.next() }, terminalResultGrace: 0.01
+            )
+        )
+        #expect(result.exitCode == -1)
+
+        let ownership = ProcessRunner.KilledByUsFlag()
+        ownership.mark()
+        #expect(ownership.reconcile(1) == false)
+    }
+
     @Test("Given task is cancelled while launch running, when cancelled, then process is terminated")
     func cancelledLaunchTerminatesProcess() async throws {
         let task = Task {
