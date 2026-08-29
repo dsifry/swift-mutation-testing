@@ -446,6 +446,11 @@ struct PreparedBuildRecoveryTests {
             #expect(object["fullBuilds"] as? Int == expectedFull)
             #expect(object["incrementalBuilds"] as? Int == expectedIncremental)
         }
+        let preparationRequests = launcher.requests.filter {
+            $0.arguments.contains("build-for-testing") || $0.arguments.contains("-enumerate-tests")
+        }
+        #expect(!preparationRequests.isEmpty)
+        #expect(preparationRequests.allSatisfy { $0.timeout == 300 })
 
         let preparedStore = PreparedBuildStore(root: fixture.root.path, compatibilityID: compatibilityID)
         let rawState = try Data(contentsOf: preparedStore.stateURL)
@@ -3140,11 +3145,13 @@ struct PreparedBuildRecoveryTests {
 private final class PreparedCoordinatorLauncher: @unchecked Sendable, ProcessLaunching {
     var enumerationExitCode: Int32 = 0
     var omitBuildProducts = false
+    private(set) var requests: [ProcessRequest] = []
     func launch(
         executableURL: URL, arguments: [String], workingDirectoryURL: URL, timeout: Double
     ) async throws -> Int32 { 0 }
 
     func launchCapturing(_ request: ProcessRequest) async throws -> (exitCode: Int32, output: String) {
+        requests.append(request)
         if request.arguments.contains("build-for-testing"),
             let index = request.arguments.firstIndex(of: "-derivedDataPath")
         {

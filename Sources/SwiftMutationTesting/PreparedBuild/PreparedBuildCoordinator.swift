@@ -437,6 +437,7 @@ enum CacheFailureEvidenceRecorder {
 }
 
 struct PreparedBuildCoordinator: Sendable {
+    static let preparationTimeout: Double = 300
     let configuration: RunnerConfiguration
     let options: ParsedArguments.CacheOptions
     let launcher: any ProcessLaunching
@@ -551,14 +552,14 @@ struct PreparedBuildCoordinator: Sendable {
                 sandbox: sandbox,
                 scheme: scheme,
                 destination: simulatorBoundDestination(destination),
-                timeout: configuration.build.timeout,
+                timeout: Self.preparationTimeout,
                 derivedDataURL: store.derivedDataURL
             )
             let xctestrunURL = try Self.requireXCTestRun(from: artifact)
             try await PreparedTestEnumerator(launcher: commandLauncher).enumerate(
                 xctestrunURL: xctestrunURL,
                 destination: simulatorBoundDestination(destination),
-                timeout: configuration.build.timeout,
+                timeout: Self.preparationTimeout,
                 outputURL: URL(fileURLWithPath: enumerationOutput)
             )
             try lock.validateDirectoryIdentity()
