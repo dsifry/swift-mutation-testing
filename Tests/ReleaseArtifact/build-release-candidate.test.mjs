@@ -29,7 +29,7 @@ function realVerifierCommands(value) {
     codesign: { verify: async () => true },
     file: { inspect: async () => ({ type: 'Mach-O 64-bit executable arm64' }) },
     otool: { inspect: async () => ({ uuid: '12345678-1234-1234-1234-123456789abc', cpuType: 'arm64', deploymentTarget: '15.0' }) },
-    executable: { version: async () => 'swift-mutation-testing 1.3.1 [arm64-macos26]' },
+    executable: { version: async () => 'swift-mutation-testing 1.3.2 [arm64-macos26]' },
   };
 }
 
@@ -50,12 +50,12 @@ async function fixture() {
     controlRoot,
     sourceRoot,
     outputRoot,
-    version: '1.3.1',
+    version: '1.3.2',
     sourceCommit: commit('a'),
     workflowCommit: commit('b'),
     runId: '123456789',
     runAttempt: '2',
-    artifactName: 'swift-mutation-testing-v1.3.1-candidate-123456789-2',
+    artifactName: 'swift-mutation-testing-v1.3.2-candidate-123456789-2',
   };
   const runCommand = async (executable, argv, options = {}) => {
     calls.push({ executable, argv, options });
@@ -78,7 +78,7 @@ async function fixture() {
     if (executable === 'codesign') return { stdout: '', stderr: '', exitCode: 0 };
     if (executable === 'file') return { stdout: 'Mach-O 64-bit executable arm64\n', stderr: '', exitCode: 0 };
     if (executable === 'otool') return { stdout: '      cmd LC_UUID\n  cmdsize 24\n     uuid 12345678-1234-1234-1234-123456789ABC\n      cmd LC_BUILD_VERSION\n  cmdsize 32\n    minos 15.0\n', stderr: '', exitCode: 0 };
-    if (executable.endsWith('swift-mutation-testing')) return { stdout: 'swift-mutation-testing 1.3.1 [arm64-macos26]\n', stderr: '', exitCode: 0 };
+    if (executable.endsWith('swift-mutation-testing')) return { stdout: 'swift-mutation-testing 1.3.2 [arm64-macos26]\n', stderr: '', exitCode: 0 };
     if (executable === 'tar' && argv[0] === '-czf') {
       await writeFile(argv[1], 'archive');
       return { stdout: '', stderr: '', exitCode: 0 };
@@ -114,10 +114,10 @@ test('builds the candidate exactly once from source while every owner path is co
     }),
   });
 
-  assert.equal(receipt.archive.filename, 'swift-mutation-testing-v1.3.1-macos.tar.gz');
+  assert.equal(receipt.archive.filename, 'swift-mutation-testing-v1.3.2-macos.tar.gz');
   assert.equal(receipt.manifest.filename, 'release-candidate-v2.json');
   assert.deepEqual((await (await import('node:fs/promises')).readdir(value.outputRoot)).sort(), [
-    'local-release-provenance-v1.json', 'release-candidate-v2.json', 'swift-mutation-testing-v1.3.1-macos.tar.gz',
+    'local-release-provenance-v1.json', 'release-candidate-v2.json', 'swift-mutation-testing-v1.3.2-macos.tar.gz',
   ]);
   const provenanceBytes = await readFile(path.join(value.outputRoot, 'local-release-provenance-v1.json'));
   const provenance = releaseArtifact.parseLocalProvenance(provenanceBytes);
@@ -129,7 +129,7 @@ test('builds the candidate exactly once from source while every owner path is co
   assert.equal(value.calls.some(({ executable }) => executable.startsWith(`${path.join(value.sourceRoot, 'scripts')}${path.sep}`)), false);
   assert.equal(value.calls.some(({ executable, argv }) => executable === 'swift' && argv.includes('--no-parallel')), false);
   assert.equal(value.calls.some(({ executable, argv }) => executable === 'swift' && argv.includes('--scratch-path') && argv.some((argument) => argument.includes('.release-candidate-scratch-'))), true);
-  assert.equal((await readFile(path.join(value.sourceRoot, 'Sources', 'SwiftMutationTesting', 'Version.swift'), 'utf8')).includes('1.3.1'), true);
+  assert.equal((await readFile(path.join(value.sourceRoot, 'Sources', 'SwiftMutationTesting', 'Version.swift'), 'utf8')).includes('1.3.2'), true);
 });
 
 test('Mach-O parser requires the real LC_UUID cmdsize layout', () => {
@@ -293,7 +293,7 @@ for (const [name, mutate, pattern] of [
 }
 
 test('input, parsing, and native command decisions fail closed', async (t) => {
-  for (const input of [null, {}, { version: '01.3' }, { version: '1.3.1' }, { version: '1.3.1', sourceCommit: commit('a') }, { version: '1.3.1', sourceCommit: 'bad', workflowCommit: commit('b') }, { version: '1.3.1', sourceCommit: commit('a'), workflowCommit: commit('b'), runId: 0, runAttempt: 1 }, { version: '1.3.1', sourceCommit: commit('a'), workflowCommit: commit('b'), runId: 1, runAttempt: 1, artifactName: 'bad' }]) {
+  for (const input of [null, {}, { version: '01.3' }, { version: '1.3.2' }, { version: '1.3.2', sourceCommit: commit('a') }, { version: '1.3.2', sourceCommit: 'bad', workflowCommit: commit('b') }, { version: '1.3.2', sourceCommit: commit('a'), workflowCommit: commit('b'), runId: 0, runAttempt: 1 }, { version: '1.3.2', sourceCommit: commit('a'), workflowCommit: commit('b'), runId: 1, runAttempt: 1, artifactName: 'bad' }]) {
     await assert.rejects(() => runBuild(input), /build release candidate/);
   }
   await assert.rejects(() => canonicalOutputRoot('relative'), /absolute/);
@@ -403,7 +403,7 @@ test('removes output when late output-set validation fails', async (t) => {
 });
 
 test('CLI and main preserve the closed argument contract', async () => {
-  const argv = ['--control-root','/c','--source-root','/s','--output-root','/o','--version','1.3.1','--source-commit',commit('a'),'--workflow-commit',commit('b'),'--run-id','1','--run-attempt','1','--artifact-name','swift-mutation-testing-v1.3.1-candidate-1-1'];
+  const argv = ['--control-root','/c','--source-root','/s','--output-root','/o','--version','1.3.2','--source-commit',commit('a'),'--workflow-commit',commit('b'),'--run-id','1','--run-attempt','1','--artifact-name','swift-mutation-testing-v1.3.2-candidate-1-1'];
   const output = [];
   const receipt = { ok: true };
   assert.equal(await runCli(argv, { runBuild: async () => receipt, stdout: (value) => output.push(value) }), receipt);

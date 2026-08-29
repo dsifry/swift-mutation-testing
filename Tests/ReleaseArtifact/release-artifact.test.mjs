@@ -29,6 +29,8 @@ import {
 const fixtures = path.join(import.meta.dirname, 'fixtures');
 const validCandidateBytes = await readFile(path.join(fixtures, 'candidate-valid.json'));
 const validCandidate = JSON.parse(validCandidateBytes);
+const valid132CandidateBytes = await readFile(path.join(fixtures, 'candidate-v1.3.2-valid.json'));
+const valid132Candidate = JSON.parse(valid132CandidateBytes);
 const validAttestation = JSON.parse(await readFile(path.join(fixtures, 'attestation-valid.json')));
 const manifestSHA256 = sha256(validCandidateBytes);
 
@@ -187,6 +189,16 @@ function candidateExpected() {
 
 test('candidate manifest accepts exactly the closed v1 schema', () => {
   assert.deepEqual(parseCandidateManifest(validCandidateBytes), validCandidate);
+});
+
+test('candidate manifest accepts the distinct 1.3.2 candidate contract', () => {
+  assert.deepEqual(parseCandidateManifest(valid132CandidateBytes), valid132Candidate);
+  const unsupported = clone(valid132Candidate);
+  unsupported.release.version = '1.3.3';
+  unsupported.release.tag = 'v1.3.3';
+  unsupported.release.versionOutput = 'swift-mutation-testing 1.3.3 [arm64-macos26]';
+  unsupported.artifactName = 'swift-mutation-testing-v1.3.3-candidate-123456789-2';
+  assert.throws(() => parseCandidateManifest(Buffer.from(`${JSON.stringify(unsupported)}\n`)), /unsupported/u);
 });
 
 test('candidate manifest rejects a missing nested key', () => {

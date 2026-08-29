@@ -8,6 +8,10 @@ const execFile = promisify(execFileCallback);
 const SHA256 = /^[a-f0-9]{64}$/;
 const COMMIT = /^[a-f0-9]{40}$/;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const CANDIDATE_RELEASES = Object.freeze(new Map([
+  ['1.3.1', 'swift-mutation-testing 1.3.1 [arm64-macos26]'],
+  ['1.3.2', 'swift-mutation-testing 1.3.2 [arm64-macos26]'],
+]));
 const CANDIDATE_KEYS = Object.freeze([
   'schemaVersion', 'repository', 'workflow', 'dispatch', 'run', 'artifactName',
   'sourceCommit', 'release', 'toolchain', 'archive', 'executable',
@@ -84,12 +88,12 @@ function assertCandidateValues(value) {
   assertPositiveSafeInteger(value.run.attempt, 'run.attempt');
 
   assertCommit(value.sourceCommit, 'sourceCommit');
-  assertExact(value.artifactName, `swift-mutation-testing-v1.3.1-candidate-${value.run.id}-${value.run.attempt}`, 'artifactName');
-
   assertExactKeys(value.release, ['version', 'tag', 'versionOutput'], 'release');
-  assertExact(value.release.version, '1.3.1', 'release.version');
+  const versionOutput = CANDIDATE_RELEASES.get(value.release.version);
+  if (versionOutput === undefined) fail('candidate manifest', 'release.version is unsupported');
+  assertExact(value.artifactName, `swift-mutation-testing-v${value.release.version}-candidate-${value.run.id}-${value.run.attempt}`, 'artifactName');
   assertExact(value.release.tag, `v${value.release.version}`, 'release.tag');
-  assertExact(value.release.versionOutput, 'swift-mutation-testing 1.3.1 [arm64-macos26]', 'release.versionOutput');
+  assertExact(value.release.versionOutput, versionOutput, 'release.versionOutput');
 
   assertExactKeys(value.toolchain, [
     'runnerImage', 'runnerArchitecture', 'xcodeVersion', 'xcodeBuild', 'swiftVersion',
