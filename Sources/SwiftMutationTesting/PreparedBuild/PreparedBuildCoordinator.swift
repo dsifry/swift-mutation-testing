@@ -437,7 +437,7 @@ enum CacheFailureEvidenceRecorder {
 }
 
 struct PreparedBuildCoordinator: Sendable {
-    static let preparationTimeout: Double = 300
+    static let preparationTimeout: Double = 1_800
     let configuration: RunnerConfiguration
     let options: ParsedArguments.CacheOptions
     let launcher: any ProcessLaunching

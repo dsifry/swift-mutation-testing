@@ -872,6 +872,56 @@ struct XcodeProcessLauncherTests {
         #expect(try ProcessCustody.readRegisteredGroups(from: registry).isEmpty)
     }
 
+    @Test("A timed-out launch retains custody of a live escaped descendant group")
+    func timedOutLaunchRetainsEscapedDescendantCustody() async throws {
+        let directory = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!
+            .appendingPathComponent(UUID().uuidString)
+        var escapedProcessGroupID: Int32?
+        defer {
+            if let escapedProcessGroupID { _ = kill(-escapedProcessGroupID, SIGKILL) }
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        chmod(directory.path, 0o700)
+        let registry = directory.appendingPathComponent("process-custody.json")
+        let childPIDFile = directory.appendingPathComponent("escaped-child-pid")
+        let custody = try ProcessCustody.system(registrationURL: registry)
+        let launcher = XcodeProcessLauncher(custody: custody)
+
+        let exitCode = try await launcher.launch(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: [
+                "-c",
+                "trap 'exit 0' TERM; set -m; sleep 60 & printf '%s\\n' \"$!\" > \"$1\"; wait",
+                "custody-timeout-test",
+                childPIDFile.path,
+            ],
+            workingDirectoryURL: directory,
+            timeout: 0.5
+        )
+
+        #expect(exitCode == -1)
+        let childPID = try #require(
+            Int32(
+                String(contentsOf: childPIDFile, encoding: .utf8)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            ))
+        let escapedGroup = try SystemProcessIdentity.group(for: childPID)
+        escapedProcessGroupID = escapedGroup.processGroupID
+        #expect(escapedGroup.pid == escapedGroup.processGroupID)
+        #expect(SystemProcessIdentity.status(of: escapedGroup) == .matching)
+        let registeredGroups = try ProcessCustody.readRegisteredGroups(from: registry)
+        #expect(registeredGroups.count == 2)
+        #expect(registeredGroups.contains(escapedGroup))
+        #expect(!custody.isQuiescent)
+
+        try custody.handleEngineTermination()
+
+        #expect(SystemProcessIdentity.status(of: escapedGroup) == .absent)
+        #expect(custody.isQuiescent)
+        #expect(try ProcessCustody.readRegisteredGroups(from: registry).isEmpty)
+    }
+
     @Test("Given a successful executable, when launched, then returns zero exit code")
     func launchReturnsSuccessExitCode() async throws {
         let exitCode = try await launcher.launch(

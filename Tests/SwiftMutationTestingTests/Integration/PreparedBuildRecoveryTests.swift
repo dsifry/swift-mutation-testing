@@ -396,7 +396,8 @@ struct PreparedBuildRecoveryTests {
         let configuration = makeRunnerConfiguration(
             projectPath: project.path,
             projectType: .xcode(scheme: "App", destination: "platform=macOS"),
-            testTarget: "AppTests/Empty"
+            testTarget: "AppTests/Empty",
+            timeout: 7
         )
         let mutant = makeMutantDescriptor(
             id: "m0", filePath: sourceFile.path, isSchematizable: true
@@ -450,7 +451,7 @@ struct PreparedBuildRecoveryTests {
             $0.arguments.contains("build-for-testing") || $0.arguments.contains("-enumerate-tests")
         }
         #expect(!preparationRequests.isEmpty)
-        #expect(preparationRequests.allSatisfy { $0.timeout == 300 })
+        #expect(preparationRequests.allSatisfy { $0.timeout == 1_800 })
 
         let preparedStore = PreparedBuildStore(root: fixture.root.path, compatibilityID: compatibilityID)
         let rawState = try Data(contentsOf: preparedStore.stateURL)
