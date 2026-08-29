@@ -292,10 +292,13 @@ final class ProcessCustody: @unchecked Sendable {
 }
 
 enum SystemProcessIdentity {
-    private struct ProcessRelationship {
+    struct ProcessRelationship {
         let pid: Int32
         let parentPID: Int32
     }
+
+    typealias ProcessTableSizeQuery = (inout Int) -> Int32
+    typealias ProcessTableQuery = (inout [kinfo_proc], inout Int) -> Int32
 
     static func group(for pid: Int32, getGroup: (Int32) -> Int32 = { getpgid($0) }) throws -> CustodiedProcessGroup {
         guard let birth = birthIdentity(pid: pid) else {
@@ -306,9 +309,13 @@ enum SystemProcessIdentity {
         return CustodiedProcessGroup(pid: pid, processGroupID: group, birthIdentity: birth)
     }
 
-    static func escapedDescendantGroups(of pid: Int32) throws -> [CustodiedProcessGroup] {
-        let rootGroup = try group(for: pid)
-        let relationships = try processRelationships()
+    static func escapedDescendantGroups(
+        of pid: Int32,
+        relationships: () throws -> [ProcessRelationship] = { try processRelationships() },
+        groupForPID: (Int32) throws -> CustodiedProcessGroup = { try group(for: $0) }
+    ) throws -> [CustodiedProcessGroup] {
+        let rootGroup = try groupForPID(pid)
+        let relationships = try relationships()
         var knownAncestors: Set<Int32> = [pid]
         var descendantPIDs: Set<Int32> = []
         while true {
@@ -327,7 +334,7 @@ enum SystemProcessIdentity {
         for descendantPID in descendantPIDs.sorted() {
             let descendantGroup: CustodiedProcessGroup
             do {
-                descendantGroup = try group(for: descendantPID)
+                descendantGroup = try groupForPID(descendantPID)
             } catch {
                 if errno == ESRCH { continue }
                 throw error
@@ -378,15 +385,25 @@ enum SystemProcessIdentity {
         return "\(info.kp_proc.p_starttime.tv_sec):\(info.kp_proc.p_starttime.tv_usec)"
     }
 
-    private static func processRelationships() throws -> [ProcessRelationship] {
+    static func processRelationships(
+        sizeQuery: ProcessTableSizeQuery = { size in
+            var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+            return sysctl(&mib, 4, nil, &size, nil, 0)
+        },
+        processQuery: ProcessTableQuery = { processes, size in
+            var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+            return processes.withUnsafeMutableBufferPointer { buffer in
+                sysctl(&mib, 4, buffer.baseAddress, &size, nil, 0)
+            }
+        }
+    ) throws -> [ProcessRelationship] {
         var size = 0
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
-        guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else {
+        guard sizeQuery(&size) == 0, size > 0 else {
             throw PreparedCacheError.unverifiableProcessIdentity
         }
         let processSize = MemoryLayout<kinfo_proc>.stride
         var processes = [kinfo_proc](repeating: kinfo_proc(), count: size / processSize)
-        guard sysctl(&mib, 4, &processes, &size, nil, 0) == 0 else {
+        guard processQuery(&processes, &size) == 0 else {
             throw PreparedCacheError.unverifiableProcessIdentity
         }
         return processes.prefix(size / processSize).compactMap { process in

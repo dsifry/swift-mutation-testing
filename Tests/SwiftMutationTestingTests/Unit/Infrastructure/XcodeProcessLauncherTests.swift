@@ -922,6 +922,94 @@ struct XcodeProcessLauncherTests {
         #expect(try ProcessCustody.readRegisteredGroups(from: registry).isEmpty)
     }
 
+    @Test("A descendant discovery failure is contained while original custody remains registered")
+    func descendantDiscoveryFailureRetainsOriginalCustody() throws {
+        let directory = CachePathGuard.canonicalURL(FileManager.default.temporaryDirectory)!
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        chmod(directory.path, 0o700)
+        let registry = directory.appendingPathComponent("process-custody.json")
+        let custody = try ProcessCustody.system(registrationURL: registry)
+        let original = CustodiedProcessGroup(pid: 101, processGroupID: 101, birthIdentity: "original")
+        try custody.register(original)
+        let launcher = XcodeProcessLauncher(
+            custody: custody,
+            escapedDescendantGroups: { _ in throw PreparedCacheError.unverifiableProcessIdentity }
+        )
+
+        launcher.makeRunner().onTimeout(0)
+
+        #expect(try ProcessCustody.readRegisteredGroups(from: registry) == [original])
+        #expect(!custody.isQuiescent)
+    }
+
+    @Test("Descendant discovery handles races, nested children, shared groups, and stable ordering")
+    func descendantDiscoveryIsDeterministic() throws {
+        let relationships = [
+            SystemProcessIdentity.ProcessRelationship(pid: 11, parentPID: 10),
+            SystemProcessIdentity.ProcessRelationship(pid: 12, parentPID: 11),
+            SystemProcessIdentity.ProcessRelationship(pid: 13, parentPID: 10),
+            SystemProcessIdentity.ProcessRelationship(pid: 14, parentPID: 10),
+            SystemProcessIdentity.ProcessRelationship(pid: 15, parentPID: 10),
+            SystemProcessIdentity.ProcessRelationship(pid: 16, parentPID: 10),
+        ]
+        let groups = try SystemProcessIdentity.escapedDescendantGroups(
+            of: 10,
+            relationships: { relationships },
+            groupForPID: { pid in
+                switch pid {
+                case 10: return .init(pid: 10, processGroupID: 10, birthIdentity: "root")
+                case 11: return .init(pid: 11, processGroupID: 10, birthIdentity: "same")
+                case 12:
+                    errno = ESRCH
+                    throw PreparedCacheError.unverifiableProcessIdentity
+                case 13: return .init(pid: 13, processGroupID: 30, birthIdentity: "group-30")
+                case 14: return .init(pid: 14, processGroupID: 20, birthIdentity: "member-20")
+                case 15: return .init(pid: 20, processGroupID: 20, birthIdentity: "leader-20")
+                case 16: return .init(pid: 16, processGroupID: 20, birthIdentity: "member-20-late")
+                default: throw PreparedCacheError.unverifiableProcessIdentity
+                }
+            }
+        )
+
+        #expect(groups.map(\.processGroupID) == [20, 30])
+        #expect(groups.first?.pid == 20)
+    }
+
+    @Test("Descendant discovery and process-table failures fail closed")
+    func descendantAndProcessTableFailuresFailClosed() {
+        #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
+            try SystemProcessIdentity.escapedDescendantGroups(
+                of: 10,
+                relationships: {
+                    [.init(pid: 11, parentPID: 10)]
+                },
+                groupForPID: { pid in
+                    if pid == 10 {
+                        return .init(pid: 10, processGroupID: 10, birthIdentity: "root")
+                    }
+                    errno = EIO
+                    throw PreparedCacheError.unverifiableProcessIdentity
+                }
+            )
+        }
+        #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
+            try SystemProcessIdentity.processRelationships(
+                sizeQuery: { _ in -1 }, processQuery: { _, _ in 0 })
+        }
+        #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
+            try SystemProcessIdentity.processRelationships(
+                sizeQuery: { size in size = 0; return 0 }, processQuery: { _, _ in 0 })
+        }
+        #expect(throws: PreparedCacheError.unverifiableProcessIdentity) {
+            try SystemProcessIdentity.processRelationships(
+                sizeQuery: { size in size = MemoryLayout<kinfo_proc>.stride; return 0 },
+                processQuery: { _, _ in -1 }
+            )
+        }
+    }
+
     @Test("Given a successful executable, when launched, then returns zero exit code")
     func launchReturnsSuccessExitCode() async throws {
         let exitCode = try await launcher.launch(

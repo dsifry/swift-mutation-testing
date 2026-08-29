@@ -8,13 +8,19 @@ protocol XcodeCustodyPreservingLauncher {
 }
 
 struct XcodeProcessLauncher: Sendable, ProcessLaunching {
+    typealias EscapedDescendantGroups = @Sendable (Int32) throws -> [CustodiedProcessGroup]
+
     init(
         custody: ProcessCustody? = nil,
         captureRoot: URL? = nil,
-        terminalSummaryReader: (@Sendable (String, URL) async -> Int32?)? = nil
+        terminalSummaryReader: (@Sendable (String, URL) async -> Int32?)? = nil,
+        escapedDescendantGroups: @escaping EscapedDescendantGroups = {
+            try SystemProcessIdentity.escapedDescendantGroups(of: $0)
+        }
     ) {
         self.custody = custody
         self.captureRoot = captureRoot
+        self.escapedDescendantGroups = escapedDescendantGroups
         self.terminalSummaryReader = terminalSummaryReader ?? { path, directory in
             await XCResultTerminalSummaryReader(captureRoot: captureRoot).read(
                 path: path, workingDirectory: directory
@@ -24,6 +30,7 @@ struct XcodeProcessLauncher: Sendable, ProcessLaunching {
 
     private let custody: ProcessCustody?
     private let captureRoot: URL?
+    private let escapedDescendantGroups: EscapedDescendantGroups
     private let terminalSummaryReader: @Sendable (String, URL) async -> Int32?
 
     func launch(
@@ -78,7 +85,7 @@ struct XcodeProcessLauncher: Sendable, ProcessLaunching {
                 defer { escalation.begin(pid: pid) }
                 guard let custody else { return }
                 do {
-                    for group in try SystemProcessIdentity.escapedDescendantGroups(of: pid) {
+                    for group in try escapedDescendantGroups(pid) {
                         try custody.register(group)
                     }
                 } catch {
