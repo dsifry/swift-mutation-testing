@@ -292,6 +292,11 @@ final class ProcessCustody: @unchecked Sendable {
 }
 
 enum SystemProcessIdentity {
+    private struct ProcessRelationship {
+        let pid: Int32
+        let parentPID: Int32
+    }
+
     static func group(for pid: Int32, getGroup: (Int32) -> Int32 = { getpgid($0) }) throws -> CustodiedProcessGroup {
         guard let birth = birthIdentity(pid: pid) else {
             throw PreparedCacheError.unverifiableProcessIdentity
@@ -299,6 +304,42 @@ enum SystemProcessIdentity {
         let group = getGroup(pid)
         guard group > 0 else { throw PreparedCacheError.unverifiableProcessIdentity }
         return CustodiedProcessGroup(pid: pid, processGroupID: group, birthIdentity: birth)
+    }
+
+    static func escapedDescendantGroups(of pid: Int32) throws -> [CustodiedProcessGroup] {
+        let rootGroup = try group(for: pid)
+        let relationships = try processRelationships()
+        var knownAncestors: Set<Int32> = [pid]
+        var descendantPIDs: Set<Int32> = []
+        while true {
+            let next = Set(
+                relationships.compactMap { relationship in
+                    knownAncestors.contains(relationship.parentPID)
+                        && !knownAncestors.contains(relationship.pid)
+                        ? relationship.pid : nil
+                })
+            guard !next.isEmpty else { break }
+            descendantPIDs.formUnion(next)
+            knownAncestors.formUnion(next)
+        }
+
+        var groups: [Int32: CustodiedProcessGroup] = [:]
+        for descendantPID in descendantPIDs.sorted() {
+            let descendantGroup: CustodiedProcessGroup
+            do {
+                descendantGroup = try group(for: descendantPID)
+            } catch {
+                if errno == ESRCH { continue }
+                throw error
+            }
+            guard descendantGroup.processGroupID != rootGroup.processGroupID else { continue }
+            if groups[descendantGroup.processGroupID]?.pid != descendantGroup.processGroupID
+                || descendantGroup.pid == descendantGroup.processGroupID
+            {
+                groups[descendantGroup.processGroupID] = descendantGroup
+            }
+        }
+        return groups.values.sorted { $0.processGroupID < $1.processGroupID }
     }
 
     static func matchesOrIsAbsent(_ group: CustodiedProcessGroup) -> Bool {
@@ -335,6 +376,24 @@ enum SystemProcessIdentity {
             return nil
         }
         return "\(info.kp_proc.p_starttime.tv_sec):\(info.kp_proc.p_starttime.tv_usec)"
+    }
+
+    private static func processRelationships() throws -> [ProcessRelationship] {
+        var size = 0
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+        guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else {
+            throw PreparedCacheError.unverifiableProcessIdentity
+        }
+        let processSize = MemoryLayout<kinfo_proc>.stride
+        var processes = [kinfo_proc](repeating: kinfo_proc(), count: size / processSize)
+        guard sysctl(&mib, 4, &processes, &size, nil, 0) == 0 else {
+            throw PreparedCacheError.unverifiableProcessIdentity
+        }
+        return processes.prefix(size / processSize).compactMap { process in
+            let processID = process.kp_proc.p_pid
+            guard processID > 1 else { return nil }
+            return ProcessRelationship(pid: processID, parentPID: process.kp_eproc.e_ppid)
+        }
     }
 }
 

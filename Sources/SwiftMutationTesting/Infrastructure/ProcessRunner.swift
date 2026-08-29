@@ -260,7 +260,7 @@ struct ProcessRunner: Sendable {
                     terminalTask.cancel()
                     timeoutDidFinish(pid)
                     do {
-                        try postTerminationCleanup?(pid)
+                        if !killedByUs.value { try postTerminationCleanup?(pid) }
                         continuation.resume(returning: transform(
                             killedByUs.reconciled ?? (killedByUs.value ? -1 : status)
                         ))

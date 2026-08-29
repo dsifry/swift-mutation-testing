@@ -74,7 +74,17 @@ struct XcodeProcessLauncher: Sendable, ProcessLaunching {
                 try custody.register(SystemProcessIdentity.group(for: pid))
             },
             postTerminationCleanup: { pid in try custody?.unregister(pid: pid) },
-            onTimeout: { escalation.begin(pid: $0) },
+            onTimeout: { pid in
+                defer { escalation.begin(pid: pid) }
+                guard let custody else { return }
+                do {
+                    for group in try SystemProcessIdentity.escapedDescendantGroups(of: pid) {
+                        try custody.register(group)
+                    }
+                } catch {
+                    // The original launch group remains registered for explicit recovery.
+                }
+            },
             timeoutDidFinish: { escalation.cancel(pid: $0) },
             captureRoot: captureRoot
         )
