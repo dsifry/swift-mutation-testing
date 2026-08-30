@@ -62,6 +62,19 @@ struct PreparedBuildRecoveryTests {
         let runtime = try #require(possibleRuntime)
         defer { runtime.monitor.cancel() }
         #expect(PreparedBuildCoordinator.custodyIsQuiescent(runtime))
+        let completedTimedOutGroup = CustodiedProcessGroup(
+            pid: 2_000_000_000,
+            processGroupID: 2_000_000_000,
+            birthIdentity: "completed-timeout"
+        )
+        try runtime.custody.register(completedTimedOutGroup)
+        #expect(!PreparedBuildCoordinator.custodyIsQuiescent(runtime))
+        try PreparedBuildCoordinator.finishTargetCustody(runtime)
+        #expect(PreparedBuildCoordinator.custodyIsQuiescent(runtime))
+        #expect(
+            try ProcessCustody.readRegisteredGroups(
+                from: runtimeStore.directory.appendingPathComponent("process-custody.json")
+            ).isEmpty)
         #expect(runtimeCoordinator.activeRunRoot() == nil)
         #expect(runtimeCoordinator.commandLauncher(custodyRuntime: runtime) is XcodeProcessLauncher)
         let evidenceCoordinator = PreparedBuildCoordinator(

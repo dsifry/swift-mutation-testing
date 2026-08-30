@@ -788,6 +788,7 @@ struct PreparedBuildCoordinator: Sendable {
                 plist: plist
             )
         )
+        try Self.finishTargetCustody(custodyRuntime)
         try collectionLock.validateDirectoryIdentity()
         try lock.validateDirectoryIdentity()
         try recovery.recordMutationOrTestFailure()
@@ -982,6 +983,14 @@ struct PreparedBuildCoordinator: Sendable {
 
     static func requireCustodyQuiescence(_ runtime: CustodyRuntime?) throws {
         guard custodyIsQuiescent(runtime) else { throw PreparedCacheError.unverifiableProcessIdentity }
+    }
+
+    static func finishTargetCustody(_ runtime: CustodyRuntime?) throws {
+        guard let runtime else { return }
+        try runtime.monitor.checkFailure()
+        try runtime.custody.handleEngineTermination()
+        try runtime.monitor.checkFailure()
+        try requireCustodyQuiescence(runtime)
     }
 
     static func writeRecoveryEvidence(
